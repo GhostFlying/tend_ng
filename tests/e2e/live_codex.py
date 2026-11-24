@@ -116,9 +116,11 @@ def main():
                 rows = wait(lambda: cli("chat", "read", "image-smoke")["messages"],
                             lambda messages: any(x.get("artifacts") and x.get("reply_to") == graphic["message_id"]
                                                  for x in messages), 200)
-                [png] = [item for row in rows if row.get("reply_to") == graphic["message_id"]
-                         for item in row.get("artifacts", []) if item["name"] == "sample.png"]
-                assert cli("artifact", "download", png["id"], raw=True).startswith(b"\x89PNG\r\n\x1a\n")
+                png_ids = [item["id"] for row in rows if row.get("reply_to") == graphic["message_id"]
+                           for item in row.get("artifacts", []) if item["name"] == "sample.png"]
+                assert png_ids and len(png_ids) == len(set(png_ids))
+                for file_id in png_ids:
+                    assert cli("artifact", "download", file_id, raw=True).startswith(b"\x89PNG\r\n\x1a\n")
                 print("PASS actual native image_gen output returned through the assigned capability", flush=True)
         except BaseException:
             db_path = root / "server.sqlite"

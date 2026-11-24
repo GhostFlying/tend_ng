@@ -181,13 +181,17 @@ for line in sys.stdin:
             elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
                 assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
-                assert report["summary"] == "The requested guide is ready."
-                [file] = report["artifacts"]
-                assert file["name"] == "guide.txt"
-                case = {"answer": ("使用说明已整理好，包含环境准备和第一条运行命令。"
-                                   if report["original_request"] == WEB_REQUEST
-                                   else "The guide is ready. Download the attached guide.txt."),
-                        "drop_before_start": 1}
+                if report["summary"] == "The guide uses the repository's verified command.":
+                    assert report["artifacts"] == []
+                    case = {"answer": "I also verified the repository command."}
+                else:
+                    assert report["summary"] == "The requested guide is ready."
+                    [file] = report["artifacts"]
+                    assert file["name"] == "guide.txt"
+                    case = {"answer": ("使用说明已整理好，包含环境准备和第一条运行命令。"
+                                       if report["original_request"] == WEB_REQUEST
+                                       else "The guide is ready. Download the attached guide.txt."),
+                            "drop_before_start": 1}
             elif text.startswith("Storage measurement "):
                 case = {"answer": "Accepted."}
             else:

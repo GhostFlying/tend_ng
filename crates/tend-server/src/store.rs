@@ -197,7 +197,10 @@ impl Store {
             )?;
             tx.pragma_update(None, "user_version", 22)?;
         }
-        tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
+             CREATE INDEX IF NOT EXISTS chat_artifacts_by_file ON chat_artifacts(artifact_id, message_id);",
+        )?;
         tx.commit()?;
         Ok(store)
     }

@@ -79,6 +79,7 @@ def main():
     for executable in ("server", "cli", "runner"):
         parser.add_argument(executable, type=lambda value: Path(value).resolve())
     parser.add_argument("--web", action="store_true")
+    parser.add_argument("--repeat-report", action="store_true")
     args = parser.parse_args()
     env = {**os.environ, "TEND_TOKEN": "tend-delivery-fixture"}
 
@@ -143,6 +144,8 @@ def main():
                     process.wait(timeout=7)
 
         (root / "delegate-now").touch()
+        if args.repeat_report:
+            (root / "repeat-report").touch()
         web_dir = WEB_ROOT / "dist" if args.web else None
         hold = "这项工作现在到哪一步了？" if args.web else "Hold this turn."
         queued = "好，发我一份原文件就行。" if args.web else "Next input."
@@ -193,10 +196,18 @@ def main():
                 [result] = [message for message in page if message["text"] == answer]
                 assert result["author"] == "router" and result["reply_to"] == origin["message_id"]
                 assert result["artifacts"] == [{**work["artifacts"][0], "available": True}]
-                starts = sql("app", "SELECT input FROM start_requests ORDER BY rowid")
-                assert starts[-3] == (queued,) and starts[-2] == starts[-1]
-                assert starts[-1][0].startswith("Tend Issue report")
-                assert len(page) == 7, page
+                if args.repeat_report:
+                    supplement = "I also verified the repository command."
+                    page = wait_for(lambda: read("chat", "read", "main")["messages"],
+                                    lambda rows: any(message["text"] == supplement for message in rows))
+                    assert len(page) == 8, page
+                    assert sum(file["id"] == file_id for row in page for file in row.get("artifacts", [])) == 1
+                    assert sql("server", "SELECT count(*) FROM report_artifacts WHERE artifact_id = ?", file_id) == [(2,)]
+                else:
+                    starts = sql("app", "SELECT input FROM start_requests ORDER BY rowid")
+                    assert starts[-3] == (queued,) and starts[-2] == starts[-1]
+                    assert starts[-1][0].startswith("Tend Issue report")
+                    assert len(page) == 7, page
                 downloaded = cli("artifact", "download", file_id)
                 assert downloaded.returncode == 0 and downloaded.stdout == CONTENTS
                 assert uploads == [(f"/api/v1/runners/delivery-runner/artifacts/{file_id}", 200)]
@@ -232,7 +243,10 @@ def main():
             assert cli("artifact", "download", file_id).stdout == CONTENTS
             with sqlite3.connect(recovered / "server.sqlite") as db:
                 assert db.execute("SELECT count(*) FROM issue_inputs WHERE id = ?", [file_id]).fetchone() == (1,)
-    print("PASS offline file delivery, one Router report, and restoration by full Task reconciliation")
+    if args.repeat_report:
+        print("PASS two independent reports preserve their text and share one visible delivery")
+    else:
+        print("PASS offline file delivery, one Router report, and restoration by full Task reconciliation")
 
 
 if __name__ == "__main__":

@@ -86,3 +86,7 @@ SQLite 诊断样本发现 Chat 取写锁会出现数十毫秒延迟。HTTP 收�
 - **使用环境。** 使用真实 Codex 的验收在本机临时部署完成。实际 tailnet、服务账户的私有仓库只读权限和旧实例正式切换属于部署验收。首期协议从 v1 起步，升级窗口在 fixture 中用目标协议预检验证。
 
 固定入口在 `tests/e2e/`。局部复跑可选择 `external_wait.py --handoff`、`control.py`、`delivery.py --web`、`attention.py --web`、`external_routing.py` 或 `storage_load.py`，参数顺序为 Server、CLI 和 Runner 的构建产物。真实环境使用 `live_codex.py --codex-home`，常用启动配置见 [README](../../README.md)。
+
+## 同一话题的交付去重
+
+真实模型可针对一次任务提交多份有独立正文的报告。保存各份报告及原文件关联，在同一 Chat 原话题只呈现一次同一份原件的下载入口。不同原件保留各自的身份。固定 fixture 模拟两个不同的报告操作引用同一交付，核对所有正文都保留以及只出现一个下载入口。

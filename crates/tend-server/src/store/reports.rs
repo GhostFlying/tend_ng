@@ -104,10 +104,14 @@ pub fn context(
 ) -> Result<String> {
     let mut statement = db.prepare(
         "SELECT a.id, a.name, a.bytes FROM report_artifacts r
-         JOIN artifacts a ON a.id = r.artifact_id WHERE r.report_id = ?1 ORDER BY r.rowid",
+         JOIN artifacts a ON a.id = r.artifact_id WHERE r.report_id = ?1
+         AND NOT EXISTS (
+             SELECT 1 FROM chat_artifacts c JOIN chat_messages m ON m.id = c.message_id
+             WHERE c.artifact_id = r.artifact_id AND m.reply_to = ?2
+         ) ORDER BY r.rowid",
     )?;
     let files = statement
-        .query_map([report], |row| {
+        .query_map([report, original_message_id], |row| {
             Ok(json!({
                 "id": row.get::<_, String>(0)?,
                 "name": row.get::<_, String>(1)?,
@@ -138,7 +142,12 @@ pub fn attach(db: &Connection, message: &str, input: i64) -> Result<()> {
     db.execute(
         "INSERT INTO chat_artifacts (message_id, artifact_id)
          SELECT ?1, r.artifact_id FROM router_inputs i
-         JOIN report_artifacts r ON r.report_id = i.report_id WHERE i.seq = ?2",
+         JOIN chat_messages source ON source.seq = i.message_seq
+         JOIN report_artifacts r ON r.report_id = i.report_id WHERE i.seq = ?2
+         AND NOT EXISTS (
+             SELECT 1 FROM chat_artifacts c JOIN chat_messages m ON m.id = c.message_id
+             WHERE c.artifact_id = r.artifact_id AND m.reply_to = source.id
+         )",
         params![message, input],
     )?;
     Ok(())
@@ -153,7 +162,13 @@ pub fn chat_artifacts(
     let mut statement = db.prepare(
         "SELECT m.seq, a.id, a.name, a.bytes, a.available FROM chat_messages m
          JOIN chat_artifacts c ON c.message_id = m.id JOIN artifacts a ON a.id = c.artifact_id
-         WHERE m.chat_id = ?1 AND m.seq >= ?2 AND m.seq < ?3 ORDER BY m.seq, c.rowid",
+         WHERE m.chat_id = ?1 AND m.seq >= ?2 AND m.seq < ?3
+         AND NOT EXISTS (
+             SELECT 1 FROM chat_artifacts previous
+             JOIN chat_messages first ON first.id = previous.message_id
+             WHERE previous.artifact_id = c.artifact_id AND first.reply_to = m.reply_to AND first.seq < m.seq
+         )
+         ORDER BY m.seq, c.rowid",
     )?;
     let mut by_message = std::collections::HashMap::<_, Vec<_>>::new();
     for data in statement.query_map(params![chat, oldest, before], |row| {

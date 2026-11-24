@@ -300,6 +300,10 @@ else:
         args = {"summary": "The requested guide is ready.", "artifact_ids": [submitted["operation_id"]]}
         report = tool("tend_report_result", args, "report", "original-report")
         assert tool("tend_report_result", args, "replay-report", "original-report") == report
+        if (root / "repeat-report").exists():
+            supplemental = {**args, "summary": "The guide uses the repository's verified command."}
+            later = tool("tend_report_result", supplemental, "later-report", "later-report")
+            assert later["operation_id"] != report["operation_id"]
         (root / "read-delivery").touch()
         send({
             "method": "turn/completed",
