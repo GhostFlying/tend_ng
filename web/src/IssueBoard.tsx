@@ -150,9 +150,9 @@ export function IssueBoard({
         </p>
       )}
       {!page && !error && <p role="status">正在读取看板…</p>}
-      {page?.issues.length === 0 && <p>暂无 Issue</p>}
-      {page && page.issues.length > 0 && (
+      {page && (
         <>
+          {page.issues.length === 0 && <p>暂无 Issue</p>}
           <div className="board-columns">
             {columns.map(({ id, title }) => (
               <section

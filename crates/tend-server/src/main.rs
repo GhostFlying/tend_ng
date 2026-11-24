@@ -386,11 +386,11 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
             store::control::ResultState::Missing => store::control::ResultState::Missing,
         });
     }
-    if let Some(chat_id) = path
+    let issue_chat = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/issues"))
-        .filter(|id| protocol::valid_id(id))
-    {
+        .filter(|id| protocol::valid_id(id));
+    if path == protocol::ISSUE_BOARD_PATH || issue_chat.is_some() {
         if request.method() != &Method::Get {
             return Ok(api_error(405, "method not allowed"));
         }
@@ -399,7 +399,7 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
         };
         return Ok((
             200,
-            serde_json::to_value(store.issue_board(chat_id, before)?)?,
+            serde_json::to_value(store.issue_board(issue_chat, before)?)?,
         ));
     }
     if let Some(issue) = path

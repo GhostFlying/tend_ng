@@ -98,6 +98,8 @@ pub fn issue_pulls_path(issue: &str) -> String {
     format!("/api/v1/issues/{issue}/pulls")
 }
 
+pub const ISSUE_BOARD_PATH: &str = "/api/v1/issues";
+
 pub fn issue_board_path(chat: &str) -> String {
     format!("/api/v1/chats/{chat}/issues")
 }

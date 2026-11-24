@@ -133,7 +133,7 @@ export async function readIssueBoard(
   before: number | undefined,
   signal: AbortSignal,
 ) {
-  const path = "/api/v1/chats/main/issues";
+  const path = "/api/v1/issues";
   const url = before === undefined ? path : `${path}?before=${before}`;
   return (await request(token, url, { signal })).json() as Promise<BoardPage>;
 }

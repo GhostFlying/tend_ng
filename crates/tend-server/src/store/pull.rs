@@ -111,14 +111,15 @@ impl Store {
         ))
     }
 
-    pub fn issue_board(&self, chat: &str, before: i64) -> Result<IssueBoard> {
+    pub fn issue_board(&self, chat: Option<&str>, before: i64) -> Result<IssueBoard> {
         let tx = self.db.unchecked_transaction()?;
         let mut page = {
             let mut query = tx.prepare(
                 "SELECT i.rowid, i.id, i.parent_issue_id, i.title, i.state, t.status
                  FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
                  JOIN tasks t ON t.rowid = (SELECT rowid FROM tasks WHERE issue_id = i.id ORDER BY rowid DESC LIMIT 1)
-                 WHERE source.chat_id = ?1 AND i.rowid < ?2 ORDER BY i.rowid DESC LIMIT ?3",
+                 WHERE (?1 IS NULL OR source.chat_id = ?1) AND i.rowid < ?2
+                 ORDER BY i.rowid DESC LIMIT ?3",
             )?;
             query
                 .query_map(params![chat, before, PAGE_SIZE + 1], |row| {

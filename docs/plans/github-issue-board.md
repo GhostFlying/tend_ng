@@ -9,9 +9,13 @@ Server 使用服务用户的只读 GitHub 权限。外部查询以关联或明�
 - Web 看板参照旧 Tend 的状态列和紧凑卡片，直接显示关联 PR 链接及已保存的状态。CLI 和 Web 调用同一分页 API。看板仅在 Server SQLite 中读取当页 Issue、当前 Task 和批量关联。运行中的工作和已结束的 Issue 分别呈现。
 - 用固定 GitHub CLI 响应、真实 Server 和 Runner 验证显式登记、同一 PR 在两个 Issue 间共享观测、失败读取降级和旧库迁移。浏览器验证卡片链接、移动端排版和查看 Issue 的路径。
 
+## 全局看板与空状态
+
+看板显示所有对话中的 Issue，通过 `GET /api/v1/issues` 读取分页卡片和当页 PR 关联。CLI 用 `tend issue list` 打开同一列表，用 `tend issue list <chat-id>` 按对话查询。Router 在自己的对话范围内读取工作。看板在空库时仍显示三列和空状态。验证不同对话的卡片、既有按对话查询、分页，以及桌面和窄屏的空状态及卡片链接。
+
 ## 启动与验证
 
-Server 默认在 PATH 中找 `gh`。使用 Server 服务用户的 `gh` 登录，或从该进程环境提供有只读权限的 `GH_TOKEN`。Runner 继续使用各自的仓库权限。CLI 用 `tend pr link <issue-id> <url>` 写入关联，用 `tend pr list <issue-id>` 和 `tend issue list main` 查看。 [GitHub CLI 配置](https://cli.github.com/manual/gh_help_environment)
+Server 默认在 PATH 中找 `gh`。使用 Server 服务用户的 `gh` 登录，或从该进程环境提供有只读权限的 `GH_TOKEN`。Runner 继续使用各自的仓库权限。CLI 用 `tend pr link <issue-id> <url>` 写入关联，用 `tend pr list <issue-id>` 和 `tend issue list` 查看。 [GitHub CLI 配置](https://cli.github.com/manual/gh_help_environment)
 
 ```sh
 cargo build --locked

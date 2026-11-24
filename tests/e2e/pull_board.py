@@ -54,6 +54,7 @@ def main():
         with server(args.server, root, server_env, listen=address,
                     web_dir=WEB / "dist" if args.web else None, github_cli=TESTS / "fixtures/github_cli.py"):
             assert calls() == []
+            assert cli("issue", "list") == {"issues": [], "next_before": None}
             runner = subprocess.Popen([
                 args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
                 "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py",
@@ -103,12 +104,19 @@ def main():
                 assert observed["observed_at"] == latest["observed_at"]
                 assert links(parent)[PULL] == observed
                 assert calls().count("73") == 2
+                cli("chat", "send", "another-chat", "顺带准备另一个仓库的发布记录。")
+                [other] = wait_for(lambda: cli("issue", "list", "another-chat")["issues"], bool)
+                assert other["title"] == "整理发布记录"
+                assert other["task_state"] == "awaiting_assignment"
+                assert {item["id"] for item in cli("issue", "list")["issues"]} == {
+                    parent, child, other["id"],
+                }
+                assert {item["id"] for item in cli("issue", "list", "main")["issues"]} == {parent, child}
+                assert cli("issue", "list", "--all")["issues"] == []
+                with sqlite3.connect(root / "server.sqlite") as database:
+                    before, = database.execute("SELECT rowid FROM issues WHERE id = ?", [other["id"]]).fetchone()
+                assert {item["id"] for item in cli("issue", "list", "--scope=all", str(before))["issues"]} == {parent, child}
                 if args.web:
-                    cli("chat", "send", "main", "顺带准备另一个仓库的发布记录。")
-                    wait_for(lambda: cli("issue", "list", "main")["issues"],
-                             lambda issues: any(item["title"] == "整理发布记录" and
-                                                item["task_state"] == "awaiting_assignment"
-                                                for item in issues))
                     subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=40, env=env)
             finally:
                 runner.terminate()

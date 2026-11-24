@@ -51,7 +51,18 @@ try {
     }
     await card.getByRole("link", { name: "核对安装步骤" }).click();
     await page.getByRole("heading", { name: "核对安装步骤" }).waitFor();
+    await page.route("**/api/v1/issues", (route) =>
+      route.fulfill({ json: { issues: [], next_before: null } }),
+    );
+    await page.goto(`${url}/issues`);
+    await page.getByText("暂无 Issue", { exact: true }).waitFor();
+    assert.deepEqual(await page.locator(".board-column h2").allTextContents(), [
+      "待推进",
+      "进行中",
+      "已结束",
+    ]);
     assert.deepEqual(errors, []);
+    await page.close();
   }
   console.log(
     "PASS read-only Issue board and PR links in Chromium on desktop and mobile",

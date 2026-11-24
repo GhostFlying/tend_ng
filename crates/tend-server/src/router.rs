@@ -345,7 +345,7 @@ impl TurnHandler for DispatchHandler<'_> {
                     return Ok(tool_error("Cannot verify the current Chat"));
                 };
                 if call.tool == "tend_list_issues" {
-                    let page = self.store.issue_board(&chat, i64::MAX)?;
+                    let page = self.store.issue_board(Some(&chat), i64::MAX)?;
                     return Ok(ToolOutput {
                         success: true,
                         body: serde_json::to_value(page)?,
