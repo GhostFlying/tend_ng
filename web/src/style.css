@@ -589,10 +589,6 @@ a {
   font-size: 12px;
 }
 
-.mobile-board-link {
-  display: none;
-}
-
 .board {
   --board-secondary: rgba(15, 17, 21, 0.72);
   --board-tertiary: rgba(15, 17, 21, 0.52);
@@ -836,10 +832,6 @@ a {
 }
 
 @media (max-width: 760px) {
-  .mobile-board-link {
-    display: block;
-  }
-
   .board {
     overflow: auto;
     padding: 0 16px 20px;

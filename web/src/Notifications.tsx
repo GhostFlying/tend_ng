@@ -1,4 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { readNotifications } from "./api";
 import type { Activity, NotificationPage } from "./api";
 
@@ -100,8 +101,15 @@ function ActivityList({ token }: { token: string }) {
   );
 }
 
-export function Notifications({ token }: { token: string }) {
+export function Notifications({
+  token,
+  mobileIcon,
+}: {
+  token: string;
+  mobileIcon?: ReactNode;
+}) {
   const [open, setOpen] = useState(false);
+  const panelId = useId();
   const focusBefore = useRef<HTMLElement | null>(null);
 
   function close() {
@@ -113,9 +121,9 @@ export function Notifications({ token }: { token: string }) {
     <>
       <button
         type="button"
-        className="text-button"
+        className={mobileIcon ? "phone-item" : "text-button"}
         aria-expanded={open}
-        aria-controls={open ? "notifications" : undefined}
+        aria-controls={open ? panelId : undefined}
         onPointerDown={() => {
           if (!open && document.activeElement instanceof HTMLElement) {
             focusBefore.current = document.activeElement;
@@ -127,11 +135,12 @@ export function Notifications({ token }: { token: string }) {
           setOpen(true);
         }}
       >
+        {mobileIcon}
         通知
       </button>
       {open && (
         <section
-          id="notifications"
+          id={panelId}
           className="notifications"
           aria-label="工作通知"
           onKeyDown={(event) => {

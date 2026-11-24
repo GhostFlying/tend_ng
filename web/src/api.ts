@@ -5,6 +5,47 @@ export type Artifact = {
   available: boolean;
 };
 
+export type AgentProfile = {
+  id: string;
+  category: string;
+  revision: string;
+  model: string | null;
+  reasoning_effort: string | null;
+  app_server?: string;
+  description?: string;
+  capabilities: string[];
+};
+
+export type RunnerInstance = {
+  profile: {
+    host_id: string;
+    runner_id: string;
+    agents: AgentProfile[];
+    repos: string[];
+    running_slots: number;
+    slot_limit: number;
+    available_for_assignment: number;
+    standby?: boolean;
+  };
+  protocol: number;
+  online: boolean;
+  last_seen: number;
+  successor: string | null;
+  drained_at: number | null;
+  retired_at: number | null;
+};
+
+export type AgentDirectory = {
+  router: Pick<AgentProfile, "id" | "model" | "reasoning_effort">;
+  runners: RunnerInstance[];
+  activity: {
+    runner_id: string;
+    agent_id: string;
+    revision: string;
+    running: number;
+  }[];
+};
+
 export type PullLink = {
   url: string;
   number: number;
@@ -168,6 +209,18 @@ export async function readNotifications(
   return (
     await request(token, url, { signal })
   ).json() as Promise<NotificationPage>;
+}
+
+export async function readRunners(token: string, signal: AbortSignal) {
+  return (
+    await request(token, "/api/v1/runners", { signal })
+  ).json() as Promise<RunnerInstance[]>;
+}
+
+export async function readAgents(token: string, signal: AbortSignal) {
+  return (
+    await request(token, "/api/v1/agents", { signal })
+  ).json() as Promise<AgentDirectory>;
 }
 
 export async function sendMessage(

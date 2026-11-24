@@ -108,6 +108,8 @@ fn main() -> Result<()> {
     thread::spawn(move || schedule(placement));
     github::spawn(Store::open(&db)?, github_cli.clone());
     github::spawn_discovery(Store::open(&db)?, github_cli);
+    let router_profile =
+        json!({"id": "router", "model": &router_model, "reasoning_effort": &router_effort});
     router::spawn(router::Config {
         db,
         cwd,
@@ -163,7 +165,7 @@ fn main() -> Result<()> {
             }
             continue;
         } else {
-            handle(&mut store, &mut request).unwrap_or_else(|error| {
+            handle(&mut store, &mut request, &router_profile).unwrap_or_else(|error| {
                 eprintln!("User API failed: {error:#}");
                 api_error(500, "Server could not process the request")
             })
@@ -205,7 +207,7 @@ fn authenticated(request: &Request, auth: &str) -> bool {
         .any(|header| header.field.equiv("Authorization") && header.value.as_str() == auth)
 }
 
-fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
+fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
@@ -264,6 +266,9 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
     }
     if path == "/api/v1/runners" && request.method() == &Method::Get {
         return Ok((200, serde_json::to_value(store.runner_instances()?)?));
+    }
+    if path == "/api/v1/agents" && request.method() == &Method::Get {
+        return Ok((200, store.agent_directory(router)?));
     }
     if let Some(version) = path
         .strip_prefix("/api/v1/upgrade-check/")

@@ -5,9 +5,25 @@ import { readMessages } from "./api";
 import { IssueBoard } from "./IssueBoard";
 import { Chat } from "./Chat";
 import { Notifications } from "./Notifications";
+import { Agents, Hosts } from "./Resources";
+import {
+  MoreResources,
+  NavIcon,
+  PhoneNavigation,
+  resourceLinks,
+} from "./ResourceNavigation";
 import "./style.css";
 
-const board = window.location.pathname === "/issues";
+const path = window.location.pathname;
+const board = path === "/issues";
+const resourceTitle =
+  path === "/agents"
+    ? "Agents"
+    : path === "/hosts"
+      ? "执行主机"
+      : path === "/more"
+        ? "更多"
+        : "";
 const tokenKey = "tend.token.v1";
 const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
 const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
@@ -103,19 +119,12 @@ function App() {
           <nav aria-label="主导航">
             <a
               href="/"
-              aria-current={issue || board ? undefined : "page"}
+              aria-current={
+                issue || board || resourceTitle ? undefined : "page"
+              }
               aria-label="对话"
             >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              >
-                <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5z" />
-              </svg>
+              <NavIcon name="chat" />
               <span>对话</span>
             </a>
             <a
@@ -123,24 +132,32 @@ function App() {
               aria-current={board ? "page" : undefined}
               aria-label="看板"
             >
-              <svg
-                aria-hidden="true"
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.5"
-                strokeLinejoin="round"
-              >
-                <rect x="3.5" y="4.5" width="13" height="11" rx="1.5" />
-                <path d="M8 5v10M12.25 5v10" />
-              </svg>
+              <NavIcon name="board" />
               <span>看板</span>
             </a>
+            <div className="resource-nav">
+              <h2>资源</h2>
+              {resourceLinks.map(({ href, label, icon }) => (
+                <a
+                  key={href}
+                  href={href}
+                  aria-label={label}
+                  aria-current={path === href ? "page" : undefined}
+                >
+                  <NavIcon name={icon} />
+                  <span>{label}</span>
+                </a>
+              ))}
+            </div>
           </nav>
         </aside>
       )}
       <div className="content">
-        <header className="header">
+        <header
+          className={
+            token && resourceTitle ? "header resource-header" : "header"
+          }
+        >
           {token && issue ? (
             <div className="issue-heading">
               <a href="/" className="text-button">
@@ -150,16 +167,12 @@ function App() {
               <h1>{title || "Issue 对话"}</h1>
             </div>
           ) : (
-            <h1>{board && token ? "Issue 看板" : "Tend"}</h1>
+            <h1>
+              {(token && (resourceTitle || (board && "Issue 看板"))) || "Tend"}
+            </h1>
           )}
-          {token && (
+          {token && !resourceTitle && (
             <div className="header-actions">
-              <a
-                className="text-button mobile-board-link"
-                href={board ? "/" : "/issues"}
-              >
-                {board ? "对话" : "看板"}
-              </a>
               <Notifications token={token} />
               <button
                 type="button"
@@ -174,6 +187,12 @@ function App() {
         {token ? (
           board ? (
             <IssueBoard token={token} onReachable={setReachable} />
+          ) : path === "/agents" ? (
+            <Agents token={token} onReachable={setReachable} />
+          ) : path === "/hosts" ? (
+            <Hosts token={token} onReachable={setReachable} />
+          ) : path === "/more" ? (
+            <MoreResources disconnect={disconnect} />
           ) : (
             <Chat
               token={token}
@@ -185,6 +204,13 @@ function App() {
           )
         ) : (
           <Connect onConnect={connect} />
+        )}
+        {token && (
+          <PhoneNavigation
+            token={token}
+            resource={!!resourceTitle}
+            board={board || !!issue}
+          />
         )}
       </div>
     </div>

@@ -6,11 +6,11 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue start <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue start <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend agent list\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
-    if args == ["runner", "list"] {
+    if args == ["runner", "list"] || args == ["agent", "list"] {
         args.push("all".to_owned());
     }
     if args == ["issue", "list"] {
@@ -45,6 +45,7 @@ fn main() -> Result<()> {
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
+        ("agent", "list") => "/api/v1/agents".to_owned(),
         ("agent", "candidates") => "/api/v1/agent-candidates".to_owned(),
         ("runner", "list") => "/api/v1/runners".to_owned(),
         ("runner", "replace" | "retire") => format!("/api/v1/runners/{id}/{command}"),
@@ -113,7 +114,9 @@ fn main() -> Result<()> {
             };
             println!("{page}");
         }
-        ("runner", "list", []) | ("server", "upgrade-check", []) | ("workspace", "status", []) => {
+        ("agent" | "runner", "list", [])
+        | ("server", "upgrade-check", [])
+        | ("workspace", "status", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;
             io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }

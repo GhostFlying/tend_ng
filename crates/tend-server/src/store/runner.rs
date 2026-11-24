@@ -9,7 +9,7 @@ use protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-const FRESH_SECONDS: i64 = 15;
+pub(super) const FRESH_SECONDS: i64 = 15;
 const RESERVATION_SECONDS: i64 = 10;
 const HEARTBEAT_WRITE_SECONDS: i64 = 3;
 const PAGE_SIZE: usize = protocol::RUNNER_SYNC_BATCH;

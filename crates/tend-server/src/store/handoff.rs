@@ -146,16 +146,37 @@ impl Store {
 
     pub fn runner_instances(&self) -> Result<Vec<Value>> {
         let mut query = self.db.prepare(
-            "SELECT r.profile, r.protocol, r.last_seen, p.successor, p.drained_at, p.retired_at
+            "SELECT r.profile, r.protocol, r.last_seen, p.successor, p.drained_at, p.retired_at,
+                    r.last_seen > unixepoch() - ?1
              FROM runners r LEFT JOIN runner_replacements p ON p.predecessor = r.id ORDER BY r.host_id, r.id",
         )?;
-        query.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?,
-            row.get::<_, Option<String>>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?)))?
+        query.query_map([super::runner::FRESH_SECONDS], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?,
+            row.get::<_, Option<String>>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, bool>(6)?)))?
             .map(|entry| {
-                let (profile, protocol, last_seen, successor, drained_at, retired_at) = entry?;
+                let (profile, protocol, last_seen, successor, drained_at, retired_at, online) = entry?;
                 Ok(json!({"profile":serde_json::from_str::<Value>(&profile)?, "protocol":protocol,
-                          "last_seen":last_seen,"successor":successor,"drained_at":drained_at,"retired_at":retired_at}))
+                          "last_seen":last_seen,"online":online,"successor":successor,"drained_at":drained_at,"retired_at":retired_at}))
             }).collect()
+    }
+
+    pub fn agent_directory(&self, router: &Value) -> Result<Value> {
+        let tx = self.db.unchecked_transaction()?;
+        let runners = self.runner_instances()?;
+        let activity = {
+            let mut query = tx.prepare(
+                "SELECT a.runner_id, json_extract(a.contract, '$.placement.agent.id'),
+                        json_extract(a.contract, '$.placement.agent.revision'), count(*)
+                 FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
+                 WHERE t.status = 'running'
+                 GROUP BY 1, 2, 3",
+            )?;
+            query.query_map([], |row| {
+                Ok(json!({"runner_id": row.get::<_, String>(0)?, "agent_id": row.get::<_, String>(1)?,
+                          "revision": row.get::<_, String>(2)?, "running": row.get::<_, u32>(3)?}))
+            })?.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        tx.commit()?;
+        Ok(json!({"router": router, "runners": runners, "activity": activity}))
     }
 
     pub fn retire_runner(&self, runner: &str) -> Result<bool> {

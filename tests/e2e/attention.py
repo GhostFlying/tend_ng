@@ -101,6 +101,13 @@ def main():
                                    lambda issue: issue["status"] == "running")
                 [card] = read("issue", "list", "--scope=roots")["issues"]
                 assert card["id"] == parent and card["stage"] == "in_progress" and card["running"] > 0
+                placement = initial["placement"]
+                assert {
+                    "runner_id": placement["runner_id"],
+                    "agent_id": placement["agent"]["id"],
+                    "revision": placement["agent"]["revision"],
+                    "running": 1,
+                } in read("agent", "list")["activity"]
             (root / "ask-now").touch()
             wait_for(lambda: sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?",
                                  initial["task_id"]), lambda rows: rows == [("waiting",)])
