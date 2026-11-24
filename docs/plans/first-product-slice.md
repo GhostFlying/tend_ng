@@ -135,10 +135,19 @@ python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target
 
 ### 纯文本 Web Chat
 
-- 参考旧 Tend 的单列对话和底部编辑框，首屏只呈现主 Chat、连接操作、历史消息和文件下载。设计稿用白底、约 800 px 的居中阅读列、左侧 Tend 回复、右侧用户消息和深色发送按钮。窄屏保留单列和底部编辑框。
+- 以旧 Tend 部署中的「对话」为样式参考。宽屏沿用 288 px 边栏、52 px 顶栏、760 px 对话列与底部编辑框，以及旧版的系统字体、明暗配色和发送键。窄屏对话占满宽度，发送键保留 44 px 的触控面积。首屏提供主 Chat、连接、历史消息和文件下载。
 - Web 通过同源 API 连接，首次输入预共享 token，当前浏览器标签页保留连接。每次发送在本机生成操作 ID，恢复失败后用原 ID 重试。定期读取完整消息，支持向上翻页。交付文件走同一个已鉴权下载接口。
 - Server 可通过 `--web-dir web/dist` 提供构建产物。开发环境用 Vite 代理到本机 Server。沿用 Node 24、pnpm 10、React、TypeScript、Vite 及旧 Tend 的验证工具。
 - 用真实 Server、Runner、工作区和固定 Agent 输出，从浏览器发消息并下载原件。核对宽屏和窄屏、连接和收件失败提示、刷新后回复仍在原 Chat。
+
+在 devcontainer 构建 Web 后运行以下验收。浏览器环境首次安装时用 `pnpm --dir web exec playwright install --with-deps chromium`。 [桌面实际渲染](images/chat-1440.png) · [窄屏实际渲染](images/chat-390.png)
+
+```sh
+pnpm --dir web install --frozen-lockfile
+pnpm --dir web build
+cargo build --locked
+python3 tests/e2e/delivery.py target/debug/tend-server target/debug/tend target/debug/tend-runner --web
+```
 
 ## 最少验收
 

@@ -18,11 +18,12 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "chat_app_server.py
 
 
 @contextmanager
-def server(binary, root, env, listen="127.0.0.1:0"):
+def server(binary, root, env, listen="127.0.0.1:0", web_dir=None):
+    web = ["--web-dir", web_dir] if web_dir is not None else []
     process = subprocess.Popen(
         [
             binary, "--db", root / "server.sqlite", "--listen", listen,
-            "--router-cwd", root, "--app-server", sys.executable,
+            "--router-cwd", root, *web, "--app-server", sys.executable,
             FIXTURE, root / "app.sqlite",
         ],
         stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,

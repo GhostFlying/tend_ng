@@ -16,6 +16,8 @@ import threading
 from chat import server, wait_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
+WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
+WEB_ANSWER = "使用说明已整理好，包含环境准备和第一条运行命令。"
 CONTENTS = b"A fixture guide.\n" * 32768
 
 
@@ -76,6 +78,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for executable in ("server", "cli", "runner"):
         parser.add_argument(executable, type=lambda value: Path(value).resolve())
+    parser.add_argument("--web", action="store_true")
     args = parser.parse_args()
     env = {**os.environ, "TEND_TOKEN": "tend-delivery-fixture"}
 
@@ -112,6 +115,12 @@ def main():
             result.check_returncode()
             return json.loads(result.stdout)
 
+        def browser(mode):
+            return subprocess.check_output(
+                ["node", WEB_ROOT / "tests" / "chat.mjs", mode],
+                env={**env, "TEND_URL": f"http://{address}"}, text=True, timeout=35,
+            )
+
         def sql(db, statement, *values):
             with sqlite3.connect(root / f"{db}.sqlite") as connection:
                 return connection.execute(statement, values).fetchall()
@@ -134,11 +143,14 @@ def main():
                     process.wait(timeout=7)
 
         (root / "delegate-now").touch()
+        web_dir = WEB_ROOT / "dist" if args.web else None
+        hold = "这项工作现在到哪一步了？" if args.web else "Hold this turn."
+        queued = "好，发我一份原文件就行。" if args.web else "Next input."
         recovered = root / "recovered"
         recovered.mkdir()
         with runner(address):
-            with server(args.server, root, env, listen=address):
-                origin = read("chat", "send", "main", "Dispatch from Chat.")
+            with server(args.server, root, env, listen=address, web_dir=web_dir):
+                origin = json.loads(browser("send")) if args.web else read("chat", "send", "main", "Dispatch from Chat.")
                 messages = wait_for(lambda: read("chat", "read", "main")["messages"], lambda rows: len(rows) == 2)
                 [parent] = messages[0]["issue_ids"]
                 wait_for(lambda: (root / "delegation.json").is_file(), bool)
@@ -155,7 +167,7 @@ def main():
             original = root / "runner.runs" / "workspaces" / parent / "repos" / "example" / "guide.txt"
             assert original.read_text() == "A later edit to the workspace file.\n"
 
-        with server(args.server, root, env, listen=address), hold_upload(address) as (proxy, release, uploads):
+        with server(args.server, root, env, listen=address, web_dir=web_dir), hold_upload(address) as (proxy, release, uploads):
             with runner(proxy):
                 wait_for(lambda: list((root / "server.artifacts").glob("*.part")), bool)
                 work = wait_for(lambda: read("issue", "read", child), lambda view: view["status"] == "completed")
@@ -166,23 +178,23 @@ def main():
                 read("chat", "send", "other", "Hello, Tend.")
                 wait_for(lambda: read("chat", "read", "other")["messages"], lambda rows: len(rows) == 2)
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")
-                read("chat", "send", "main", "Hold this turn.")
-                wait_for(lambda: sql("app", "SELECT 1 FROM start_requests WHERE input = 'Hold this turn.'"), bool)
+                read("chat", "send", "main", hold)
+                wait_for(lambda: sql("app", "SELECT 1 FROM start_requests WHERE input = ?", hold), bool)
                 release.set()
                 wait_for(lambda: (root / "read-delivery").exists(), bool)
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")
                 wait_for(lambda: sql("server", "SELECT seq FROM router_inputs "
                                                "WHERE report_id IS NOT NULL AND outcome IS NULL"), bool)
-                read("chat", "send", "main", "Next input.")
+                read("chat", "send", "main", queued)
                 (root / "app.release").touch()
-                answer = "The guide is ready. Download the attached guide.txt."
+                answer = WEB_ANSWER if args.web else "The guide is ready. Download the attached guide.txt."
                 page = wait_for(lambda: read("chat", "read", "main")["messages"],
                                 lambda rows: any(message["text"] == answer for message in rows))
                 [result] = [message for message in page if message["text"] == answer]
                 assert result["author"] == "router" and result["reply_to"] == origin["message_id"]
                 assert result["artifacts"] == [{**work["artifacts"][0], "available": True}]
                 starts = sql("app", "SELECT input FROM start_requests ORDER BY rowid")
-                assert starts[-3] == ("Next input.",) and starts[-2] == starts[-1]
+                assert starts[-3] == (queued,) and starts[-2] == starts[-1]
                 assert starts[-1][0].startswith("Tend Issue report")
                 assert len(page) == 7, page
                 downloaded = cli("artifact", "download", file_id)
@@ -197,6 +209,8 @@ def main():
                 wait_for(lambda: sql("runner", "SELECT 1 FROM run_outbox WHERE acknowledged = 0 LIMIT 1"),
                          lambda rows: not rows)
             assert cli("artifact", "download", file_id).stdout == CONTENTS
+            if args.web:
+                print(browser("read").strip())
         with server(args.server, recovered, env, listen=address):
             assert read("issue", "read", child)["status"] == "running"
 

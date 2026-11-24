@@ -6,6 +6,10 @@ import uuid
 from pathlib import Path
 
 cases = json.loads(Path(__file__).with_name("chat.json").read_text())
+WEB_REQUEST = "在示例仓库整理一份使用说明，完成后把文件和简短结论发回来。"
+cases[WEB_REQUEST] = {"dispatch": True}
+cases["这项工作现在到哪一步了？"] = {"answer": "负责的 Agent 已经整理完使用说明，文件正在同步。", "wait": True}
+cases["好，发我一份原文件就行。"] = {"answer": "收到。文件同步后，我会把下载入口发到这里。"}
 database = sqlite3.connect(sys.argv[1], timeout=5)
 database.executescript("""
     CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, tools TEXT NOT NULL);
@@ -123,11 +127,13 @@ for line in sys.stdin:
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
             if text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
-                assert report["original_request"] == "Dispatch from Chat."
+                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
                 assert report["summary"] == "The requested guide is ready."
                 [file] = report["artifacts"]
                 assert file["name"] == "guide.txt"
-                case = {"answer": "The guide is ready. Download the attached guide.txt.",
+                case = {"answer": ("使用说明已整理好，包含环境准备和第一条运行命令。"
+                                   if report["original_request"] == WEB_REQUEST
+                                   else "The guide is ready. Download the attached guide.txt."),
                         "drop_before_start": 1}
             else:
                 case = cases[text]
@@ -168,7 +174,9 @@ for line in sys.stdin:
                     )
                     assert confirmed == receipt, (confirmed, receipt)
                     dispatch(thread_id, turn_id, params["clientUserMessageId"], remaining=True)
-                answer = f"Issue {receipt['issue_id']} is waiting for assignment."
+                answer = ("我已把这项工作交给负责的 Agent。整理好后，我会把文件发回这里。"
+                          if text == WEB_REQUEST
+                          else f"Issue {receipt['issue_id']} is waiting for assignment.")
             else:
                 answer = case["answer"]
             turn = {

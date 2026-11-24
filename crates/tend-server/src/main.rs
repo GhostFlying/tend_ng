@@ -1,6 +1,7 @@
 mod artifacts;
 mod router;
 mod store;
+mod web;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use protocol::{
@@ -20,7 +21,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--web-dir <dist-dir>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -28,6 +29,7 @@ fn main() -> Result<()> {
     let mut db = None;
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut cwd = env::current_dir()?;
+    let mut web_dir = None;
     let mut program = OsString::from("codex");
     let mut app_args = ["app-server", "--listen", "stdio://"]
         .map(OsString::from)
@@ -44,6 +46,14 @@ fn main() -> Result<()> {
             }
             Some("--router-cwd") => {
                 cwd = PathBuf::from(args.next().context("--router-cwd needs a directory")?)
+            }
+            Some("--web-dir") => {
+                let directory = PathBuf::from(args.next().context("--web-dir needs a directory")?);
+                ensure!(
+                    directory.join("index.html").is_file(),
+                    "--web-dir needs a built Web app"
+                );
+                web_dir = Some(directory.canonicalize()?);
             }
             Some("--app-server") => {
                 program = args.next().context("--app-server needs a program")?;
@@ -79,6 +89,14 @@ fn main() -> Result<()> {
     eprintln!("Tend Server listening on {}", server.server_addr());
 
     for mut request in server.incoming_requests() {
+        if let Some(root) = &web_dir
+            && let Some(response) = web::asset(root, &request)
+        {
+            if let Err(error) = request.respond(response) {
+                eprintln!("Send Web asset: {error}");
+            }
+            continue;
+        }
         let (status, body) = if !authenticated(&request, &auth) {
             api_error(401, "valid Tend token required")
         } else if let Some(endpoint) = artifacts::Endpoint::parse(request.url()) {
