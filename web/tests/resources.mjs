@@ -28,11 +28,20 @@ try {
     await workers.first().waitFor();
     assert.equal(await workers.count(), 3);
     const search = page.getByRole("searchbox", { name: "搜索名称或 ID" });
+    const category = page.getByLabel("类别筛选");
+    assert.equal(
+      await category.locator('option[value="implementation"]').textContent(),
+      "implementation",
+    );
+    await category.selectOption("implementation");
     await search.fill("worker");
     assert.equal(await page.locator("button.agent-row").count(), 3);
     await page.getByLabel("运行位置或方式筛选").selectOption("host:demo-host");
     assert.equal(await workers.count(), 2);
     const chosen = workers.filter({ hasText: "current-runner" });
+    await chosen
+      .getByText(width === 390 ? /^implementation ·/ : /^implementation$/)
+      .waitFor();
     await chosen.click();
     const inspector = page.locator(
       ".agent-inspector:visible, .agent-standalone:visible",
@@ -41,6 +50,7 @@ try {
       .getByRole("heading", { name: "worker", exact: true })
       .waitFor();
     await inspector.getByText("image_gen", { exact: true }).waitFor();
+    await inspector.getByText("implementation", { exact: true }).waitFor();
     if (width === 390) {
       await page.getByRole("button", { name: /返回列表/ }).click();
       assert.equal(await search.inputValue(), "worker");
@@ -49,7 +59,8 @@ try {
     await page.getByRole("tab", { name: "Categories", exact: true }).click();
     await page
       .getByRole("tabpanel", { name: "Categories" })
-      .getByText("implementation-economy", { exact: true })
+      .locator("strong")
+      .filter({ hasText: /^implementation-economy$/ })
       .waitFor();
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth),

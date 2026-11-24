@@ -232,8 +232,7 @@
   font-weight: 500;
 }
 
-.agent-identity small,
-.agent-category-row small {
+.agent-identity small {
   display: block;
   color: var(--resource-tertiary);
   font-size: 12px;

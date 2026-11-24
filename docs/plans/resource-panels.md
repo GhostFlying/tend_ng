@@ -2,7 +2,7 @@
 
 以旧 Tend 主干 `83bc15ae` 的 Agents 目录、执行主机列表、详情和导航为参考。桌面侧栏的资源区链接到 `/agents` 和 `/hosts`，手机经底部「更多」进入。沿用目录筛选栏、六列列表、宽屏右侧检查面板、窄屏独立详情页、主机两行列表和主机详情弹窗。
 
-Agents 与 Categories 展示 Server 的 Router 和 Runner 上报的具名配置。按名称、类别、位置及运行方式筛选。Runner Agent 的运行数量来自匹配原 Runner、Agent ID 和配置版本的已知运行 Task。Router 显示实际配置，活动和健康沿已观测证据展示。首期按现有 Runner 槽位和具名 Agent 数据展示资源。
+Agents 与 Categories 展示 Server 的 Router 和 Runner 上报的具名配置。按名称、类别、位置及运行方式筛选。列表、详情、筛选项与类别目录直接显示配置中的 category ID，并通过桌面和手机浏览器用例验证。Runner Agent 的运行数量来自匹配原 Runner、Agent ID 和配置版本的已知运行 Task。Router 显示实际配置，活动和健康沿已观测证据展示。首期按现有 Runner 槽位和具名 Agent 数据展示资源。
 
 执行主机按 `host_id` 聚合，详情逐个展示 Runner ID、心跳、协议、槽位、仓库和接替状态。在线状态采用 Server 的心跳窗口。离线时保留最后收到的容量和配置。Web 与 CLI 共用已鉴权的只读接口。部署不迁移数据库。
 

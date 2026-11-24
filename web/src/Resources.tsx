@@ -45,25 +45,21 @@ function useResource<T>(
 const categories = [
   {
     id: "issue-router",
-    title: "Issue 协调",
     description: "拆分、委派并汇总顶层 Issue。",
   },
   {
     id: "implementation",
-    title: "实施",
     description: "实现并验证工作子 Issue。",
   },
   {
     id: "implementation-economy",
-    title: "轻量实施",
     description: "实施范围和验收已明确的任务。",
   },
   {
     id: "investigation",
-    title: "调查",
     description: "查证问题、影响范围和运行事实。",
   },
-  { id: "review", title: "独立审阅", description: "对指定交付进行独立审阅。" },
+  { id: "review", description: "对指定交付进行独立审阅。" },
 ] as const;
 
 type Entry = {
@@ -92,10 +88,6 @@ function entries(data: AgentDirectory): Entry[] {
   const busy = (entry: Entry) =>
     Number(!!entry.runner?.online && (entry.running ?? 0) > 0);
   return all.sort((a, b) => busy(b) - busy(a));
-}
-
-function categoryName(id?: string) {
-  return categories.find((category) => category.id === id)?.title ?? id ?? "—";
 }
 
 function runtimeName(entry: Entry) {
@@ -175,7 +167,7 @@ function AgentRow({
           {runner ? runner.profile.runner_id : "主对话、路由 · router"}
         </small>
       </span>
-      <span className="agent-desktop-fact">{categoryName(agent.category)}</span>
+      <span className="agent-desktop-fact">{agent.category ?? "—"}</span>
       <span className="agent-desktop-fact">{location}</span>
       <span className="agent-desktop-fact">{runtimeName(entry)}</span>
       <span className="agent-desktop-fact">{model}</span>
@@ -185,7 +177,7 @@ function AgentRow({
       </span>
       <span className="agent-mobile-facts">
         {runner
-          ? `${categoryName(agent.category)} · ${location} · ${runner.profile.runner_id}`
+          ? `${agent.category ?? "—"} · ${location} · ${runner.profile.runner_id}`
           : "主对话、路由 · 服务端"}
         <small>
           {runtimeName(entry)} · {model}
@@ -223,7 +215,7 @@ function AgentDetails({ entry, failed }: { entry: Entry; failed: boolean }) {
           ["Agent ID", agent.id],
           [
             runner ? "类别" : "用途",
-            runner ? categoryName(agent.category) : "主对话、任务路由",
+            runner ? (agent.category ?? "—") : "主对话、任务路由",
           ],
           ["运行位置", runner?.profile.host_id ?? "服务端"],
           ...(runner
@@ -409,9 +401,9 @@ export function Agents(props: Props) {
                     }}
                   >
                     <option value="">全部类别</option>
-                    {categories.map(({ id, title }) => (
+                    {categories.map(({ id }) => (
                       <option key={id} value={id}>
-                        {title}
+                        {id}
                       </option>
                     ))}
                   </select>
@@ -453,16 +445,13 @@ export function Agents(props: Props) {
                 </div>
                 {categories
                   .filter((item) =>
-                    `${item.title} ${item.id} ${item.description}`
+                    `${item.id} ${item.description}`
                       .toLowerCase()
                       .includes(query),
                   )
                   .map((item) => (
                     <div className="agent-category-row" key={item.id}>
-                      <div>
-                        <strong>{item.title}</strong>
-                        <small>{item.id}</small>
-                      </div>
+                      <strong>{item.id}</strong>
                       <span>{item.description}</span>
                       <span>启用</span>
                       <div className="agent-category-names">
