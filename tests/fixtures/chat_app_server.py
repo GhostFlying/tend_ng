@@ -10,6 +10,9 @@ WEB_REQUEST = "在示例仓库整理一份使用说明，完成后把文件和�
 ATTENTION_REQUEST = "请为示例仓库整理使用说明。需要我决定时就在这里问。"
 ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
+STAGE_REQUEST = "请发一份使用说明和附件，然后原地等我确认是否结案。"
+STAGE_QUESTION = "请审阅附上的使用说明。确认结案，还是需要修改？"
+STAGE_REPLY = "确认结案。"
 ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
 CROSS_CHAT_LOOKUP = "Verify cross-chat Issue access "
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
@@ -30,6 +33,8 @@ cases[ISSUE_CHAT_RELAY] = {"answer": "我已把补充要求交给负责指南的
 cases[WEB_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REPLY] = {"answer": "我已把精简版的决定交给负责的 Agent。"}
+cases[STAGE_REQUEST] = {"dispatch": True}
+cases[STAGE_REPLY] = {"answer": "我已把结案确认交给负责的 Agent。"}
 cases["我稍后再决定，可以先继续聊吗？"] = {"answer": "可以。你准备好时，回复上面的问题就行。"}
 cases["这项工作现在到哪一步了？"] = {"answer": "负责的 Agent 已经整理完使用说明，文件正在同步。", "wait": True}
 cases["好，发我一份原文件就行。"] = {"answer": "收到。文件同步后，我会把下载入口发到这里。"}
@@ -68,7 +73,8 @@ def missing_thread(request):
     }), flush=True)
 
 
-def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False, pinned=False):
+def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False, pinned=False,
+             stage=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
@@ -82,6 +88,9 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     }
     if guide:
         params["arguments"].update(title="示例仓库上手指南", objective="整理示例仓库的快速上手指南。")
+    if stage:
+        params["arguments"].update(title="交付使用说明并等候审阅",
+                                   objective="阶段交付实际使用说明和附件，然后原地等待用户确认是否结案。")
     if pinned:
         requirements = {"category": "issue-router", "repo_ids": ["example"],
                         "required_capabilities": ["image_gen"]}
@@ -156,6 +165,7 @@ for line in sys.stdin:
         case "initialized":
             pass
         case "thread/start":
+            assert "publish the report with its files and the related Attention" in params["developerInstructions"]
             thread_id = str(uuid.uuid4())
             with database:
                 database.execute(
@@ -177,15 +187,25 @@ for line in sys.stdin:
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
             if text.startswith("Tend Attention for the user's original topic.\n"):
                 attention = json.loads(text.split("\n", 1)[1])
-                assert attention["original_request"] == ATTENTION_REQUEST
-                assert attention["request"]["options"] == ["精简版", "完整版"]
-                case = {"attention": attention, "answer": "The question was published."}
+                if attention["original_request"] == STAGE_REQUEST:
+                    assert attention["request"]["options"] == ["确认结案", "需要修改"]
+                    case = {"attention": attention, "question": STAGE_QUESTION, "answer": "TEND_NO_UPDATE"}
+                else:
+                    assert attention["original_request"] == ATTENTION_REQUEST
+                    assert attention["request"]["options"] == ["精简版", "完整版"]
+                    case = {"attention": attention, "question": ATTENTION_QUESTION,
+                            "answer": "The question was published.", "drop_after_question": True}
             elif text.startswith("Tend external facts collected for this Chat.\n"):
                 case = {"answer": "TEND_NO_UPDATE"}
             elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
-                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
-                if report["summary"] == "The guide uses the repository's verified command.":
+                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST, STAGE_REQUEST}
+                if report["original_request"] == STAGE_REQUEST:
+                    assert report["summary"] == "使用说明已整理好，附上初稿供审阅。"
+                    [file] = report["artifacts"]
+                    assert file["name"] == "guide.txt"
+                    case = {"answer": report["summary"]}
+                elif report["summary"] == "The guide uses the repository's verified command.":
                     assert report["artifacts"] == []
                     case = {"answer": "I also verified the repository command."}
                 else:
@@ -221,15 +241,16 @@ for line in sys.stdin:
             if case.get("attention"):
                 fact = case["attention"]
                 receipt = decision_tool(
-                    "tend_publish_attention", {"attention_id": fact["attention_id"], "text": ATTENTION_QUESTION},
+                    "tend_publish_attention", {"attention_id": fact["attention_id"], "text": case["question"]},
                     thread_id, turn_id, params["clientUserMessageId"],
                 )
                 assert receipt["source_message_id"] == fact["original_message_id"]
-                saved = Path(sys.argv[1]).with_suffix(".question")
-                if starts == 1:
-                    saved.write_text(receipt["question_message_id"])
-                    sys.exit(0)
-                assert receipt["question_message_id"] == saved.read_text()
+                if case.get("drop_after_question"):
+                    saved = Path(sys.argv[1]).with_suffix(".question")
+                    if starts == 1:
+                        saved.write_text(receipt["question_message_id"])
+                        sys.exit(0)
+                    assert receipt["question_message_id"] == saved.read_text()
                 answer = case["answer"]
             elif text == RECORD_ISSUE:
                 arguments = {"title": "稍后整理发布说明", "objective": text, "repo_ids": ["release-notes"]}
@@ -264,7 +285,7 @@ for line in sys.stdin:
                                          params["clientUserMessageId"])
                 assert repeated == receipt
                 answer = case["answer"]
-            elif text == ATTENTION_REPLY:
+            elif text in {ATTENTION_REPLY, STAGE_REPLY}:
                 if context and "explicitly replies to this Tend Attention" in context:
                     fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
                 else:
@@ -272,7 +293,8 @@ for line in sys.stdin:
                         "tend_read_attentions", {}, thread_id, turn_id, params["clientUserMessageId"],
                     )
                 receipt = decision_tool(
-                    "tend_answer_attention", {"attention_id": fact["id"], "answer": "精简版"},
+                    "tend_answer_attention", {"attention_id": fact["id"],
+                                              "answer": "确认结案" if text == STAGE_REPLY else "精简版"},
                     thread_id, turn_id, params["clientUserMessageId"],
                 )
                 assert receipt["user_message_id"] and receipt["question_message_id"] == fact["question_message_id"]
@@ -306,7 +328,8 @@ for line in sys.stdin:
             elif case.get("dispatch"):
                 if starts == 1:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"],
-                                       guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING, pinned=text == PINNED_REVIEW)
+                                       guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING,
+                                       pinned=text == PINNED_REVIEW, stage=text == STAGE_REQUEST)
                     with database:
                         database.execute(
                             "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))

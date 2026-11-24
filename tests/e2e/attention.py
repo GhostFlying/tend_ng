@@ -1,4 +1,4 @@
-"""Exercise a durable question and answer on the original Work Agent Task."""
+"""Exercise durable decisions on the original Work Agent or Issue Agent Task."""
 import argparse
 from contextlib import contextmanager
 import json
@@ -17,6 +17,71 @@ WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
 REQUEST = "请为示例仓库整理使用说明。需要我决定时就在这里问。"
 QUESTION = "使用说明你想要精简版，还是完整版？"
 REPLY = "用精简版。"
+STAGE_REQUEST = "请发一份使用说明和附件，然后原地等我确认是否结案。"
+STAGE_REPORT = "使用说明已整理好，附上初稿供审阅。"
+STAGE_QUESTION = "请审阅附上的使用说明。确认结案，还是需要修改？"
+
+
+def stage_delivery(root, read, cli, sql):
+    source = read("chat", "send", "main", STAGE_REQUEST)["message_id"]
+    messages = wait_for(lambda: read("chat", "read", "main")["messages"],
+                        lambda rows: any(row["id"] == source and row.get("issue_ids") for row in rows))
+    [request] = [row for row in messages if row["id"] == source]
+    [parent] = request["issue_ids"]
+    task = read("issue", "read", parent)["task_id"]
+    # Let the child finish only when both inputs can be consumed by one parent Run.
+    wait_for(lambda: sql("runner", "SELECT json_extract(i.payload, '$.kind') FROM local_issue_inputs i "
+                                   "JOIN received_assignments a ON i.assignment_id = a.id "
+                                   "WHERE a.task_id = ? AND i.run_id IS NULL ORDER BY 1", task),
+             lambda rows: rows == [("artifact_available",), ("issue_closed",)])
+    (root / "finish-stage-child").touch()
+
+    page = wait_for(lambda: read("chat", "read", "main")["messages"],
+                    lambda rows: any(row.get("attention") for row in rows)
+                    and any(row["text"] == STAGE_REPORT for row in rows))
+    waiting = wait_for(lambda: read("issue", "read", parent), lambda view: view["status"] == "waiting"
+                       and view["run"]["phase"].get("waiting_for_attention"))
+    [report] = [row for row in page if row["text"] == STAGE_REPORT]
+    [question] = [row for row in page if row.get("attention")]
+    stage = json.loads((root / "stage-delivery.json").read_text())
+    assert stage["task_id"] == task
+    assert report["author"] == question["author"] == "router"
+    assert report["reply_to"] == question["reply_to"] == source
+    assert report["artifacts"] == [stage["file"]]
+    downloaded = cli("artifact", "download", stage["file"]["id"])
+    assert downloaded.returncode == 0 and downloaded.stdout == b"A fixture guide.\n"
+    assert sql("server", "SELECT id, summary FROM issue_reports WHERE issue_id = ?", parent) == [
+        (stage["report_id"], STAGE_REPORT),
+    ]
+    assert question["text"] == STAGE_QUESTION
+    assert question["attention"] == {"id": stage["attention_id"], "state": "awaiting_user"}
+    [attention] = read("attention", "list", "main")
+    assert attention["issue_id"] == parent and attention["task_id"] == task
+    assert attention["source_message_id"] == source and attention["question_message_id"] == question["id"]
+    assert attention["request"]["options"] == ["确认结案", "需要修改"]
+
+    assert waiting["issue_state"] == "open" and waiting["task_id"] == task
+    assert waiting["run"]["run_id"] == stage["run_id"] and waiting["run"]["phase"]["state"] == "stopped"
+    assert sql("runner", "SELECT state FROM local_runs WHERE id = ?", stage["run_id"]) == [("stopped",)]
+    assert sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?", task) == [("waiting",)]
+    assert sql("runner", "SELECT id FROM local_runs WHERE state IN ('prepared', 'running')") == []
+    previous_runs = sql("server", "SELECT id FROM task_runs WHERE task_id = ? ORDER BY rowid", task)
+    assert len(previous_runs) == 2 and previous_runs[-1] == (stage["run_id"],)
+    assert not (root / "decision.json").exists()
+
+    user = read("chat", "send", "main", "确认结案。", "stage-confirmation", "--reply-to", question["id"])
+    finished = wait_for(lambda: read("issue", "read", parent), lambda view: view["status"] == "completed")
+    assert finished["issue_state"] == "closed" and finished["task_id"] == task
+    resumed = finished["run"]["run_id"]
+    decision = json.loads((root / "decision.json").read_text())
+    assert decision["kind"] == "attention_answered" and decision["attention_id"] == stage["attention_id"]
+    assert decision["run_id"] == resumed and decision["user_message_id"] == user["message_id"]
+    assert decision["answer"] == "确认结案"
+    assert sql("server", "SELECT id FROM task_runs WHERE task_id = ? ORDER BY rowid", task) == (
+        previous_runs + [(resumed,)]
+    )
+    [delivered] = read("attention", "list", "main")
+    assert delivered["state"] == "delivered" and delivered["user_message_id"] == user["message_id"]
 
 
 def main():
@@ -27,8 +92,10 @@ def main():
     route.add_argument("--owner", action="store_true", help="answer in the parent Issue")
     route.add_argument("--implicit", action="store_true", help="answer in Chat without an explicit quote")
     route.add_argument("--web", action="store_true")
+    route.add_argument("--stage-delivery", action="store_true", help="deliver a report with an artifact and await review")
     args = parser.parse_args()
     env = {**os.environ, "TEND_TOKEN": "attention-fixture"}
+    scenario = "stage-delivery" if args.stage_delivery else "attention-local" if args.owner else "attention"
 
     with tempfile.TemporaryDirectory(prefix="tend-attention-") as temporary:
         root = Path(temporary)
@@ -75,7 +142,7 @@ def main():
                 process = subprocess.Popen(
                     [args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
                      "--app-server", sys.executable, RUNNER_FIXTURE, root,
-                     "attention-local" if args.owner else "attention"],
+                     scenario],
                     env=connected, stderr=stderr,
                 )
                 try:
@@ -90,6 +157,10 @@ def main():
         (root / "delegate-now").touch()
         with runner():
             with server(args.server, root, env, listen=address, web_dir=web_dir):
+                if args.stage_delivery:
+                    stage_delivery(root, read, cli, sql)
+                    print("PASS stage report and artifact reach the original Chat, and the same Task resumes to close")
+                    return
                 source_message = read("chat", "send", "main", REQUEST)["message_id"]
                 messages = wait_for(lambda: read("chat", "read", "main")["messages"],
                                     lambda rows: len(rows) == 2)

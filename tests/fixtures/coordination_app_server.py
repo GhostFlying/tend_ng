@@ -125,6 +125,8 @@ if not worker and (root / "delegation.json").exists():
     role = "resumed"
 if worker and attention and (root / "question.json").exists():
     role = "decision"
+if scenario == "stage-delivery" and not worker and (root / "stage-delivery.json").exists():
+    role = "stage-decision"
 if scenario == "issue-chat":
     import uuid
     role = f"{role}-{uuid.uuid4().hex}"
@@ -136,13 +138,15 @@ if scenario == "external-wait":
 thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
 assert Path(start["params"]["cwd"]) == Path.cwd()
+tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
+if "tend_delegate_work" in tools:
+    assert "A report or attachment receipt is not Issue completion." in start["params"]["developerInstructions"]
 respond(start, {"thread": {"id": thread_id}})
 turn = request("turn/start")
 items = turn["params"]["input"]
 assignment = json.loads(items[-1]["text"])
 if scenario == "external-wait" and worker and assignment["work"]["title"] in {"Isolated B", "Shared C"}:
     role = "other-work"
-tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
 respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
 
 if scenario == "issue-chat":
@@ -153,6 +157,8 @@ if role == "parent":
     assert {"tend_delegate_work", "tend_close_issue"} <= tools
     assert turn["params"]["effort"] == "low"
     assert len(items) == 1
+    if scenario == "stage-delivery":
+        assert assignment["work"]["objective"] == "阶段交付实际使用说明和附件，然后原地等待用户确认是否结案。"
     gate("delegate-now")
     args = {"title": "Write the guide", "objective": "Add a one-line guide",
             "category": "implementation", "required_capabilities": ["image_gen"]}
@@ -240,6 +246,11 @@ elif role == "child":
         guide.write_text("A later edit to the workspace file.\n")
         assert tool("tend_submit_artifact", arguments, "replay-submit", "delivery") == delivered
         (root / "submitted.json").write_text(json.dumps(delivered))
+    elif scenario == "stage-delivery":
+        tool("tend_submit_artifact", {"path": "repos/example/guide.txt"}, "submit", "delivery")
+        tool("tend_close_issue", {"summary": "The draft guide is ready."}, "close-child", "child-close")
+        # Keep the only slot until both facts are queued for the original parent Task.
+        gate("finish-stage-child")
     if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "native-review"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "other-work":
@@ -283,6 +294,29 @@ elif role == "decision":
     (Path("repos/example") / "guide.txt").write_text("Compact guide selected.\n")
     (root / "decision.json").write_text(json.dumps(decision))
     tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
+elif role == "stage-decision":
+    original = json.loads((root / "stage-delivery.json").read_text())
+    assert assignment["task_id"] == original["task_id"]
+    [decision] = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    assert decision["kind"] == "attention_answered"
+    assert decision["attention_id"] == original["attention_id"] and decision["answer"] == "确认结案"
+    (root / "decision.json").write_text(json.dumps({**decision, "run_id": turn["params"]["clientUserMessageId"]}))
+    tool("tend_close_issue", {"summary": "用户已审阅使用说明并确认结案。"}, "close-parent", "parent-close")
+elif scenario == "stage-delivery":
+    delegated = json.loads((root / "delegation.json").read_text())["action"]
+    inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    assert sorted(fact["kind"] for fact in inputs) == ["artifact_available", "issue_closed"], inputs
+    assert all(fact["child_issue_id"] == delegated["issue_id"] for fact in inputs)
+    [file] = [fact["artifact"] for fact in inputs if fact["kind"] == "artifact_available"]
+    assert file["available"]
+    report = tool("tend_report_result", {"summary": "使用说明已整理好，附上初稿供审阅。", "artifact_ids": [file["id"]]},
+                  "stage-report", "stage-report")
+    question = {"question": "请审阅附上的使用说明。确认结案，还是需要修改？", "options": ["确认结案", "需要修改"]}
+    attention_receipt = tool("tend_request_attention", question, "stage-question", "stage-question")
+    (root / "stage-delivery.json").write_text(json.dumps({
+        "report_id": report["operation_id"], "attention_id": attention_receipt["operation_id"],
+        "task_id": assignment["task_id"], "run_id": turn["params"]["clientUserMessageId"], "file": file,
+    }))
 else:
     assert {"tend_delegate_work", "tend_close_issue"} <= tools
     delegated = json.loads((root / "delegation.json").read_text())

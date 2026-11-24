@@ -12,6 +12,8 @@ Work Agent 可以随时提交阶段或最终产物，也可以显式结算自己
 
 结案指引要求 Issue Agent 对照原用户目标说明实际交付、尚存风险和有影响的子项后续安排。产物、Task 结算和 Issue 结案沿原操作持久化，界面按 Server 已应用的事实显示。 [Agent 角色](design.md#agent-角色)
 
+用户明确要求当前 Issue 交付计划、报告或附件后原地等待确认或审阅时，Issue Agent 用 `tend_report_result` 上报阶段结果和原件，再用 `tend_request_attention` 登记一个具体、可作答的选择。结束当前 Run，停妥后归还 slot，Issue 保持开放。报告或附件回执不等于结案。答复唤醒原 Task 后，Issue Agent 决定继续还是结案。无明确等待要求时，Owner 仍可在目标达成后上报并结案。 [结果怎样回来](chat-routing.md#结果怎样回来) · [等待期间的用户输入](#等待期间的用户输入)
+
 ## 父子 Issue 的等待与唤醒
 
 **已确认。** 顶层 Issue Agent 取得 Runner 的本地持久委派回执后，手头工作处理完即可结束当前回合。Runner 确认停妥后归还 slot，待同步的委派留在本机持久记录里。父 Issue 保留当前 Owner 和工作上下文，等待期间由系统保存待处理输入。
