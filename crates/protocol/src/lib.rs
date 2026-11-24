@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 mod runner;
 pub use runner::*;
+mod attention;
+pub use attention::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
 pub const TOKEN_ENV: &str = "TEND_TOKEN";
@@ -10,6 +12,8 @@ pub const TOKEN_ENV: &str = "TEND_TOKEN";
 pub struct SendMessage {
     pub operation_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -46,6 +50,8 @@ pub struct Message {
     pub issue_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<AttentionStatus>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

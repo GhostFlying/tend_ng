@@ -44,9 +44,12 @@ request("initialized")
 start = request("thread/start")
 model = start["params"]["model"]
 worker = model == "fixture-worker"
+attention = scenario in {"attention", "attention-local"}
 role = "child" if worker else "parent"
 if not worker and (root / "delegation.json").exists():
     role = "resumed"
+if worker and attention and (root / "question.json").exists():
+    role = "decision"
 thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
 assert Path(start["params"]["cwd"]) == Path.cwd()
@@ -79,7 +82,16 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario == "delivery":
+    if attention:
+        gate("ask-now")
+        question = {"question": "使用说明用精简版还是完整版？", "options": ["精简版", "完整版"],
+                    "context": "使用说明需要匹配目标读者。", "priority": "normal"}
+        receipt = tool("tend_request_attention", question, "ask", "ask-guide")
+        assert tool("tend_request_attention", question, "replay-ask", "ask-guide") == receipt
+        (root / "question.json").write_text(json.dumps({
+            "receipt": receipt, "task_id": assignment["task_id"],
+        }))
+    elif scenario == "delivery":
         gate("deliver-now")
         guide = Path("repos/example/guide.txt")
         guide.write_bytes(b"A fixture guide.\n" * 32768)
@@ -90,6 +102,18 @@ elif role == "child":
         (root / "submitted.json").write_text(json.dumps(delivered))
     if scenario in {"explicit-close", "late-close", "parent-failed", "delivery"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
+elif role == "decision":
+    original = json.loads((root / "question.json").read_text())
+    assert assignment["task_id"] == original["task_id"]
+    assert assignment["placement"]["assignment_id"] == original["receipt"]["assignment_id"]
+    [decision] = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    assert decision["kind"] == "attention_answered"
+    assert decision["attention_id"] == original["receipt"]["operation_id"]
+    assert decision["answer"] == "精简版"
+    assert ("user_message_id" in decision) == (scenario == "attention")
+    (Path("repos/example") / "guide.txt").write_text("Compact guide selected.\n")
+    (root / "decision.json").write_text(json.dumps(decision))
+    tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 else:
     assert {"tend_delegate_work", "tend_close_issue"} <= tools
     delegated = json.loads((root / "delegation.json").read_text())
@@ -122,7 +146,16 @@ else:
     [result] = context["child_inputs"]
     assert result["child_issue_id"] == delegated["action"]["issue_id"]
     assert result["child_task_id"] == delegated["action"]["task_id"]
-    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery"}:
+    if attention and result["kind"] == "attention_requested":
+        assert result["request"]["options"] == ["精简版", "完整版"]
+        args = {"attention_id": result["attention_id"]}
+        name = "tend_escalate_attention"
+        if scenario == "attention-local":
+            name = "tend_answer_child_attention"
+            args["answer"] = "精简版"
+        accepted = tool(name, args, "route-question", "route-question")
+        assert tool(name, args, "replay-question", "route-question") == accepted
+    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":
@@ -131,7 +164,7 @@ else:
     else:
         assert result["kind"] == "task_stopped"
         assert result["outcome"] == "completed"
-    if scenario != "late-close":
+    if scenario != "late-close" and result["kind"] != "attention_requested":
         tool("tend_close_issue", {"summary": result["summary"]}, "close-parent", "parent-close")
 
 completed = {"id": turn_id, "status": "completed", "items": []}

@@ -1,4 +1,4 @@
-use crate::DispatchIssue;
+use crate::{AttentionRequest, DispatchIssue};
 use serde::{Deserialize, Serialize};
 
 pub const RUNNER_PROTOCOL: u32 = 1;
@@ -147,6 +147,16 @@ pub enum WorkAction {
         summary: String,
         artifact_ids: Vec<String>,
     },
+    AskAttention {
+        request: AttentionRequest,
+    },
+    EscalateAttention {
+        attention_id: String,
+    },
+    AnswerChildAttention {
+        attention_id: String,
+        answer: String,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -170,6 +180,18 @@ pub struct IssueInput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueInputCause {
     IssueClosed,
+    AttentionRequested {
+        attention_id: String,
+        request: AttentionRequest,
+    },
+    AttentionAnswered {
+        attention_id: String,
+        answer: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_message_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        user_text: Option<String>,
+    },
     ArtifactAvailable {
         artifact: Artifact,
     },
@@ -214,6 +236,8 @@ pub enum RunPhase {
         error: Option<String>,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         waiting_for_children: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        waiting_for_attention: bool,
     },
 }
 

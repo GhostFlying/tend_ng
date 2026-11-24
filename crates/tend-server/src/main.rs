@@ -179,6 +179,19 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
         let runner_id = runner_id.to_owned();
         return handle_runner_sync(store, request, &runner_id, Some(scope));
     }
+    if let Some(chat_id) = path
+        .strip_prefix("/api/v1/chats/")
+        .and_then(|path| path.strip_suffix("/attentions"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok((
+            200,
+            serde_json::to_value(store.attentions(chat_id, false)?)?,
+        ));
+    }
     let chat_id = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/messages"))
@@ -217,12 +230,22 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
                     "valid operation ID and message text required",
                 ));
             }
+            if message
+                .reply_to
+                .as_ref()
+                .is_some_and(|id| !protocol::valid_id(id))
+            {
+                return Ok(api_error(400, "valid reply message ID required"));
+            }
             match store.accept(&chat_id, &message)? {
                 Accepted::Received(receipt) => Ok((200, serde_json::to_value(receipt)?)),
                 Accepted::Conflict => Ok(api_error(
                     409,
                     "operation ID is already used for a different message",
                 )),
+                Accepted::InvalidReply => {
+                    Ok(api_error(404, "Decision question not found in this Chat"))
+                }
             }
         }
         _ => Ok(api_error(405, "method not allowed")),

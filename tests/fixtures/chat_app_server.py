@@ -7,7 +7,13 @@ from pathlib import Path
 
 cases = json.loads(Path(__file__).with_name("chat.json").read_text())
 WEB_REQUEST = "在示例仓库整理一份使用说明，完成后把文件和简短结论发回来。"
+ATTENTION_REQUEST = "请为示例仓库整理使用说明。需要我决定时就在这里问。"
+ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
+ATTENTION_REPLY = "用精简版。"
 cases[WEB_REQUEST] = {"dispatch": True}
+cases[ATTENTION_REQUEST] = {"dispatch": True}
+cases[ATTENTION_REPLY] = {"answer": "我已把精简版的决定交给负责的 Agent。"}
+cases["我稍后再决定，可以先继续聊吗？"] = {"answer": "可以。你准备好时，回复上面的问题就行。"}
 cases["这项工作现在到哪一步了？"] = {"answer": "负责的 Agent 已经整理完使用说明，文件正在同步。", "wait": True}
 cases["好，发我一份原文件就行。"] = {"answer": "收到。文件同步后，我会把下载入口发到这里。"}
 database = sqlite3.connect(sys.argv[1], timeout=5)
@@ -96,6 +102,21 @@ def read_dispatch(thread_id, turn_id, token, operation_id):
     return json.loads(result["result"]["contentItems"][0]["text"])
 
 
+def decision_tool(name, args, thread, turn, token):
+    notify("item/started", threadId=thread, turnId=turn,
+           item={"type": "userMessage", "clientId": token})
+    print(json.dumps({
+        "id": name, "method": "item/tool/call",
+        "params": {
+            "threadId": thread, "turnId": turn, "callId": name,
+            "tool": name, "arguments": args,
+        },
+    }), flush=True)
+    result = json.loads(sys.stdin.readline())
+    assert result["id"] == name and result["result"]["success"], result
+    return json.loads(result["result"]["contentItems"][0]["text"])
+
+
 for line in sys.stdin:
     request = json.loads(line)
     params = request.get("params", {})
@@ -125,7 +146,12 @@ for line in sys.stdin:
             turn_id = str(uuid.uuid4())
             text = params["input"][-1]["text"]
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
-            if text.startswith("Tend Issue report for the user's original topic.\n"):
+            if text.startswith("Tend Attention for the user's original topic.\n"):
+                attention = json.loads(text.split("\n", 1)[1])
+                assert attention["original_request"] == ATTENTION_REQUEST
+                assert attention["request"]["options"] == ["精简版", "完整版"]
+                case = {"attention": attention, "answer": "The question was published."}
+            elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
                 assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
                 assert report["summary"] == "The requested guide is ready."
@@ -153,7 +179,33 @@ for line in sys.stdin:
                 assert replay["source_message_id"]
                 if not case.get("dispatch"):
                     assert replay["committed_dispatches"] == [], replay
-            if case.get("dispatch"):
+            if case.get("attention"):
+                fact = case["attention"]
+                receipt = decision_tool(
+                    "tend_publish_attention", {"attention_id": fact["attention_id"], "text": ATTENTION_QUESTION},
+                    thread_id, turn_id, params["clientUserMessageId"],
+                )
+                assert receipt["source_message_id"] == fact["original_message_id"]
+                saved = Path(sys.argv[1]).with_suffix(".question")
+                if starts == 1:
+                    saved.write_text(receipt["question_message_id"])
+                    sys.exit(0)
+                assert receipt["question_message_id"] == saved.read_text()
+                answer = case["answer"]
+            elif text == ATTENTION_REPLY:
+                if context and "explicitly replies to this Tend Attention" in context:
+                    fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
+                else:
+                    [fact] = decision_tool(
+                        "tend_read_attentions", {}, thread_id, turn_id, params["clientUserMessageId"],
+                    )
+                receipt = decision_tool(
+                    "tend_answer_attention", {"attention_id": fact["id"], "answer": "精简版"},
+                    thread_id, turn_id, params["clientUserMessageId"],
+                )
+                assert receipt["user_message_id"] and receipt["question_message_id"] == fact["question_message_id"]
+                answer = case["answer"]
+            elif case.get("dispatch"):
                 if starts == 1:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"])
                     with database:
@@ -175,7 +227,7 @@ for line in sys.stdin:
                     assert confirmed == receipt, (confirmed, receipt)
                     dispatch(thread_id, turn_id, params["clientUserMessageId"], remaining=True)
                 answer = ("我已把这项工作交给负责的 Agent。整理好后，我会把文件发回这里。"
-                          if text == WEB_REQUEST
+                          if text in {WEB_REQUEST, ATTENTION_REQUEST}
                           else f"Issue {receipt['issue_id']} is waiting for assignment.")
             else:
                 answer = case["answer"]

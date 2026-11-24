@@ -13,10 +13,18 @@ export type Message = {
   router_state: "queued" | "awaiting_turn" | "completed" | "failed" | null;
   router_error: string | null;
   artifacts?: Artifact[];
+  attention?: {
+    id: string;
+    state: "pending" | "awaiting_user" | "answered" | "delivered";
+  };
 };
 
 export type Page = { messages: Message[]; next_before: number | null };
-export type PendingMessage = { operation_id: string; text: string };
+export type PendingMessage = {
+  operation_id: string;
+  text: string;
+  reply_to?: string;
+};
 
 const messages = "/api/v1/chats/main/messages";
 

@@ -13,7 +13,7 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 3;
+const TOOL_REVISION: i64 = 4;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -22,7 +22,11 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
     "If the remaining work is unclear, explain what Tend has already saved or ask a focused question. ",
     "A Tend Issue report is a background fact, not a fresh user request. Reply to the original topic, ",
-    "summarize the actual result, and mention any supplied delivery files. Tend attaches those files to your final answer."
+    "summarize the actual result, and mention any supplied delivery files. Tend attaches those files to your final answer. ",
+    "A Tend Attention is a decision the user may need to make. Use tend_publish_attention with its original ID ",
+    "to ask the question in the original Chat when warranted by priority and timing. Do not guess a decision. ",
+    "Use tend_read_attentions to inspect open decisions and tend_answer_attention only when the current user message ",
+    "actually answers an identified question. When the answer is unclear, ask the user to clarify."
 );
 
 fn dispatch_tool() -> Value {
@@ -56,6 +60,30 @@ fn read_dispatch_tool() -> Value {
             "additionalProperties": false
         }
     })
+}
+
+fn attention_tools() -> [Value; 3] {
+    [
+        json!({
+            "type": "function", "name": "tend_publish_attention",
+            "description": "Publish the decision question in its original Chat and return the existing question receipt on replay.",
+            "inputSchema": {"type": "object", "properties": {
+                "attention_id": {"type": "string"}, "text": {"type": "string"}
+            }, "required": ["attention_id", "text"], "additionalProperties": false}
+        }),
+        json!({
+            "type": "function", "name": "tend_answer_attention",
+            "description": "Record the decision from the current user message and send it to the original responsible Task.",
+            "inputSchema": {"type": "object", "properties": {
+                "attention_id": {"type": "string"}, "answer": {"type": "string"}
+            }, "required": ["attention_id", "answer"], "additionalProperties": false}
+        }),
+        json!({
+            "type": "function", "name": "tend_read_attentions",
+            "description": "Read open decisions for this Chat, including options, priorities, and original question message IDs.",
+            "inputSchema": {"type": "object", "properties": {}, "additionalProperties": false}
+        }),
+    ]
 }
 
 #[derive(Clone)]
@@ -110,11 +138,12 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;
-    let tools = [dispatch_tool(), read_dispatch_tool()];
+    let mut tools = vec![dispatch_tool(), read_dispatch_tool()];
+    tools.extend(attention_tools());
     while let Some(input) = store.next_input(chat)? {
         let number = if let Some(attempt) = &input.attempt {
             if let Some(turn) = recover(&mut client, &store, attempt)? {
-                finish(&mut store, input.seq, turn)?;
+                finish(&mut store, &input, turn)?;
                 continue;
             }
             if attempt.number >= MAX_ATTEMPTS {
@@ -138,7 +167,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         };
         let (thread_id, context) = match previous_thread {
             Some(id) if loaded_thread.as_ref() == Some(&id) || client.resume_thread(&id)? => {
-                (id, None)
+                (id, input.reply_context.clone())
             }
             _ => {
                 let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools, None)?;
@@ -146,12 +175,13 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 let context: Vec<_> = [
                     store.recent_context(
                         chat,
-                        if input.report_id.is_some() {
+                        if input.report_id.is_some() || input.attention_id.is_some() {
                             i64::MAX
                         } else {
                             input.message_seq
                         },
                     )?,
+                    input.reply_context.clone(),
                     (number > 1)
                         .then(|| replay_context(&store, &input, number))
                         .transpose()?,
@@ -177,7 +207,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 attempt_id: &attempt_id,
             },
         )?;
-        finish(&mut store, input.seq, turn)?;
+        finish(&mut store, &input, turn)?;
     }
     Ok(())
 }
@@ -187,10 +217,13 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
         "kind": "replay",
         "source_message_id": input.message_id,
         "report_id": input.report_id,
+        "attention_id": input.attention_id,
         "attempt_number": attempt_number,
         "committed_dispatches": store.dispatches_for_input(input.seq)?,
     });
-    let kind = if input.report_id.is_some() {
+    let kind = if input.attention_id.is_some() {
+        "Attention"
+    } else if input.report_id.is_some() {
         "Issue report"
     } else {
         "request"
@@ -229,12 +262,46 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" => self.dispatch(&call),
+            "tend_read_attentions" => Ok(ToolOutput {
+                success: true,
+                body: serde_json::to_value(self.store.router_attentions(self.attempt_id, &call)?)?,
+            }),
+            "tend_publish_attention" => self.attention(&call, "text"),
+            "tend_answer_attention" => self.attention(&call, "answer"),
             _ => Ok(tool_error("Unknown Router tool")),
         }
     }
 }
 
 impl DispatchHandler<'_> {
+    fn attention(&mut self, call: &ToolCall, field: &str) -> Result<ToolOutput> {
+        let Some(id) = call.arguments["attention_id"]
+            .as_str()
+            .filter(|id| protocol::valid_id(id))
+        else {
+            return Ok(tool_error("A valid Attention ID is required"));
+        };
+        let Some(text) = call.arguments[field]
+            .as_str()
+            .filter(|text| !text.trim().is_empty())
+        else {
+            return Ok(tool_error("Specify the question or the user's decision"));
+        };
+        let receipt = if field == "text" {
+            self.store
+                .publish_attention(self.attempt_id, call, id, text)?
+        } else {
+            self.store
+                .answer_attention(self.attempt_id, call, id, text)?
+        };
+        Ok(match receipt {
+            Some(attention) => ToolOutput {
+                success: true,
+                body: serde_json::to_value(attention)?,
+            },
+            None => tool_error("There is no matching decision for this Chat input"),
+        })
+    }
     fn dispatch(&mut self, call: &ToolCall) -> Result<ToolOutput> {
         let work: DispatchIssue = match serde_json::from_value(call.arguments.clone()) {
             Ok(work) => work,
@@ -311,15 +378,16 @@ fn recover(client: &mut Client, store: &Store, attempt: &Attempt) -> Result<Opti
     Ok(None)
 }
 
-fn finish(store: &mut Store, seq: i64, turn: Turn) -> Result<()> {
+fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()> {
     match turn.status {
-        TurnStatus::Completed => store.finish(seq, &turn.answers()?, None),
+        TurnStatus::Completed if input.attention_id.is_some() => store.finish(input.seq, &[], None),
+        TurnStatus::Completed => store.finish(input.seq, &turn.answers()?, None),
         TurnStatus::Failed | TurnStatus::Interrupted => {
             let error = turn
                 .error
                 .as_ref()
                 .map_or("Codex turn ended early", |error| &error.message);
-            store.finish(seq, &[], Some(error))
+            store.finish(input.seq, &[], Some(error))
         }
         TurnStatus::InProgress => unreachable!("only a terminal turn can finish an input"),
     }

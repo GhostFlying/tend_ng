@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, RefObject } from "react";
 import { download, mergeMessages, readMessages, sendMessage } from "./api";
 import type { Artifact, Message, PendingMessage } from "./api";
 
@@ -30,10 +30,12 @@ function MessageRow({
   message,
   source,
   token,
+  onReply,
 }: {
   message: Message;
   source?: Message;
   token: string;
+  onReply: (message: Message) => void;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -66,6 +68,26 @@ function MessageRow({
         </a>
       )}
       <p>{message.text}</p>
+      {message.attention && (
+        <div className="attention-actions">
+          <span role="status">
+            {message.attention.state === "delivered"
+              ? "Agent 已接续"
+              : message.attention.state === "answered"
+                ? "决定已转交"
+                : "待你决定"}
+          </span>
+          {message.attention.state === "awaiting_user" && (
+            <button
+              className="text-button"
+              type="button"
+              onClick={() => onReply(message)}
+            >
+              回复
+            </button>
+          )}
+        </div>
+      )}
       {pending && <span className="message-state">已收到</span>}
       {message.router_error && (
         <span className="message-state error">{message.router_error}</span>
@@ -94,7 +116,21 @@ function MessageRow({
   );
 }
 
-function Composer({ token, onSent }: { token: string; onSent: () => void }) {
+function Composer({
+  token,
+  replyId,
+  replyText,
+  textarea,
+  onCancelReply,
+  onSent,
+}: {
+  token: string;
+  replyId: string | null;
+  replyText?: string;
+  textarea: RefObject<HTMLTextAreaElement | null>;
+  onCancelReply: () => void;
+  onSent: (reply: string | null) => void;
+}) {
   const [pending] = useState(savedMessage);
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
@@ -105,10 +141,11 @@ function Composer({ token, onSent }: { token: string; onSent: () => void }) {
     event.preventDefault();
     const value = text.trim();
     if (!value || sending) return;
+    const quote = replyId ?? undefined;
     const message =
-      attempt.current?.text === value
+      attempt.current?.text === value && attempt.current.reply_to === quote
         ? attempt.current
-        : { operation_id: operationId(), text: value };
+        : { operation_id: operationId(), text: value, reply_to: quote };
     attempt.current = message;
     sessionStorage.setItem(pendingKey, JSON.stringify(message));
     setSending(true);
@@ -118,7 +155,7 @@ function Composer({ token, onSent }: { token: string; onSent: () => void }) {
       sessionStorage.removeItem(pendingKey);
       attempt.current = null;
       setText("");
-      onSent();
+      onSent(replyId);
     } catch {
       setError("暂时无法确认收件，再次发送会沿原消息重试。");
     } finally {
@@ -135,7 +172,21 @@ function Composer({ token, onSent }: { token: string; onSent: () => void }) {
           </p>
         )}
         <form className="composer" onSubmit={submit}>
+          {replyId && (
+            <div className="composer-reply">
+              <span>回复：{replyText ?? "原问题"}</span>
+              <button
+                className="text-button"
+                type="button"
+                onClick={onCancelReply}
+                disabled={sending}
+              >
+                取消引用
+              </button>
+            </div>
+          )}
           <textarea
+            ref={textarea}
             aria-label="发消息给 Tend"
             placeholder="发消息给 Tend…"
             value={text}
@@ -193,6 +244,10 @@ export function Chat({
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState("");
   const [historyError, setHistoryError] = useState("");
+  const [replyId, setReplyId] = useState(
+    () => savedMessage()?.reply_to ?? null,
+  );
+  const textarea = useRef<HTMLTextAreaElement>(null);
   const timeline = useRef<HTMLElement>(null);
   const follow = useRef(true);
   const preserve = useRef<{ top: number; height: number } | null>(null);
@@ -273,6 +328,10 @@ export function Chat({
         message={message}
         source={source}
         token={token}
+        onReply={(question) => {
+          setReplyId(question.id);
+          textarea.current?.focus({ preventScroll: true });
+        }}
       />
     );
   });
@@ -311,7 +370,14 @@ export function Chat({
       </main>
       <Composer
         token={token}
-        onSent={() => setRefresh((number) => number + 1)}
+        replyId={replyId}
+        replyText={replyId ? byId.get(replyId)?.text : undefined}
+        textarea={textarea}
+        onCancelReply={() => setReplyId(null)}
+        onSent={(sentReply) => {
+          setReplyId((current) => (current === sentReply ? null : current));
+          setRefresh((number) => number + 1);
+        }}
       />
     </>
   );

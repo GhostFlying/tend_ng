@@ -217,8 +217,10 @@ impl Store {
             "cannot settle the original Run"
         );
         let assignment_id = &run.assignment.placement.assignment_id;
-        let waiting_for_children = coordination::has_followup(&tx, assignment_id)?;
-        let next_state = if waiting_for_children {
+        let waiting_for_attention = coordination::waiting_for_attention(&tx, assignment_id)?;
+        let waiting_for_children =
+            !waiting_for_attention && coordination::has_followup(&tx, assignment_id)?;
+        let next_state = if waiting_for_attention || waiting_for_children {
             if coordination::has_unread_input(&tx, assignment_id)? {
                 "queued"
             } else {
@@ -238,6 +240,7 @@ impl Store {
                 outcome,
                 error,
                 waiting_for_children,
+                waiting_for_attention,
             },
         )?;
         tx.commit()?;

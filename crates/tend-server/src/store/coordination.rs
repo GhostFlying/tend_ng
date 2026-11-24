@@ -206,6 +206,31 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 artifact_ids,
             )?;
         }
+        WorkAction::AskAttention { request } => {
+            super::attention::register(
+                db,
+                &operation.operation_id,
+                &source_issue,
+                &source_task,
+                source_message,
+                parent_issue.as_deref(),
+                request,
+            )?;
+        }
+        WorkAction::EscalateAttention { attention_id } => {
+            super::attention::apply_parent(db, &source_issue, attention_id, None)?;
+        }
+        WorkAction::AnswerChildAttention {
+            attention_id,
+            answer,
+        } => {
+            super::attention::apply_parent(
+                db,
+                &source_issue,
+                attention_id,
+                Some((&operation.operation_id, answer)),
+            )?;
+        }
     }
     Ok(true)
 }
@@ -215,10 +240,14 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         outcome,
         error,
         waiting_for_children,
+        waiting_for_attention,
     } = &observation.phase
     else {
         return Ok(());
     };
+    if *waiting_for_attention {
+        return Ok(());
+    }
     let child = db.query_row(
         "SELECT i.id, i.parent_issue_id, i.state FROM tasks t JOIN issues i ON t.issue_id = i.id
          WHERE t.id = ?1",

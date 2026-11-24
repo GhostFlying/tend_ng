@@ -265,6 +265,35 @@ a {
   font-size: 12px;
   line-height: 18px;
 }
+.attention-actions,
+.composer-reply {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+}
+.attention-actions button {
+  color: var(--label);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.composer-reply {
+  justify-content: space-between;
+  min-width: 0;
+  margin-bottom: 8px;
+  padding: 4px 8px;
+  border-left: 2px solid var(--border);
+}
+.composer-reply span {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.composer-reply button {
+  flex: none;
+}
 .download {
   text-decoration: underline;
   text-underline-offset: 3px;

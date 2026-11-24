@@ -1,11 +1,12 @@
 mod artifacts;
+mod attention;
 mod coordination;
 mod reports;
 mod run;
 mod runner;
 mod work;
 
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use codex_app::{Answer, ProcessIdentity};
 use protocol::{Author, Message, MessagePage, Receipt, RouterState, SendMessage};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -24,6 +25,8 @@ pub struct Input {
     pub message_id: String,
     pub text: String,
     pub report_id: Option<String>,
+    pub attention_id: Option<String>,
+    pub reply_context: Option<String>,
     pub attempt: Option<Attempt>,
 }
 
@@ -38,6 +41,7 @@ pub struct Attempt {
 pub enum Accepted {
     Received(Receipt),
     Conflict,
+    InvalidReply,
 }
 
 impl Store {
@@ -47,7 +51,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 8,
+            version <= 9,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -130,7 +134,10 @@ impl Store {
         }
         if version < 8 {
             reports::migrate_queue(&tx)?;
-            tx.pragma_update(None, "user_version", 8)?;
+        }
+        if version < 9 {
+            attention::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 9)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;
@@ -149,28 +156,42 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let existing: Option<(String, String, String)> = tx
+        let existing: Option<(String, String, String, Option<String>)> = tx
             .query_row(
-                "SELECT id, chat_id, text FROM chat_messages WHERE operation_id = ?1",
+                "SELECT id, chat_id, text, reply_to FROM chat_messages WHERE operation_id = ?1",
                 [&request.operation_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        if let Some((message_id, original_chat, original_text)) = existing {
+        if let Some((message_id, original_chat, original_text, original_reply)) = existing {
             return Ok(
-                if original_chat == chat_id && original_text == request.text {
+                if original_chat == chat_id
+                    && original_text == request.text
+                    && original_reply == request.reply_to
+                {
                     Accepted::Received(Receipt { message_id })
                 } else {
                     Accepted::Conflict
                 },
             );
         }
+        if let Some(reply) = &request.reply_to
+            && attention::quoted(&tx, chat_id, reply)?.is_none()
+        {
+            return Ok(Accepted::InvalidReply);
+        }
 
         let message_id = protocol::new_id();
         tx.execute(
-            "INSERT INTO chat_messages (id, chat_id, text, operation_id)
-             VALUES (?1, ?2, ?3, ?4)",
-            params![message_id, chat_id, request.text, request.operation_id],
+            "INSERT INTO chat_messages (id, chat_id, text, operation_id, reply_to)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                message_id,
+                chat_id,
+                request.text,
+                request.operation_id,
+                request.reply_to
+            ],
         )?;
         tx.execute(
             "INSERT INTO router_inputs (message_seq, chat_id) VALUES (?1, ?2)",
@@ -185,7 +206,8 @@ impl Store {
             "SELECT m.seq, m.id, m.text, m.created_at, m.reply_to, i.seq,
                     i.outcome, i.error, a.id
                FROM chat_messages m
-               LEFT JOIN router_inputs i ON i.message_seq = m.seq AND i.report_id IS NULL
+               LEFT JOIN router_inputs i ON i.message_seq = m.seq
+                 AND i.report_id IS NULL AND i.attention_id IS NULL
                LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = 1
               WHERE m.chat_id = ?1 AND m.seq < ?2
               ORDER BY m.seq DESC LIMIT ?3",
@@ -216,6 +238,7 @@ impl Store {
                     router_error: row.get(7)?,
                     issue_ids: Vec::new(),
                     artifacts: Vec::new(),
+                    attention: None,
                 },
             ))
         })?;
@@ -242,6 +265,7 @@ impl Store {
                 issues.entry(seq).or_default().push(id);
             }
             let mut files = reports::chat_artifacts(&self.db, chat_id, *oldest, before)?;
+            let mut attentions = attention::on_page(&self.db, chat_id, *oldest, before)?;
             for (seq, message) in &mut page {
                 if let Some(ids) = issues.remove(seq) {
                     message.issue_ids = ids;
@@ -249,6 +273,7 @@ impl Store {
                 if let Some(artifacts) = files.remove(seq) {
                     message.artifacts = artifacts;
                 }
+                message.attention = attentions.remove(seq);
             }
         }
         let messages = page.into_iter().rev().map(|(_, message)| message).collect();
@@ -268,18 +293,19 @@ impl Store {
     }
 
     pub fn next_input(&self, chat_id: &str) -> Result<Option<Input>> {
-        let mut input = self
+        let row = self
             .db
             .query_row(
                 "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
-                        a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id
+                        a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id,
+                        i.attention_id, m.reply_to
                  FROM router_inputs i
                  JOIN chat_messages m ON m.seq = i.message_seq
                  LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
                      SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
                  )
                  WHERE i.chat_id = ?1 AND i.outcome IS NULL
-                 ORDER BY a.id IS NULL, i.report_id IS NOT NULL, i.seq LIMIT 1",
+                 ORDER BY a.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL), i.seq LIMIT 1",
                 [chat_id],
                 |row| {
                     let attempt = match row.get::<_, Option<String>>(2)? {
@@ -298,23 +324,44 @@ impl Store {
                         }),
                         None => None,
                     };
-                    Ok(Input {
+                    Ok((Input {
                         seq: row.get(0)?,
                         message_id: row.get(8)?,
                         message_seq: row.get(9)?,
                         report_id: row.get(10)?,
+                        attention_id: row.get(11)?,
+                        reply_context: None,
                         text: row.get(1)?,
                         attempt,
-                    })
+                    }, row.get::<_, Option<String>>(12)?))
                 },
             )
             .optional()?;
-        if let Some(input) = &mut input
-            && let Some(report) = &input.report_id
-        {
+        let Some((mut input, reply_to)) = row else {
+            return Ok(None);
+        };
+        if let Some(report) = &input.report_id {
             input.text = reports::context(&self.db, report, &input.text, &input.message_id)?;
+        } else if let Some(id) = &input.attention_id {
+            let fact = attention::lookup(&self.db, chat_id, id)?
+                .context("queued decision has no Attention record")?;
+            let payload = json!({
+                "attention_id": id,
+                "request": fact.request,
+                "issue_id": fact.issue_id,
+                "original_message_id": fact.source_message_id,
+                "original_request": input.text,
+            });
+            input.text = format!("Tend Attention for the user's original topic.\n{payload}");
+        } else if let Some(reply_to) = reply_to
+            && let Some(fact) = attention::quoted(&self.db, chat_id, &reply_to)?
+        {
+            input.reply_context = Some(format!(
+                "The following user message explicitly replies to this Tend Attention.\n{}",
+                serde_json::to_string(&fact)?,
+            ));
         }
-        Ok(input)
+        Ok(Some(input))
     }
 
     pub fn thread_id(&self, chat_id: &str, revision: i64) -> Result<Option<String>> {
@@ -366,7 +413,8 @@ impl Store {
         let mut statement = self.db.prepare(
             "WITH recent AS (
                 SELECT message_seq AS seq, outcome FROM router_inputs
-                 WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL AND report_id IS NULL
+                 WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL
+                   AND report_id IS NULL AND attention_id IS NULL
                  ORDER BY message_seq DESC LIMIT 6
              )
              SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome

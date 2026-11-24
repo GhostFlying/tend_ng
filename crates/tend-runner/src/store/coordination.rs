@@ -86,6 +86,20 @@ impl Store {
 
         let operation_id = protocol::new_id();
         let action = build(&operation_id)?;
+        if let WorkAction::EscalateAttention { attention_id }
+        | WorkAction::AnswerChildAttention { attention_id, .. } = &action
+        {
+            let known = self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
+                    WHERE i.id = ?1 AND json_extract(i.payload, '$.kind') = 'attention_requested'
+                    AND json_extract(a.contract, '$.issue_id') = ?2)",
+                params![attention_id, run.assignment.issue_id], |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(
+                known,
+                "Question {attention_id} has not been received by this Issue"
+            );
+        }
         if let WorkAction::ReportIssue { artifact_ids, .. } = &action {
             let mut known = self.0.prepare(
                 "SELECT EXISTS(SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
@@ -188,6 +202,19 @@ pub(super) fn has_unread_input(db: &Connection, assignment: &str) -> Result<bool
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_issue_inputs WHERE assignment_id = ?1 AND run_id IS NULL)",
         [assignment], |row| row.get(0),
+    )?)
+}
+
+pub(super) fn waiting_for_attention(db: &Connection, assignment: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_work_operations o
+         WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'ask_attention'
+           AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i
+                WHERE i.assignment_id = o.assignment_id AND i.run_id IS NOT NULL
+                  AND json_extract(i.payload, '$.kind') = 'attention_answered'
+                  AND json_extract(i.payload, '$.attention_id') = o.id))",
+        [assignment],
+        |row| row.get(0),
     )?)
 }
 

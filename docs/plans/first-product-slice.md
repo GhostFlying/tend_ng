@@ -169,6 +169,17 @@ python3 tests/e2e/delivery.py target/debug/tend-server target/debug/tend target/
 
 **已确认。** 第一次试用后接入 Attention，完成这条链才达到一期验收范围。Work Agent 提出明确问题，沿父子 Issue 上报到顶层 Issue Agent，再交给 Router。Router 在原 Chat 提出可作答的 Attention 并按已定规则提醒。用户从 Web Chat 或 CLI 向 Router 作答，Router 沿原决策项转给负责处理的 Agent。验收核对该 Agent 能从原 Issue 和原答复继续推进，Web 和 CLI 读到同一处理状态。 [逐级上报与用户决策](../chat-routing.md#逐级上报与用户决策)
 
+- 提问沿原工具操作保存问题、备选项、背景和可选的优先级与时限。子 Issue 的问题先回到上级 Owner。上级可以直接决定，也可以用同一个问题 ID 上报 Router。顶层 Owner 也可以发起自己的问题。
+- Router 用原问题 ID 在同一 Chat 发布提问，发布和答复都保存各自的持久回执。用户可以引用提问，也可以在 Chat 直接回答。Router 核对原 Chat 与已收到的用户消息后写入决定，将原话和决定一起送到提出问题的原 Task。
+- 提问落盘后，当前 Run 停妥即可归还 slot。Runner 保留待决定的 Task。上级决定或 Router 转回的答复唤醒这个 Task，实际启动新 Run 时保存消费证据。
+- 用一个 Runner slot 验证离线提问、逐级上报、原 Chat 提问去重、普通聊天继续、带引用的用户答复和原 Task 接续。CLI 和 Web 查看同一个问题与处理状态。
+
+在 devcontainer 构建 Server、Runner、CLI 和 Web 后运行以下命令。另用 `--owner` 验证上级直接决定，用 `--implicit` 验证从普通 Chat 输入识别原问题。CLI 用 `tend attention list main` 查询状态。 [网页版待决定](images/attention-awaiting.png) · [窄屏已接续](images/attention-delivered.png)
+
+```sh
+python3 tests/e2e/attention.py target/debug/tend-server target/debug/tend target/debug/tend-runner --web
+```
+
 ## 一期 Issue Chat 验收
 
 用户在主 Chat 引用 Router 的回报并补充要求，核对输入先入队给 Router，答复仍在原话题显示为同一个助手。再主动进入同一工作的 Issue Chat 发言，核对原话直接入队给对应 Owner。 [从消息确定工作归属](../chat-routing.md#从消息确定工作归属)
