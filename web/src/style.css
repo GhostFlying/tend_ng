@@ -621,18 +621,24 @@ a {
 }
 
 .board-columns {
+  --column-min-width: 256px;
+  --cancelled-column-width: 44px;
   display: grid;
   flex: 1;
+  min-width: 0;
   min-height: 0;
-  grid-template-columns: repeat(5, minmax(180px, 1fr)) 44px;
+  grid-template-columns:
+    repeat(5, minmax(var(--column-min-width), 1fr))
+    var(--cancelled-column-width);
   gap: 8px;
   align-items: start;
   overflow: auto;
+  overscroll-behavior-inline: contain;
   padding: 16px 20px 20px;
 }
 
 .board-columns[data-cancelled-expanded="true"] {
-  grid-template-columns: repeat(6, minmax(150px, 1fr));
+  --cancelled-column-width: minmax(var(--column-min-width), 1fr);
 }
 
 .board-column {
@@ -876,16 +882,15 @@ a {
     border-bottom-color: currentColor;
   }
 
-  .board-columns,
-  .board-columns[data-cancelled-expanded="true"] {
+  .board-columns {
     display: block;
     flex: none;
-    overflow: visible;
     padding: 0;
   }
 
   .board-column {
     display: none;
+    min-width: var(--column-min-width);
     min-height: 0;
     padding: 0;
     background: transparent;

@@ -79,6 +79,16 @@ try {
     if (width === 390) {
       await page.getByRole("button", { name: /^已取消/ }).click();
       await page.locator("#board-cancelled-content .board-empty").waitFor();
+      await page.setViewportSize({ width: 280, height });
+      assert.equal(
+        (await page.locator(".board-column:visible").boundingBox()).width,
+        256,
+      );
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+        280,
+      );
+      await page.setViewportSize({ width, height });
       await page.getByRole("button", { name: /^待安排/ }).click();
     } else {
       await page.getByRole("button", { name: "收起已取消" }).click();
@@ -94,18 +104,30 @@ try {
       await page.locator("#board-cancelled-content .board-empty").waitFor();
       await page.setViewportSize({ width: 1024, height });
       const scroll = page.locator(".board-columns");
+      const columnWidths = () =>
+        page
+          .locator(".board-column")
+          .evaluateAll((nodes) =>
+            nodes.map((node) => node.getBoundingClientRect().width),
+          );
+      assert.deepEqual(await columnWidths(), Array(6).fill(256));
+      await scroll.evaluate((node) => {
+        node.scrollLeft = 0;
+      });
       const box = await scroll.boundingBox();
       await page.mouse.move(box.x + 40, box.y + 140);
       await page.mouse.wheel(900, 0);
-      await page.waitForFunction(
-        () => document.querySelector(".board-columns").scrollLeft > 0,
-      );
+      await page.waitForFunction(() => {
+        const node = document.querySelector(".board-columns");
+        return node.scrollWidth - node.clientWidth - node.scrollLeft <= 1;
+      });
       assert.equal(await page.evaluate(() => globalThis.scrollX), 0);
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth),
         1024,
       );
       await page.getByRole("button", { name: "收起已取消" }).click();
+      assert.deepEqual(await columnWidths(), [...Array(5).fill(256), 44]);
       await page.setViewportSize({ width, height });
     }
     await page.getByRole("link", { name: "稍后整理发布说明" }).click();
