@@ -514,3 +514,74 @@ a {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+.header {
+  position: relative;
+}
+
+.header-actions,
+.notifications-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.header-actions {
+  flex: none;
+}
+
+.notifications {
+  position: absolute;
+  top: calc(100% + 8px);
+  right: 12px;
+  z-index: 1;
+  width: min(360px, calc(100% - 24px));
+  max-height: min(520px, calc(100dvh - 80px));
+  overflow: auto;
+  padding: 16px;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--composer-shadow);
+}
+
+.notifications-heading {
+  margin-bottom: 12px;
+}
+
+.notifications h2 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+}
+
+.activity-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.activity {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px 8px;
+  padding: 9px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.activity > a {
+  grid-column: 1 / -1;
+  overflow-wrap: anywhere;
+  text-decoration: none;
+}
+
+.activity > a:hover {
+  text-decoration: underline;
+}
+
+.activity > span,
+.activity > time {
+  color: var(--muted);
+  font-size: 12px;
+}

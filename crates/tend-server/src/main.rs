@@ -209,6 +209,22 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             serde_json::to_value(store.attentions(chat_id, false)?)?,
         ));
     }
+    if let Some(chat_id) = path
+        .strip_prefix("/api/v1/chats/")
+        .and_then(|path| path.strip_suffix("/notifications"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(before) = page_cursor(query) else {
+            return Ok(api_error(400, "invalid notification cursor"));
+        };
+        return Ok((
+            200,
+            serde_json::to_value(store.notifications(chat_id, before)?)?,
+        ));
+    }
     let target = path
         .strip_suffix("/messages")
         .and_then(|path| {
@@ -223,17 +239,8 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
 
     match request.method() {
         Method::Get => {
-            let before = if query.is_empty() {
-                i64::MAX
-            } else {
-                let Some(before) = query
-                    .strip_prefix("before=")
-                    .and_then(|before| before.parse::<i64>().ok())
-                    .filter(|before| *before > 0)
-                else {
-                    return Ok(api_error(400, "invalid message cursor"));
-                };
-                before
+            let Some(before) = page_cursor(query) else {
+                return Ok(api_error(400, "invalid message cursor"));
             };
             if issue {
                 return Ok(match store.issue_messages(id, before)? {
@@ -285,6 +292,18 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             }
         }
         _ => Ok(api_error(405, "method not allowed")),
+    }
+}
+
+fn page_cursor(query: &str) -> Option<i64> {
+    if query.is_empty() {
+        Some(i64::MAX)
+    } else {
+        query
+            .strip_prefix("before=")?
+            .parse::<i64>()
+            .ok()
+            .filter(|before| *before > 0)
     }
 }
 

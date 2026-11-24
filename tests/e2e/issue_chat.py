@@ -124,6 +124,17 @@ def main():
                     assert cli("issue", "read", child)["issue_state"] == "closed"
                     assert not (root / "inspection.jsonl").exists()
 
+                    notices = cli("notification", "list", "main")["activities"]
+                    child_activity = [item for item in notices if item["issue_id"] == child]
+                    edges = {(item["previous"], item["current"]) for item in child_activity}
+                    assert {("running", "waiting"), ("waiting", "running"),
+                            ("running", "completed"), ("open", "closed")} <= edges, edges
+                    assert len([item for item in child_activity if item["current"] == "closed"]) == 1
+                    assert cli("notification", "list", "other")["activities"] == []
+                    cli("notification", "list", "main", "0", error="HTTP 400")
+                    cursor = str(notices[0]["seq"])
+                    assert cli("notification", "list", "main", cursor)["activities"] == notices[1:]
+                    assert cli("notification", "list", "main", str(int(cursor) + 1))["activities"] == notices
                     if args.web:
                         subprocess.run(["node", WEB / "tests/issue-chat.mjs"], check=True, timeout=45,
                                        env={**env, "TEND_CHILD_ISSUE": child})

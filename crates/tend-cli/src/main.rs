@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
-    ApiError, Attention, DEFAULT_LISTEN, IssueDispatch, IssueMessagePage, MessagePage, Receipt,
-    SendMessage, TOKEN_ENV,
+    ApiError, Attention, DEFAULT_LISTEN, IssueDispatch, IssueMessagePage, MessagePage,
+    NotificationPage, Receipt, SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend issue read <issue-id>\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -26,6 +26,7 @@ fn main() -> Result<()> {
         ("run", "rollout") => protocol::rollout_path(id),
         ("artifact", _) => protocol::artifact_path(id),
         ("attention", _) => protocol::attentions_path(id),
+        ("notification", "list") => protocol::notifications_path(id),
         _ => bail!("{USAGE}"),
     };
     let path = format!("{}{}", base.trim_end_matches('/'), endpoint);
@@ -70,16 +71,20 @@ fn main() -> Result<()> {
                 .with_context(|| format!("send operation {}", request.operation_id))?;
             println!("{}", serde_json::to_string(&receipt)?);
         }
-        ("chat", "read", [] | [_]) | ("issue", "messages", [] | [_]) => {
+        ("chat", "read", [] | [_])
+        | ("issue", "messages", [] | [_])
+        | ("notification", "list", [] | [_]) => {
             let mut request = http.get(&path).set("Authorization", &auth);
             if let Some(before) = rest.first() {
                 request = request.query("before", &before.parse::<i64>()?.to_string());
             }
             let response = checked(request.call())?;
-            let page = if namespace == "issue" {
-                serde_json::to_string(&response.into_json::<IssueMessagePage>()?)?
-            } else {
-                serde_json::to_string(&response.into_json::<MessagePage>()?)?
+            let page = match namespace.as_str() {
+                "issue" => serde_json::to_string(&response.into_json::<IssueMessagePage>()?)?,
+                "notification" => {
+                    serde_json::to_string(&response.into_json::<NotificationPage>()?)?
+                }
+                _ => serde_json::to_string(&response.into_json::<MessagePage>()?)?,
             };
             println!("{page}");
         }

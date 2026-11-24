@@ -8,7 +8,7 @@
 | --- | --- |
 | 持久收件 | 在 devcontainer 用真实 CLI 和 Server，配固定 App Server 输出跑通一问一答。丢掉已落盘的收件响应后用原操作 ID 重试，重启后仍能看到原消息和唯一答复。 [第一段实现](#第一段实现) |
 | 第一次试用 | 一个 Runner 和一个 slot 从示例 Git 仓库的 worktree 完成任务。Router 经 Issue Agent 委派给 Work Agent，再在原话题返回结果与可下载文件。CLI 和纯文本 Web 读取同一结果。固定 fixture 覆盖全量对账下的断线交付，并在真实 Codex App Server 上走一次主链。 [输入到交付](#输入到交付) · [最少验收](#最少验收) |
-| 可日常使用 | 并行推进两项工作，在原 Chat 收到一项的交付和另一项的 Attention。答复送回责任 Agent，工作可继续。Issue Chat、只读看板和通知反映持久状态，CLI 提供完整操作入口。接入 Queue、Steer、取消与重开，以及 PR / CI 的关联、订阅和等待。真实外部事件的验收先用 GitHub 的 PR 与 CI。 [一期 Attention 验收](#一期-attention-验收) · [一期 Issue Chat 验收](#一期-issue-chat-验收) · [外部事实与等待](../design.md#4-消息投递外部事件与等待) |
+| 可日常使用 | 并行推进两项工作，在原 Chat 收到一项的交付和另一项的 Attention。答复送回责任 Agent，工作可继续。Issue Chat、只读看板和通知反映持久状态，CLI 提供完整操作入口。接入 Queue、Steer、取消与重开，以及 PR / CI 的关联、订阅和等待。真实外部事件的验收先用 GitHub 的 PR 与 CI。 [一期 Attention 验收](#一期-attention-验收) · [一期 Issue Chat 验收](#一期-issue-chat-验收) · [一期只读通知验收](#一期只读通知验收) · [外部事实与等待](../design.md#4-消息投递外部事件与等待) |
 | 可独立恢复和升级 | 用普通 API 跑通全量对账和增量同步，核对断线、重启、响应丢失和交付补回后原工作可继续查证。实际部署验证选用通道的鉴权及重新连接。用同机两代 Runner 验证前驱收尾、后继在原目录接续下一次 Run，以及 Server 的协议兼容预检。 [一期同步 API](../server-runner.md#一期同步-api) · [同机 Run 交接](../server-runner.md#同机接替时的-run-交接) · [Server 升级兼容窗口](../server-runner.md#server-升级兼容窗口) |
 
 一期的完成线是在自己的可信单用户环境部署 Server 和工作 Runner，用真实 Codex App Server 从主 Chat 推进 Git 仓库里的日常任务，在原对话取产物、回答 Attention 并继续工作。真实仓库走查核对用户体验和实际副作用，断线、等待和升级各用定向 fixture 核对原身份、目录占用和资源释放。
@@ -198,3 +198,11 @@ cargo build --locked
 pnpm --dir web build
 python3 tests/e2e/issue_chat.py target/debug/tend-server target/debug/tend target/debug/tend-runner --web
 ```
+
+## 一期只读通知验收
+
+- Server 在 Issue 结案、重开和 Task 开始、等待、接续或终止的同一事务保存实际流转。记录所属 Chat、Issue、可选 Task、前后状态及时间。通知按 Chat 用游标从最近一页读取；旧库升级后的通知从实际观察到的新流转开始。
+- CLI 和 Web 读同一页事实。Web 从主界面按需打开通知面板，链接进入对应 Issue，浏览过程保留主 Chat 已挂载的时间线和编辑草稿。首期不保存已读状态。
+- 复用单 slot 夹具核对等待、接续、Task 完成和 Issue 结案各自有实际证据。浏览器在主 Chat 写草稿后打开通知，核对工作链接、关闭后的草稿和阅读位置。验证读通知前后持久记录一致。
+
+CLI 可运行 `tend notification list main`。Web 的工作动态从同一 API 按需读取。 [桌面实际渲染](images/notifications-desktop.png)

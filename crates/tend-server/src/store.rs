@@ -2,6 +2,7 @@ mod artifacts;
 mod attention;
 mod coordination;
 mod issue_chat;
+mod notification;
 mod reports;
 mod run;
 mod runner;
@@ -52,7 +53,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 10,
+            version <= 11,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -141,7 +142,10 @@ impl Store {
         }
         if version < 10 {
             issue_chat::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 10)?;
+        }
+        if version < 11 {
+            notification::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 11)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;

@@ -8,6 +8,7 @@ const {
   TEND_TOKEN: token,
   TEND_SCREENSHOTS: screenshots,
   TEND_CHILD_ISSUE: child,
+  TEND_NOTIFICATION_SCREENSHOTS: notificationScreenshots,
 } = process.env;
 assert(url && token && child);
 
@@ -95,6 +96,68 @@ try {
   }
   await firstWorkerRun.getByRole("button", { name: /收起执行过程/ }).click();
   assert.equal(await mobile.getByText(detail, { exact: true }).count(), 0);
+  await desktop.goto(url);
+  await desktop
+    .getByRole("link", { name: "查看 Issue", exact: true })
+    .waitFor();
+  const draft = desktop.getByLabel("发消息给 Tend");
+  await draft.fill("下一步，请看下示例仓库的发布说明。");
+  const timeline = desktop.locator(".timeline");
+  const initialHeight = await timeline.evaluate(
+    (element) => element.clientHeight,
+  );
+  const noticeReads = [];
+  desktop.on("request", (request) => {
+    if (request.url().endsWith("/notifications"))
+      noticeReads.push(request.method());
+  });
+  await desktop.getByRole("button", { name: "通知", exact: true }).click();
+  const panel = desktop.getByRole("region", { name: "工作通知" });
+  await panel.getByText("已接续", { exact: true }).first().waitFor();
+  assert.equal(
+    await panel
+      .getByRole("link", { name: "整理快速上手指南" })
+      .first()
+      .getAttribute("href"),
+    `/issues/${child}`,
+  );
+  assert.deepEqual(noticeReads, ["GET"]);
+  assert.equal(
+    await timeline.evaluate((element) => element.clientHeight),
+    initialHeight,
+  );
+  if (notificationScreenshots) {
+    await mkdir(notificationScreenshots, { recursive: true });
+    await desktop.screenshot({
+      path: join(notificationScreenshots, "notifications-desktop.png"),
+    });
+  }
+  await panel.getByRole("button", { name: "关闭", exact: true }).click();
+  assert.equal(await draft.inputValue(), "下一步，请看下示例仓库的发布说明。");
+  assert.equal(
+    await draft.evaluate((element) => element === document.activeElement),
+    true,
+  );
+
+  await desktop.setViewportSize({ width: 390, height: 345 });
+  const position = await timeline.evaluate((element) => {
+    element.scrollTop = 16;
+    return element.scrollTop;
+  });
+  assert(position > 0, "fixture needs a scrollable narrow Chat");
+  await draft.focus();
+  await desktop.getByRole("button", { name: "通知", exact: true }).click();
+  await panel.getByText("已结案", { exact: true }).waitFor();
+  assert.equal(
+    await desktop.evaluate(() => document.documentElement.scrollWidth),
+    390,
+  );
+  await panel.getByRole("button", { name: "关闭", exact: true }).click();
+  assert.equal(
+    await timeline.evaluate((element) => element.scrollTop),
+    position,
+  );
+  assert.deepEqual(noticeReads, ["GET", "GET"]);
   assert.deepEqual(errors, []);
   console.log(
     "PASS Issue discussion on desktop and mobile with one explicit native history read",

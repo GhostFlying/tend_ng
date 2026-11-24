@@ -5,6 +5,20 @@ export type Artifact = {
   available: boolean;
 };
 
+export type Activity = {
+  seq: number;
+  issue_id: string;
+  issue_title: string;
+  previous: string;
+  current: string;
+  changed_at: number;
+};
+
+export type NotificationPage = {
+  activities: Activity[];
+  next_before: number | null;
+};
+
 export type Message = {
   id: string;
   text: string;
@@ -94,6 +108,18 @@ export async function readMessages(
       issue: message,
     })),
   };
+}
+
+export async function readNotifications(
+  token: string,
+  before?: number,
+  signal?: AbortSignal,
+) {
+  const path = "/api/v1/chats/main/notifications";
+  const url = before === undefined ? path : `${path}?before=${before}`;
+  return (
+    await request(token, url, { signal })
+  ).json() as Promise<NotificationPage>;
 }
 
 export async function sendMessage(

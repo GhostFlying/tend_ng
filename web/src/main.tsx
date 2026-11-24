@@ -3,6 +3,7 @@ import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { readMessages } from "./api";
 import { Chat } from "./Chat";
+import { Notifications } from "./Notifications";
 import "./style.css";
 
 const tokenKey = "tend.token.v1";
@@ -130,9 +131,16 @@ function App() {
             <h1>Tend</h1>
           )}
           {token && (
-            <button type="button" className="text-button" onClick={disconnect}>
-              断开连接
-            </button>
+            <div className="header-actions">
+              <Notifications token={token} />
+              <button
+                type="button"
+                className="text-button"
+                onClick={disconnect}
+              >
+                断开连接
+              </button>
+            </div>
           )}
         </header>
         {token ? (

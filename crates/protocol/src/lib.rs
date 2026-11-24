@@ -5,7 +5,9 @@ pub use runner::*;
 mod attention;
 pub use attention::*;
 mod issue_chat;
+mod notification;
 pub use issue_chat::*;
+pub use notification::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
 pub const TOKEN_ENV: &str = "TEND_TOKEN";
