@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/protocol", "crates/codex-app", "crates/tend-server", "crates/tend-cli"]
+members = ["crates/protocol", "crates/codex-app", "crates/tend-server", "crates/tend-runner", "crates/tend-cli"]
 resolver = "3"
 
 [workspace.package]

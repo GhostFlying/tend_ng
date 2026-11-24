@@ -1,16 +1,17 @@
 use super::Store;
 use anyhow::Result;
 use codex_app::ToolCall;
-use protocol::{DispatchIssue, IssueDispatch};
+use protocol::{DispatchIssue, IssueDispatch, TaskAssignment};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
-const DISPATCH_QUERY: &str =
+pub(super) const DISPATCH_QUERY: &str =
     "SELECT i.id, t.id, d.operation_id, m.id, m.chat_id, t.category, t.status,
-            i.title, i.objective, t.repo_ids, t.required_capabilities, d.request
+            i.title, i.objective, t.repo_ids, t.required_capabilities, d.request, a.contract
        FROM router_dispatches d
        JOIN issues i ON i.id = d.issue_id
        JOIN tasks t ON t.id = d.task_id
-       JOIN chat_messages m ON m.seq = i.source_seq";
+       JOIN chat_messages m ON m.seq = i.source_seq
+       LEFT JOIN runner_assignments a ON a.id = t.current_assignment";
 
 pub fn create_tables(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -105,6 +106,12 @@ impl Store {
             [&operation_id],
             read_dispatch,
         )?;
+        super::runner::assign(&tx, receipt)?;
+        let receipt = tx.query_row(
+            &format!("{DISPATCH_QUERY} WHERE d.operation_id = ?1"),
+            [&operation_id],
+            read_dispatch,
+        )?;
         tx.commit()?;
         Ok(Some(receipt))
     }
@@ -153,7 +160,19 @@ impl Store {
     }
 }
 
-fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDispatch> {
+pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDispatch> {
+    let placement = row
+        .get::<_, Option<String>>(12)?
+        .map(|contract| serde_json::from_str::<TaskAssignment>(&contract))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                12,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?
+        .map(|assignment| assignment.placement);
     Ok(IssueDispatch {
         issue_id: row.get(0)?,
         task_id: row.get(1)?,
@@ -162,6 +181,7 @@ fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDispatch> {
         chat_id: row.get(4)?,
         category: row.get(5)?,
         status: row.get(6)?,
+        placement,
         work: DispatchIssue {
             title: row.get(7)?,
             objective: row.get(8)?,

@@ -9,5 +9,6 @@
   "Keep going.": {"answer": "The queue continued."},
   "Hold across restart.": {"answer": "The original turn finished.", "wait": true},
   "Dispatch from Chat.": {"dispatch": true},
-  "Recover dispatched work.": {"dispatch": true, "drop_after_dispatch": true}
+  "Recover dispatched work.": {"dispatch": true, "drop_after_dispatch": true},
+  "Expire this reservation.": {"dispatch": true}
 }

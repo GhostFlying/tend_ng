@@ -507,6 +507,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tend-runner"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "protocol",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "ureq",
+]
+
+[[package]]
 name = "tend-server"
 version = "0.1.0"
 dependencies = [

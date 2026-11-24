@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+mod runner;
+pub use runner::*;
+
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
 pub const TOKEN_ENV: &str = "TEND_TOKEN";
 
@@ -54,7 +57,7 @@ pub struct ApiError {
     pub error: String,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct DispatchIssue {
     pub title: String,
@@ -74,6 +77,8 @@ pub struct IssueDispatch {
     pub chat_id: String,
     pub category: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placement: Option<Placement>,
     #[serde(flatten)]
     pub work: DispatchIssue,
 }

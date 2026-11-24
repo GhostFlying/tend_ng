@@ -74,6 +74,18 @@ python3 tests/e2e/chat.py target/debug/tend-server target/debug/tend
 - native thread 的工具声明在创建时绑定。改动工具声明时，新 session 使用当前声明和已保存的相关上下文。已在途的原回合和历史仍按原身份查证。
 - 用固定 App Server 输出验证一次正常调用、回执重放以及已提交派发后的回合接续。Chat 消息页带原消息的 Issue 引用，`tend issue read <issue-id>` 读取实际派发及待分配状态。 [Codex 注入 Tend 工具](../agent-tools.md#codex-注入-tend-工具)
 
+### Runner 注册与持久领取
+
+- Runner 从本机配置加载稳定 Host、Runner 和具名 Agent，核实已登记的仓库，向 Server 上报可用标识和容量。本机仓库路径保存在 Runner。Server 按仓库、工作能力和 `issue-router` 配置预分配，材料带上实际执行配置版本。
+- Server 在发出派发前记录原分配已可送达。只有尚未送达的预分配能按截止时间撤回。Runner 将完整分配和领取结果写入本机 SQLite 后回传原回执。Server 收到同一回执时读回原结算，Owner 以领取事实为依据。
+- 用两个真实 Runner 的定向 fixture 验证能力匹配。丢弃一次 Server 的派发响应和一次持久领取后的回执响应，分别核对两个实例重启后沿原分配接续。已接单的事实与实际 Run 的启动分开显示。 [分配与投递](../server-runner.md#分配与投递)
+
+Runner 使用 `TEND_URL`、`TEND_TOKEN` 和 `tend-runner --config <file> --db <file>` 独立启动。配置包含 `runner_id`、`host_id`、`slot_limit`、带 `id` 与本机 `path` 的仓库，以及带 `id`、`category`、`revision` 的具名 Agent。首期开始执行前可用 `--once` 单独检查一次同步及持久领取。
+
+```sh
+python3 tests/e2e/runner.py target/debug/tend-server target/debug/tend target/debug/tend-runner
+```
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)

@@ -2,9 +2,12 @@ mod router;
 mod store;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use protocol::{ApiError, DEFAULT_LISTEN, SendMessage, TOKEN_ENV};
+use protocol::{
+    ApiError, DEFAULT_LISTEN, RUNNER_PROTOCOL, RUNNER_SYNC_BATCH, RunnerSync, SendMessage,
+    TOKEN_ENV,
+};
 use serde_json::{Value, json};
-use std::{env, ffi::OsString, io::Read, path::PathBuf};
+use std::{env, ffi::OsString, io::Read, path::PathBuf, thread, time::Duration};
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -54,6 +57,8 @@ fn main() -> Result<()> {
     ensure!(!token.is_empty(), "TEND_TOKEN is empty");
     let auth = format!("Bearer {token}");
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
+    let placement = Store::open(&db)?;
+    thread::spawn(move || schedule(placement));
     router::spawn(router::Config {
         db,
         cwd,
@@ -75,6 +80,16 @@ fn main() -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn schedule(mut store: Store) {
+    let mut after = 0;
+    loop {
+        if let Err(error) = store.schedule_assignments(&mut after) {
+            eprintln!("Schedule Runner assignments: {error:#}");
+        }
+        thread::sleep(Duration::from_millis(250));
+    }
 }
 
 fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, Value)> {
@@ -102,6 +117,14 @@ fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, 
             None => api_error(404, "issue not found"),
         });
     }
+    if let Some(runner_id) = path
+        .strip_prefix("/api/v1/runners/")
+        .and_then(|path| path.strip_suffix("/sync"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        let runner_id = runner_id.to_owned();
+        return handle_runner_sync(store, request, &runner_id);
+    }
     let chat_id = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/messages"))
@@ -128,14 +151,9 @@ fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, 
         }
         Method::Post => {
             let chat_id = chat_id.to_owned();
-            let mut bytes = Vec::new();
-            request
-                .as_reader()
-                .take(MAX_REQUEST_BYTES + 1)
-                .read_to_end(&mut bytes)?;
-            if bytes.len() as u64 > MAX_REQUEST_BYTES {
+            let Some(bytes) = request_bytes(request)? else {
                 return Ok(api_error(413, "message request too large"));
-            }
+            };
             let Ok(message) = serde_json::from_slice::<SendMessage>(&bytes) else {
                 return Ok(api_error(400, "expected operation_id and text"));
             };
@@ -155,6 +173,47 @@ fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, 
         }
         _ => Ok(api_error(405, "method not allowed")),
     }
+}
+
+fn request_bytes(request: &mut Request) -> Result<Option<Vec<u8>>> {
+    let mut bytes = Vec::new();
+    request
+        .as_reader()
+        .take(MAX_REQUEST_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    Ok((bytes.len() as u64 <= MAX_REQUEST_BYTES).then_some(bytes))
+}
+
+fn handle_runner_sync(
+    store: &mut Store,
+    request: &mut Request,
+    runner_id: &str,
+) -> Result<(u16, Value)> {
+    if request.method() != &Method::Post {
+        return Ok(api_error(405, "method not allowed"));
+    }
+    let Some(bytes) = request_bytes(request)? else {
+        return Ok(api_error(413, "Runner sync too large"));
+    };
+    let Ok(sync) = serde_json::from_slice::<RunnerSync>(&bytes) else {
+        return Ok(api_error(400, "invalid Runner sync"));
+    };
+    if sync.protocol != RUNNER_PROTOCOL {
+        return Ok(api_error(426, "unsupported Runner protocol"));
+    }
+    if sync.profile.runner_id != runner_id
+        || !sync.profile.valid()
+        || sync.receipts.len() > RUNNER_SYNC_BATCH
+    {
+        return Ok(api_error(400, "invalid Runner profile or receipt batch"));
+    }
+    Ok(match store.sync_runner(sync)? {
+        Some(reply) => (200, serde_json::to_value(reply)?),
+        None => api_error(
+            409,
+            "Runner host identity or assignment receipt conflicts with saved facts",
+        ),
+    })
 }
 
 fn api_error(status: u16, error: &str) -> (u16, Value) {

@@ -1,3 +1,4 @@
+mod runner;
 mod work;
 
 use anyhow::{Result, ensure};
@@ -40,7 +41,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 2,
+            version <= 3,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -105,7 +106,10 @@ impl Store {
                 "ALTER TABLE router_threads ADD COLUMN tool_revision INTEGER NOT NULL DEFAULT 0;",
             )?;
             work::create_tables(&tx)?;
-            tx.pragma_update(None, "user_version", 2)?;
+        }
+        if version < 3 {
+            runner::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 3)?;
         }
         tx.commit()?;
         Ok(store)
