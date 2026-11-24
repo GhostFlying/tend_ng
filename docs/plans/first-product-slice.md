@@ -111,6 +111,7 @@ python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target
 - Server 按持久业务事实确定收件 Task。仍在推进的协调目标保留原 Task；原 Task 已结算时，在原 Issue 为后到输入登记一个接续 Task，沿同一 Runner 和具名 Owner 领取。新 Task 起步时读取原 Issue 的当前状态。
 - 若 Server 刚收到原 Task 停妥，尚未绑定任何 Run 的输入随新的收件 Task 接续。原事件身份、子 Issue 和回报内容保留。已绑定到 Run 的输入仍沿原 Run 查证。
 - 复用单 slot 验收，让 Issue Agent 委派后先结案，随后恢复 Server 通信并完成子 Issue。核对只有一个新的协调 Task、原 Issue 仍结案、同一 Owner 收到晚到事实。另用丢响应路径核对待处理记录仍沿原身份去重。
+- 让原协调 Run 在持久委派后返回 Provider 错误，核对子项仍可用已让出的 slot 推进。父 Agent 收到子项事实时沿原协调 Task 接续，失败的 Run 保留原原因。
 
 ## 最少验收
 

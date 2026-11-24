@@ -19,10 +19,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for executable in ("server", "cli", "runner"):
         parser.add_argument(executable, type=lambda value: Path(value).resolve())
-    parser.add_argument("--scenario", choices=("explicit-close", "task-only", "no-candidate", "late-close"),
+    parser.add_argument("--scenario", choices=(
+        "explicit-close", "task-only", "no-candidate", "late-close", "parent-failed",
+    ),
                         default="explicit-close")
     args = parser.parse_args()
     late = args.scenario == "late-close"
+    child_closes = args.scenario not in {"task-only", "no-candidate"}
     env = {**os.environ, "TEND_TOKEN": "tend-coordination-fixture"}
 
     with tempfile.TemporaryDirectory(prefix="tend-coordination-") as temporary:
@@ -111,11 +114,11 @@ def main():
                         observed.append((work["run"]["run_id"], "stopped"))
                         assert (root / "runner.runs" / "workspaces" / parent
                                 / "repos" / "example" / "guide.txt").read_text() == "A fixture guide.\n"
-                    assert work["issue_state"] == ("closed" if args.scenario in {"late-close", "explicit-close"} else "open")
+                    assert work["issue_state"] == ("closed" if child_closes else "open")
                     observed.append((final["run"]["run_id"], "stopped"))
                     assert sql("runner", "SELECT id, state FROM local_runs ORDER BY rowid") == observed
                     assert sql("server", "SELECT run_id FROM issue_inputs") == [(final["run"]["run_id"],)]
-                    operations = 3 if args.scenario in {"late-close", "explicit-close"} else 2
+                    operations = 3 if child_closes else 2
                     assert sql("server", "SELECT count(*) FROM runner_operations") == [(operations,)]
                     assert sql("server", "SELECT count(DISTINCT runner_id) FROM runner_assignments") == [(1,)]
                     if late:
@@ -127,6 +130,13 @@ def main():
                         first_delivery, repeated_delivery = [reply for _, _, reply in posted if has_followup(reply)]
                         assert first_delivery["assignments"] == repeated_delivery["assignments"]
                         assert first_delivery["inputs"] == repeated_delivery["inputs"]
+                    if args.scenario == "parent-failed":
+                        [first_run] = sql("server", "SELECT observation FROM task_runs WHERE id = ?",
+                                          first["run"]["run_id"])
+                        assert json.loads(first_run[0])["phase"] == {
+                            "state": "stopped", "outcome": "failed",
+                            "error": "Fixture Provider unavailable", "waiting_for_children": True,
+                        }
                     wait_for(lambda: sql("runner", "SELECT count(*) FROM run_outbox WHERE acknowledged = 0"),
                              lambda rows: rows == [(0,)])
             except BaseException:

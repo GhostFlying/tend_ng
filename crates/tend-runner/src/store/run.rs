@@ -217,8 +217,7 @@ impl Store {
             "cannot settle the original Run"
         );
         let assignment_id = &run.assignment.placement.assignment_id;
-        let waiting_for_children =
-            outcome == RunOutcome::Completed && coordination::has_followup(&tx, assignment_id)?;
+        let waiting_for_children = coordination::has_followup(&tx, assignment_id)?;
         let next_state = if waiting_for_children {
             if coordination::has_unread_input(&tx, assignment_id)? {
                 "queued"

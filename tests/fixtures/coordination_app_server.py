@@ -79,7 +79,7 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario in {"explicit-close", "late-close"}:
+    if scenario in {"explicit-close", "late-close", "parent-failed"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 else:
     assert tools == {"tend_delegate_work", "tend_close_issue"}
@@ -98,7 +98,7 @@ else:
     [result] = context["child_inputs"]
     assert result["child_issue_id"] == delegated["action"]["issue_id"]
     assert result["child_task_id"] == delegated["action"]["task_id"]
-    if scenario in {"explicit-close", "late-close"}:
+    if scenario in {"explicit-close", "late-close", "parent-failed"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":
@@ -110,7 +110,10 @@ else:
     if scenario != "late-close":
         tool("tend_close_issue", {"summary": result["summary"]}, "close-parent", "parent-close")
 
+completed = {"id": turn_id, "status": "completed", "items": []}
+if scenario == "parent-failed" and role == "parent":
+    completed.update(status="failed", error={"message": "Fixture Provider unavailable"})
 send({
     "method": "turn/completed",
-    "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "items": []}},
+    "params": {"threadId": thread_id, "turn": completed},
 })

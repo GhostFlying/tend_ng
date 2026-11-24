@@ -73,10 +73,10 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
             "running"
         }
         RunPhase::Stopped {
-            outcome: RunOutcome::Completed,
+            outcome,
             waiting_for_children: true,
             ..
-        } if previous.is_some() => "waiting",
+        } if previous.is_some() || *outcome == RunOutcome::Failed => "waiting",
         RunPhase::Stopped {
             outcome: RunOutcome::Completed,
             ..
