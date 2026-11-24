@@ -1,12 +1,15 @@
 use super::Store;
 use anyhow::Result;
 use codex_app::ToolCall;
-use protocol::{DispatchIssue, IssueDispatch, TaskAssignment};
+use protocol::{DispatchIssue, IssueDispatch, RunObservation, TaskAssignment};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) const DISPATCH_QUERY: &str =
     "SELECT i.id, t.id, d.operation_id, m.id, m.chat_id, t.category, t.status,
-            i.title, i.objective, t.repo_ids, t.required_capabilities, d.request, a.contract
+            i.title, i.objective, t.repo_ids, t.required_capabilities, d.request, a.contract,
+            i.state,
+            (SELECT run.observation FROM task_runs run
+              WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1)
        FROM router_dispatches d
        JOIN issues i ON i.id = d.issue_id
        JOIN tasks t ON t.id = d.task_id
@@ -173,6 +176,17 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
             )
         })?
         .map(|assignment| assignment.placement);
+    let run = row
+        .get::<_, Option<String>>(14)?
+        .map(|value| serde_json::from_str::<RunObservation>(&value))
+        .transpose()
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                14,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(IssueDispatch {
         issue_id: row.get(0)?,
         task_id: row.get(1)?,
@@ -182,6 +196,8 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
         category: row.get(5)?,
         status: row.get(6)?,
         placement,
+        issue_state: row.get(13)?,
+        run,
         work: DispatchIssue {
             title: row.get(7)?,
             objective: row.get(8)?,

@@ -1,5 +1,5 @@
 use super::{
-    Store,
+    Store, run,
     work::{DISPATCH_QUERY, read_dispatch},
 };
 use anyhow::{Result, ensure};
@@ -195,10 +195,11 @@ impl Store {
             [&profile.runner_id],
             |row| row.get::<_, bool>(0),
         )?;
-        if !refresh && !reserved && request.receipts.is_empty() {
+        if !refresh && !reserved && request.receipts.is_empty() && request.runs.is_empty() {
             return Ok(Some(RunnerSyncReply {
                 assignments: assignments_to_send(&self.db, &profile.runner_id, false)?,
                 confirmed_receipts: Vec::new(),
+                confirmed_runs: Vec::new(),
             }));
         }
 
@@ -244,6 +245,13 @@ impl Store {
             }
             confirmed_receipts.push(receipt.assignment_id);
         }
+        let mut confirmed_runs = Vec::new();
+        for observation in request.runs {
+            if !run::apply(&tx, &profile.runner_id, &observation)? {
+                return Ok(None);
+            }
+            confirmed_runs.push(observation.event_id);
+        }
 
         let assignments = assignments_to_send(&tx, &profile.runner_id, true)?;
         for assignment in &assignments {
@@ -262,6 +270,7 @@ impl Store {
         Ok(Some(RunnerSyncReply {
             assignments,
             confirmed_receipts,
+            confirmed_runs,
         }))
     }
 }

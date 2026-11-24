@@ -77,10 +77,18 @@ pub struct IssueDispatch {
     pub chat_id: String,
     pub category: String,
     pub status: String,
+    #[serde(default = "open_issue")]
+    pub issue_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub placement: Option<Placement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run: Option<RunObservation>,
     #[serde(flatten)]
     pub work: DispatchIssue,
+}
+
+fn open_issue() -> String {
+    "open".to_owned()
 }
 
 pub fn messages_path(chat_id: &str) -> String {

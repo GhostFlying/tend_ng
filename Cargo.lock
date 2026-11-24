@@ -511,6 +511,7 @@ name = "tend-runner"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "codex-app",
  "protocol",
  "rusqlite",
  "serde",

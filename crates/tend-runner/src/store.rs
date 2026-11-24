@@ -1,3 +1,5 @@
+pub mod run;
+
 use crate::config::Config;
 use anyhow::{Result, ensure};
 use protocol::{ClaimDecision, ClaimReceipt, RUNNER_SYNC_BATCH, RunnerSyncReply};
@@ -12,6 +14,7 @@ impl Store {
         database.busy_timeout(Duration::from_secs(5))?;
         database.pragma_update(None, "journal_mode", "WAL")?;
         database.pragma_update(None, "synchronous", "FULL")?;
+        database.pragma_update(None, "foreign_keys", true)?;
         let tx = database.transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS runner_instance (
@@ -30,6 +33,7 @@ impl Store {
              CREATE INDEX IF NOT EXISTS unsent_claims
                 ON received_assignments(acknowledged) WHERE acknowledged = 0;",
         )?;
+        run::create_tables(&tx)?;
         tx.execute(
             "INSERT INTO runner_instance VALUES (1, ?1, ?2) ON CONFLICT DO NOTHING",
             params![config.runner_id, config.host_id],
@@ -49,7 +53,10 @@ impl Store {
 
     pub fn unfinished(&self) -> Result<u32> {
         Ok(self.0.query_row(
-            "SELECT COUNT(*) FROM received_assignments WHERE json_extract(decision, '$.status') = 'accepted'",
+            "SELECT COUNT(*) FROM received_assignments a
+             WHERE json_extract(a.decision, '$.status') = 'accepted'
+               AND NOT EXISTS (SELECT 1 FROM local_runs r
+                               WHERE r.assignment_id = a.id AND r.state = 'stopped')",
             [],
             |row| row.get(0),
         )?)
@@ -74,7 +81,10 @@ impl Store {
     }
 
     pub fn apply_sync(&mut self, config: &Config, reply: RunnerSyncReply) -> Result<()> {
-        if reply.assignments.is_empty() && reply.confirmed_receipts.is_empty() {
+        if reply.assignments.is_empty()
+            && reply.confirmed_receipts.is_empty()
+            && reply.confirmed_runs.is_empty()
+        {
             return Ok(());
         }
         let profile = config.profile(self.unfinished()?);
@@ -85,6 +95,12 @@ impl Store {
             tx.execute(
                 "UPDATE received_assignments SET acknowledged = 1 WHERE id = ?1",
                 [acknowledged],
+            )?;
+        }
+        for event in reply.confirmed_runs {
+            tx.execute(
+                "UPDATE run_outbox SET acknowledged = 1 WHERE id = ?1",
+                [event],
             )?;
         }
         for assignment in reply.assignments {

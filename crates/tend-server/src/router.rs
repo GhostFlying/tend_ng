@@ -139,7 +139,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 (id, None)
             }
             _ => {
-                let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools)?;
+                let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools, None)?;
                 store.save_thread(chat, &id, TOOL_REVISION)?;
                 let context: Vec<_> = [
                     store.recent_context(chat, input.seq)?,
@@ -161,6 +161,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 client_id: &attempt_id,
                 text: &input.text,
                 context: context.as_deref(),
+                effort: None,
             },
             &mut DispatchHandler {
                 store: &mut store,

@@ -58,6 +58,7 @@ pub struct TurnInput<'a> {
     pub client_id: &'a str,
     pub text: &'a str,
     pub context: Option<&'a str>,
+    pub effort: Option<&'a str>,
 }
 
 #[derive(Deserialize)]
@@ -175,13 +176,14 @@ impl Client {
         cwd: &Path,
         instructions: &str,
         tools: &[Value],
+        model: Option<&str>,
     ) -> Result<String> {
         let response = self.call(
             "thread/start",
             json!({
                 "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
-                "developerInstructions": instructions, "dynamicTools": tools
+                "developerInstructions": instructions, "dynamicTools": tools, "model": model
             }),
         )?;
         Ok(response["thread"]["id"]
@@ -258,6 +260,7 @@ impl Client {
             client_id,
             text,
             context,
+            effort,
         } = input;
         let mut items = Vec::new();
         if let Some(context) = context {
@@ -267,7 +270,8 @@ impl Client {
         let request_id = self.send_request(
             "turn/start",
             json!({
-                "threadId": thread_id, "clientUserMessageId": client_id, "input": items
+                "threadId": thread_id, "clientUserMessageId": client_id, "input": items,
+                "effort": effort
             }),
         )?;
         let startup_deadline = Instant::now() + RPC_TIMEOUT;
@@ -457,15 +461,22 @@ fn rpc_result(event: &Value, method: &str) -> Result<Value> {
 
 impl Drop for Client {
     fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+impl Client {
+    pub fn stop(&mut self) -> Result<()> {
         drop(self.stdin.take());
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
-            if let Ok(Some(_)) = self.child.try_wait() {
-                return;
+            if self.child.try_wait()?.is_some() {
+                return Ok(());
             }
             thread::sleep(Duration::from_millis(20));
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        self.child.kill()?;
+        self.child.wait()?;
+        Ok(())
     }
 }

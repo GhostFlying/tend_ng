@@ -204,6 +204,7 @@ fn handle_runner_sync(
     if sync.profile.runner_id != runner_id
         || !sync.profile.valid()
         || sync.receipts.len() > RUNNER_SYNC_BATCH
+        || sync.runs.len() > RUNNER_SYNC_BATCH
     {
         return Ok(api_error(400, "invalid Runner profile or receipt batch"));
     }
@@ -211,7 +212,7 @@ fn handle_runner_sync(
         Some(reply) => (200, serde_json::to_value(reply)?),
         None => api_error(
             409,
-            "Runner host identity or assignment receipt conflicts with saved facts",
+            "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
         ),
     })
 }

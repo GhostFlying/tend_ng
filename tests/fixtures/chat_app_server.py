@@ -67,7 +67,11 @@ def dispatch(thread_id, turn_id, token, *, remaining=False):
     receipt = json.loads(result["result"]["contentItems"][0]["text"])
     print(json.dumps({"id": "replay-call", "method": "item/tool/call", "params": params}), flush=True)
     replay = json.loads(sys.stdin.readline())
-    assert replay["id"] == "replay-call" and replay["result"] == result["result"], replay
+    assert replay["id"] == "replay-call" and replay["result"]["success"], replay
+    repeated = json.loads(replay["result"]["contentItems"][0]["text"])
+    assert [repeated[key] for key in ("issue_id", "task_id", "operation_id")] == [
+        receipt[key] for key in ("issue_id", "task_id", "operation_id")
+    ], repeated
     return receipt
 
 

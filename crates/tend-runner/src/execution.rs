@@ -1,0 +1,144 @@
+use crate::store::{Store, run::LocalRun};
+use anyhow::{Context, Result};
+use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
+use protocol::{RunOutcome, TOKEN_ENV};
+use serde_json::json;
+use std::{
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    thread,
+    time::Duration,
+};
+
+pub struct Runtime {
+    pub root: PathBuf,
+    pub program: OsString,
+    pub args: Vec<OsString>,
+}
+
+pub fn serve(mut store: Store, runtime: Runtime) {
+    loop {
+        match advance(&mut store, &runtime) {
+            Ok(true) => continue,
+            Ok(false) => {}
+            Err(error) => eprintln!("Runner execution: {error:#}"),
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+}
+
+fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
+    let Some(run) = store.next_run()? else {
+        return Ok(false);
+    };
+    let cwd = runtime.root.join(&run.id);
+    if let Some(process) = &run.process {
+        if !process.is_stopped()? {
+            return Ok(false);
+        }
+        // This is recovery of the original execution. Read history without
+        // starting new agent work for it.
+        let result = recover(runtime, &run, &cwd);
+        settle(store, &run, result, true)?;
+    } else {
+        launch(store, runtime, &run, &cwd)?;
+    }
+    Ok(true)
+}
+
+fn client(runtime: &Runtime, cwd: &Path) -> Result<Client> {
+    let mut command = Command::new(&runtime.program);
+    command
+        .args(&runtime.args)
+        .current_dir(cwd)
+        .env_remove(TOKEN_ENV);
+    Client::connect(&mut command)
+}
+
+fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
+    let mut app = client(runtime, cwd)?;
+    let thread = run
+        .thread_id
+        .as_deref()
+        .context("missing original native thread")?;
+    let turn = app
+        .find_turn(thread, run.turn_id.as_deref(), &run.id)?
+        .filter(|turn| turn.status != TurnStatus::InProgress)
+        .context("App Server stopped without a recoverable terminal turn")?;
+    app.stop()?;
+    Ok(turn)
+}
+
+fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<()> {
+    let started = fs::create_dir_all(cwd)
+        .context("prepare local Issue Agent directory")
+        .and_then(|_| Ok(cwd.canonicalize()?))
+        .and_then(|directory| Ok((client(runtime, &directory)?, directory)));
+    let (mut app, cwd) = match started {
+        Ok(started) => started,
+        Err(error) => return settle(store, run, Err(error), false),
+    };
+    let result = (|| {
+        let agent = &run.assignment.placement.agent;
+        let thread_id = app.start_thread(
+            &cwd,
+            "You coordinate a Tend Issue. Review its objective and requirements. Clarify the intended work and leave implementation to Work Agents.",
+            &[],
+            agent.model.as_deref(),
+        )?;
+        store.attach_process(&run.id, &thread_id, &app.process_identity()?)?;
+        let input = serde_json::to_string(&run.assignment)?;
+        app.run_turn(
+            TurnInput {
+                thread_id: &thread_id,
+                client_id: &run.id,
+                text: &input,
+                context: None,
+                effort: agent.reasoning_effort.as_deref(),
+            },
+            &mut Handler { store, run },
+        )
+    })();
+    // A terminal notification alone does not prove the managed process has
+    // exited. Leave the active record intact if stop cannot be verified.
+    app.stop()?;
+    settle(store, run, result, false)
+}
+
+fn settle(store: &mut Store, run: &LocalRun, result: Result<Turn>, recovered: bool) -> Result<()> {
+    match result {
+        Ok(turn) => {
+            let observed = (recovered && run.turn_id.is_none()).then_some(turn.id.as_str());
+            if turn.status == TurnStatus::Completed {
+                store.finish(run, RunOutcome::Completed, None, observed)
+            } else {
+                let reason = turn.error.map_or_else(
+                    || format!("Codex turn ended with {:?}", turn.status),
+                    |error| error.message,
+                );
+                store.finish(run, RunOutcome::Failed, Some(reason), observed)
+            }
+        }
+        Err(error) => store.finish(run, RunOutcome::Failed, Some(format!("{error:#}")), None),
+    }
+}
+
+struct Handler<'a> {
+    store: &'a mut Store,
+    run: &'a LocalRun,
+}
+
+impl TurnHandler for Handler<'_> {
+    fn started(&mut self, turn_id: &str) -> Result<()> {
+        self.store.mark_started(self.run, turn_id)
+    }
+
+    fn tool(&mut self, _call: ToolCall) -> Result<ToolOutput> {
+        Ok(ToolOutput {
+            success: false,
+            body: json!({"error": "This Run has no Tend tools"}),
+        })
+    }
+}

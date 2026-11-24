@@ -1,3 +1,4 @@
+mod run;
 mod runner;
 mod work;
 
@@ -41,7 +42,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 3,
+            version <= 4,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -109,7 +110,10 @@ impl Store {
         }
         if version < 3 {
             runner::create_tables(&tx)?;
-            tx.pragma_update(None, "user_version", 3)?;
+        }
+        if version < 4 {
+            run::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 4)?;
         }
         tx.commit()?;
         Ok(store)

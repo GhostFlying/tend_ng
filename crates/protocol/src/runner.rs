@@ -76,12 +76,44 @@ pub struct RunnerSync {
     pub protocol: u32,
     pub profile: RunnerProfile,
     pub receipts: Vec<ClaimReceipt>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runs: Vec<RunObservation>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSyncReply {
     pub assignments: Vec<TaskAssignment>,
     pub confirmed_receipts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_runs: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RunObservation {
+    pub event_id: String,
+    pub assignment_id: String,
+    pub task_id: String,
+    pub run_id: String,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub phase: RunPhase,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum RunPhase {
+    Started,
+    Stopped {
+        outcome: RunOutcome,
+        error: Option<String>,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcome {
+    Completed,
+    Failed,
 }
 
 pub fn runner_sync_path(runner_id: &str) -> String {

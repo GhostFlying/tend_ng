@@ -86,6 +86,16 @@ Runner 使用 `TEND_URL`、`TEND_TOKEN` 和 `tend-runner --config <file> --db <f
 python3 tests/e2e/runner.py target/debug/tend-server target/debug/tend target/debug/tend-runner
 ```
 
+### Issue Agent 本机 Run
+
+- Runner 的执行和同步各用自己的 SQLite 连接。一次本机执行从已领取的原分配开始，用冻结的具名 Agent 配置启动 Codex。记录原生回合开始、结果和实际停妥。Issue 的业务状态由 Owner 决定。
+- App Server 启动前保存本机执行身份，收到回合证据后计入运行 slot。正常终态和实际停妥一并完成 Task。重启后按原进程和回合查证，旧执行仍活跃时保留占用。
+- Run 的开始与停妥作为持久记录由原 Runner 发送。Server 同轮先结算领取，再应用执行事实，按原记录身份返回回执。断开 Server 后完成一个 Issue Agent 回合，恢复通信时重传并核对原 Task、原 Run、停妥及 Issue 当前状态。
+
+```sh
+python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target/debug/tend-runner
+```
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)
