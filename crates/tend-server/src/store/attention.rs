@@ -292,9 +292,7 @@ impl Store {
         id: &str,
         answer: &str,
     ) -> Result<Option<Attention>> {
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (tx, timing) = super::timing::begin(&mut self.db, "attention_answer")?;
         let Some(input) = router_input(&tx, attempt, call)? else {
             return Ok(None);
         };
@@ -331,7 +329,7 @@ impl Store {
             Some(&user),
         )?;
         let result = lookup(&tx, &input.chat, id)?;
-        tx.commit()?;
+        super::timing::commit(tx, timing)?;
         Ok(result)
     }
 }

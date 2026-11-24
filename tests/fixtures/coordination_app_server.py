@@ -184,6 +184,7 @@ elif role == "child":
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
     if scenario == "native-review":
+        assert "seek independent review" in start["params"]["developerInstructions"]
         receiver = "native-review-child"
         history = [
             {"id": "spawn", "tool": "spawnAgent", "status": "completed", "agentsStates": {receiver: {"status": "running"}}},

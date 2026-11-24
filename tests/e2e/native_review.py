@@ -74,6 +74,10 @@ def main():
                 parent = issue["parent_issue_id"]
                 wait_for(lambda: cli("issue", "read", parent),
                          lambda current: current["status"] == "completed" and current["issue_state"] == "closed")
+                query = cli("chat", "send", "main", "Check the finished fixture Issue.")["message_id"]
+                wait_for(lambda: cli("chat", "read", "main")["messages"],
+                         lambda messages: any(message.get("reply_to") == query and message["text"] ==
+                                              "The fixture Issue is closed." for message in messages))
                 assert cli("workspace", "reclaim", parent, "dirty-reclaim")["operation_id"] == "dirty-reclaim"
                 dirty = wait_for(lambda: cli("workspace", "status", "dirty-reclaim"),
                                  lambda receipt: receipt["state"] != "pending")

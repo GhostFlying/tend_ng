@@ -181,6 +181,18 @@ impl Store {
             .optional()?)
     }
 
+    pub fn router_chat(&self, attempt: &str, call: &ToolCall) -> Result<Option<String>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT i.chat_id FROM router_attempts a JOIN router_inputs i ON i.seq = a.seq
+             WHERE a.id = ?1 AND a.thread_id = ?2 AND a.turn_id = ?3 AND i.outcome IS NULL",
+                params![attempt, call.thread_id, call.turn_id],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn dispatches_for_input(&self, source: i64) -> Result<Vec<IssueDispatch>> {
         let mut statement = self.db.prepare(&format!(
             "{DISPATCH_QUERY}

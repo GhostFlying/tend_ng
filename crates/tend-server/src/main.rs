@@ -2,20 +2,18 @@ mod artifacts;
 mod github;
 mod inspect;
 mod router;
+mod runner_api;
 mod store;
 mod web;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
-use protocol::{
-    ApiError, DEFAULT_LISTEN, RUNNER_PROTOCOL, RUNNER_SYNC_BATCH, RunnerSync, SendMessage,
-    TOKEN_ENV,
-};
+use protocol::{ApiError, DEFAULT_LISTEN, SendMessage, TOKEN_ENV};
 use serde_json::{Value, json};
 use std::{
     env,
     ffi::OsString,
     io::{Cursor, Read},
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::mpsc::TrySendError,
     thread,
     time::Duration,
@@ -95,6 +93,7 @@ fn main() -> Result<()> {
     }
     let db = db.context(USAGE)?;
     let mut store = Store::initialize(&db)?;
+    store.enable_foreground_writes()?;
     let cwd = cwd
         .canonicalize()
         .context("resolve Router working directory")?;
@@ -105,7 +104,7 @@ fn main() -> Result<()> {
     let placement = Store::open(&db)?;
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
-    let artifact_root = db.with_extension("artifacts");
+    let synchronization = runner_api::serve(&db)?;
     thread::spawn(move || schedule(placement));
     github::spawn(Store::open(&db)?, github_cli.clone());
     github::spawn_discovery(Store::open(&db)?, github_cli);
@@ -154,8 +153,17 @@ fn main() -> Result<()> {
                 let _ = request.respond(json_response(503, &body)?);
             }
             continue;
+        } else if let Some(endpoint) = runner_api::Endpoint::parse(request.url()) {
+            if let Err(
+                TrySendError::Full((request, _)) | TrySendError::Disconnected((request, _)),
+            ) = synchronization.try_send((request, endpoint))
+            {
+                let (_, body) = api_error(503, "Runner sync workers are busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
         } else {
-            handle(&mut store, &mut request, &artifact_root).unwrap_or_else(|error| {
+            handle(&mut store, &mut request).unwrap_or_else(|error| {
                 eprintln!("User API failed: {error:#}");
                 api_error(500, "Server could not process the request")
             })
@@ -197,7 +205,7 @@ fn authenticated(request: &Request, auth: &str) -> bool {
         .any(|header| header.field.equiv("Authorization") && header.value.as_str() == auth)
 }
 
-fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Result<(u16, Value)> {
+fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
@@ -453,23 +461,6 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             None => api_error(404, "issue not found"),
         });
     }
-    if let Some(runner_id) = path
-        .strip_prefix("/api/v1/runners/")
-        .and_then(|path| path.strip_suffix("/sync"))
-        .filter(|id| protocol::valid_id(id))
-    {
-        let runner_id = runner_id.to_owned();
-        return handle_runner_sync(store, request, &runner_id, None);
-    }
-    if let Some((runner_id, task)) = path
-        .strip_prefix("/api/v1/runners/")
-        .and_then(|path| path.split_once("/reconcile/"))
-        .filter(|(runner, task)| protocol::valid_id(runner) && protocol::valid_id(task))
-    {
-        let scope = (task.to_owned(), artifact_root);
-        let runner_id = runner_id.to_owned();
-        return handle_runner_sync(store, request, &runner_id, Some(scope));
-    }
     if let Some(chat_id) = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/attentions"))
@@ -702,56 +693,6 @@ fn request_bytes(request: &mut Request) -> Result<Option<Vec<u8>>> {
         .take(MAX_REQUEST_BYTES + 1)
         .read_to_end(&mut bytes)?;
     Ok((bytes.len() as u64 <= MAX_REQUEST_BYTES).then_some(bytes))
-}
-
-fn handle_runner_sync(
-    store: &mut Store,
-    request: &mut Request,
-    runner_id: &str,
-    reconcile: Option<(String, &Path)>,
-) -> Result<(u16, Value)> {
-    if request.method() != &Method::Post {
-        return Ok(api_error(405, "method not allowed"));
-    }
-    let Some(bytes) = request_bytes(request)? else {
-        return Ok(api_error(413, "Runner sync too large"));
-    };
-    let Ok(sync) = serde_json::from_slice::<RunnerSync>(&bytes) else {
-        return Ok(api_error(400, "invalid Runner sync"));
-    };
-    if sync.protocol == 0
-        || sync.protocol > RUNNER_PROTOCOL
-        || sync.protocol < RUNNER_PROTOCOL.saturating_sub(1)
-    {
-        return Ok(api_error(426, "unsupported Runner protocol"));
-    }
-    if sync.profile.runner_id != runner_id
-        || !sync.profile.valid()
-        || sync.receipts.len() > RUNNER_SYNC_BATCH
-        || sync.runs.len() > RUNNER_SYNC_BATCH
-        || sync.records.len() > RUNNER_SYNC_BATCH
-        || sync.reclaim_receipts.len() > RUNNER_SYNC_BATCH
-    {
-        return Ok(api_error(400, "invalid Runner profile or receipt batch"));
-    }
-    if let Some((task, root)) = &reconcile {
-        if !store.reconcile_scope(task, &sync)? {
-            return Ok(api_error(
-                409,
-                "Task is not registered for these Runner records",
-            ));
-        }
-        store.reconcile_artifacts(root, task, runner_id)?;
-    }
-    Ok(
-        match store.sync_runner(sync, reconcile.as_ref().map(|(task, _)| task.as_str()))? {
-            Some(reply) => (200, serde_json::to_value(reply)?),
-            None => api_error(
-                409,
-                "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
-            ),
-        },
-    )
 }
 
 fn api_error(status: u16, error: &str) -> (u16, Value) {

@@ -30,6 +30,7 @@
 
 - Server、Runner 和 CLI 用独立 Rust 构建入口，tsnet 用独立 Go 进程。Server 和每个 Runner 各用自己的 SQLite WAL 库。开发和验证在 devcontainer 中完成，Web 工具链沿用旧 Tend 的基线。 [基础选型](docs/engineering.md#基础技术栈)
 - 测试用固定输入和 App Server 输出 fixture。局部修改跑定向模块测试，共享接口变化验证受影响的边界。少量端到端测试用真实 Server、Runner 和临时 workspace，核对用户可读的结果、原身份、实际副作用和资源释放。首期以本地定向验证支撑迭代，CI 卡口在稳定后确定。 [实现顺序与验证范围](docs/engineering.md#实现顺序与验证范围)
+- 真实 Codex 验收须显式指定独立、已认证的 Codex home，验收会话与个人会话分别存放。使用 `tests/e2e/live_codex.py --codex-home` 运行真实验收，日常 fixture 使用模拟 App Server。凭据保存在独立 home 的本机配置中。
 
 ## 提交与交付
 

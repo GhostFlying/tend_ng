@@ -134,8 +134,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     let branches = workspace::branches(run, &cwd);
     let result = (|| {
         let agent = &run.assignment.placement.agent;
-        let coordinator = agent.category == "issue-router";
-        let (instructions, tools) = tools::catalogue(coordinator);
+        let (instructions, tools) = tools::catalogue(&agent.category);
         let thread_id = app.start_thread(&cwd, instructions, &tools, agent.model.as_deref())?;
         store.attach_process(&run.id, &thread_id, &app.process_identity()?)?;
         let input = serde_json::to_string(&run.assignment)?;

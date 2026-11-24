@@ -18,7 +18,7 @@ const FIND_PULL: &str = "tend_find_pull_request";
 const LINK_PULL: &str = "tend_link_pull_request";
 const POST: &str = "tend_post_issue_message";
 
-pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
+pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
     let post = json!({
         "type":"function", "name":POST,
         "description":"Publish a complete message to the current Issue. When answering a message, use its original ID as reply_to.",
@@ -112,7 +112,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             "additionalProperties": false
         }
     });
-    if coordinator {
+    if category == "issue-router" {
         let delegate = json!({
             "type": "function",
             "name": DELEGATE,
@@ -187,7 +187,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
         (
-            "Coordinate the Tend Issue through child Issues. Use tend_agent_candidates when you need to name a work configuration. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request for a known GitHub PR and tend_find_pull_request for a recorded work branch. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
+            include_str!("../../../docs/roles/issue-agent.md"),
             vec![
                 delegate,
                 candidates,
@@ -221,7 +221,11 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             }
         });
         (
-            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries, tend_link_pull_request for a known GitHub PR, tend_find_pull_request for its recorded branch, and tend_close_issue when the Issue is done.",
+            if category == "review" {
+                include_str!("../../../docs/roles/review-agent.md")
+            } else {
+                include_str!("../../../docs/roles/work-agent.md")
+            },
             vec![
                 close,
                 submit,

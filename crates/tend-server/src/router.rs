@@ -13,7 +13,7 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 8;
+const TOOL_REVISION: i64 = 9;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -22,6 +22,7 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
     "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
     "Use tend_relay_issue_message to deliver the current user message to a related existing Issue when its Owner needs to act. ",
+    "Use tend_list_issues to locate recent related work in this Chat and tend_read_issue to check current work facts before answering a follow-up. ",
     "If the remaining work is unclear, explain what Tend has already saved or ask a focused question. ",
     "A Tend Issue report is a background fact, not a fresh user request. Reply to the original topic, ",
     "summarize the actual result, and mention any supplied delivery files. Tend attaches those files to your final answer. ",
@@ -182,6 +183,17 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         relay_tool(),
         subscribe_tool(),
         json!({
+            "type":"function", "name":"tend_list_issues",
+            "description":"List the latest Issue and PR statuses associated with this Chat.",
+            "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
+        }),
+        json!({
+            "type":"function", "name":"tend_read_issue",
+            "description":"Read an Issue from this Chat, including its latest Task, actual execution, and published delivery files.",
+            "inputSchema":{"type":"object","properties":{"issue_id":{"type":"string"}},
+                           "required":["issue_id"],"additionalProperties":false}
+        }),
+        json!({
             "type":"function", "name":"tend_agent_candidates",
             "description":"Read qualifying Issue Agent configurations by repository and capability.",
             "inputSchema":{"type":"object","properties":{
@@ -325,6 +337,31 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" => self.dispatch(&call),
+            "tend_list_issues" | "tend_read_issue" => {
+                let Some(chat) = self.store.router_chat(self.attempt_id, &call)? else {
+                    return Ok(tool_error("Cannot verify the current Chat"));
+                };
+                if call.tool == "tend_list_issues" {
+                    let page = self.store.issue_board(&chat, i64::MAX)?;
+                    return Ok(ToolOutput {
+                        success: true,
+                        body: serde_json::to_value(page)?,
+                    });
+                }
+                let Some(id) = call.arguments["issue_id"]
+                    .as_str()
+                    .filter(|id| protocol::valid_id(id))
+                else {
+                    return Ok(tool_error("Provide the original Issue ID"));
+                };
+                match self.store.issue(id)? {
+                    Some(issue) if issue.chat_id == chat => Ok(ToolOutput {
+                        success: true,
+                        body: serde_json::to_value(issue)?,
+                    }),
+                    _ => Ok(tool_error("That Issue is not in this Chat")),
+                }
+            }
             "tend_agent_candidates" => {
                 let Ok(query) = serde_json::from_value::<AgentQuery>(call.arguments.clone()) else {
                     return Ok(tool_error(

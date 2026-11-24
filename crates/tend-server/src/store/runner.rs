@@ -358,9 +358,12 @@ impl Store {
             }));
         }
 
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let operation = if task.is_some() {
+            "runner_full"
+        } else {
+            "runner_incremental"
+        };
+        let (tx, timing) = super::timing::begin(&mut self.db, operation)?;
         if refresh {
             tx.execute(
                 "INSERT INTO runners (id, host_id, profile, last_seen, protocol)
@@ -495,7 +498,7 @@ impl Store {
         if request.drained {
             super::handoff::note_drained(&tx, &profile.runner_id)?;
         }
-        tx.commit()?;
+        super::timing::commit(tx, timing)?;
         Ok(Some(RunnerSyncReply {
             workspace_reclaims,
             confirmed_reclaims,

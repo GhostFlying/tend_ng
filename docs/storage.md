@@ -56,4 +56,6 @@ Runner 按自身身份读取已分配的待投递任务。建议空查询只读�
 
 用同一组 fixture 在 devcontainer 对照日常通信与多 Runner 重连补传。补传期间读取看板、提交 Chat 和 Attention 答复，并上传交付原件。再增加历史量核对本页读取的查询次数和扫描范围。分别观察用户请求延迟、写连接排队、事务执行与提交时间，同时核对原结果、工作区可释放证据及重复回执。性能验证使用预期部署的持久化配置。若持久回执承诺在断电后仍可读回，SQLite WAL 的测试基线使用 `synchronous=FULL`。 [SQLite 提交持久性](https://sqlite.org/pragma.html#pragma_synchronous)
 
+Server 的 Runner 同步由独立的有界队列处理，文件传输和 rollout 也各有处理入口。启用 `TEND_SQLITE_TIMING=1` 可以分别观察 Chat 收件、Attention 结算和 Runner 同步的写锁等待、事务体与提交耗时。前台连接在短事务争用期间按较短的间隔重试。 [一期补传负载结果](plans/phase-one-closeout.md#一期验收结果)
+
 如果批次有界、读查询有索引且事务已经足够短，预期负载下仍反复发生跨 Issue 写入排队并拖慢用户的 Chat 或 Attention 写操作，再用同一负载评估 Server 切换 PostgreSQL。PostgreSQL 可以并发更新互不冲突的行，Runner 的本地存储独立选型。 [PostgreSQL 行锁](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS)

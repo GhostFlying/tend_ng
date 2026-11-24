@@ -14,6 +14,8 @@ ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
 ROUTER_SUBSCRIBE = "Subscribe to demo CI."
 cases[ROUTER_SUBSCRIBE] = {"answer": "I will follow demo CI."}
+CHECK_ISSUE = "Check the finished fixture Issue."
+cases[CHECK_ISSUE] = {"answer": "The fixture Issue is closed."}
 PINNED_REVIEW = "Prepare a guide from the pinned demo branch."
 cases[PINNED_REVIEW] = {"dispatch": True}
 BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
@@ -186,6 +188,8 @@ for line in sys.stdin:
                                    if report["original_request"] == WEB_REQUEST
                                    else "The guide is ready. Download the attached guide.txt."),
                         "drop_before_start": 1}
+            elif text.startswith("Storage measurement "):
+                case = {"answer": "Accepted."}
             else:
                 case = cases[text]
             with database:
@@ -216,6 +220,14 @@ for line in sys.stdin:
                     saved.write_text(receipt["question_message_id"])
                     sys.exit(0)
                 assert receipt["question_message_id"] == saved.read_text()
+                answer = case["answer"]
+            elif text == CHECK_ISSUE:
+                token = params["clientUserMessageId"]
+                board = decision_tool("tend_list_issues", {}, thread_id, turn_id, token)
+                [root] = [item for item in board["issues"] if item.get("parent_issue_id") is None]
+                issue = decision_tool("tend_read_issue", {"issue_id": root["id"]}, thread_id, turn_id, token)
+                assert issue["issue_state"] == "closed" and issue["status"] == "completed"
+                assert issue["issue_id"] == root["id"]
                 answer = case["answer"]
             elif text == ROUTER_SUBSCRIBE:
                 condition = {"url": "https://github.com/example/guide/pull/82",

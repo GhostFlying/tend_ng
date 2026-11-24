@@ -14,6 +14,7 @@ mod reports;
 mod review;
 mod run;
 mod runner;
+mod timing;
 mod work;
 
 use anyhow::{Context, Result, ensure};
@@ -209,10 +210,13 @@ impl Store {
         Ok(Self { db })
     }
 
+    pub fn enable_foreground_writes(&self) -> Result<()> {
+        self.db.busy_handler(Some(retry_foreground_write))?;
+        Ok(())
+    }
+
     pub fn accept(&mut self, chat_id: &str, request: &SendMessage) -> Result<Accepted> {
-        let tx = self
-            .db
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (tx, timing) = timing::begin(&mut self.db, "chat_accept")?;
         let existing: Option<(String, String, String, Option<String>)> = tx
             .query_row(
                 "SELECT id, chat_id, text, reply_to FROM chat_messages WHERE operation_id = ?1",
@@ -259,7 +263,7 @@ impl Store {
             "INSERT INTO router_inputs (message_seq, chat_id) VALUES (?1, ?2)",
             params![tx.last_insert_rowid(), chat_id],
         )?;
-        tx.commit()?;
+        timing::commit(tx, timing)?;
         Ok(Accepted::Received(Receipt { message_id }))
     }
 
@@ -587,4 +591,24 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn retry_foreground_write(attempts: i32) -> bool {
+    const FAST_ATTEMPTS: i32 = 50;
+    const FAST_INTERVAL_MS: i32 = 2;
+    const SLOW_INTERVAL_MS: i32 = 5;
+    const MAX_WAIT_MS: i32 = 5_000;
+    let fast = attempts.min(FAST_ATTEMPTS);
+    let slow = attempts - fast;
+    let waited = fast * FAST_INTERVAL_MS + slow * SLOW_INTERVAL_MS;
+    let interval = if attempts < FAST_ATTEMPTS {
+        FAST_INTERVAL_MS
+    } else {
+        SLOW_INTERVAL_MS
+    };
+    if waited + interval > MAX_WAIT_MS {
+        return false;
+    }
+    std::thread::sleep(Duration::from_millis(interval as u64));
+    true
 }

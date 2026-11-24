@@ -63,3 +63,26 @@ CLI 为已结束的顶层 Issue 登记回收。Server 暂停该树的新准入�
 
 - 把角色指引作为短文本随原生回合载入。复杂工作提醒 Work Agent 寻求独立审阅，保留对审阅方式和结果的自主判断。Review Agent 说明候选、范围、证据和结论。
 - Router 在原 Chat 按需读取相关 Issue 的持久事实。只读查证共用用户 API 的读逻辑，继续由 Router 组织给用户的答复。
+
+## SQLite 补传负载
+
+- 两台 Runner 持久领取后离线结束，重连时分别走普通增量和原 Task 全量。读写探针同时读取固定看板和持久提交 Chat，核对历史增长后仍返回同一页、每个 Run 只结算一次。
+- 当启用 SQLite 诊断时，在 Server stderr 记录 Chat 收件、Attention 结算和有写入的 Runner 同步的取写锁、事务体和提交时间。使用同一负载对照普通请求的端到端耗时。
+
+SQLite 诊断样本发现 Chat 取写锁会出现数十毫秒延迟。HTTP 收件也曾和 Runner 读取请求体共用同一循环。同步和全量对账转交独立的有界处理队列，继续使用各自 SQLite 连接与原回执，在 fixture 中让一个 Runner 暂时只送出部分请求体，验证 Chat 收件和看板读仍完成。以同一负载复测写锁耗时。
+
+分离后，部分请求体期间两个独立请求如期完成。单次 Chat 写锁等待仍达到约 530 ms，事务体和提交明显更短。给前台连接设置低间隔的 SQLite busy 重试，保留原五秒总等待上限，减少写锁在短事务之间释放时错过下一次尝试的时间。后台仍使用原 SQLite 重试策略。
+
+## 真实 Codex 的隔离验收
+
+真实验收显式接收独立、已认证的 Codex home。验收复用固定的本地示例任务与临时 workspace。模拟 App Server 的 fixture 仍可直接在开发容器运行。
+
+## 一期验收结果
+
+- **真实 Codex。** 主 Chat 发出的两项任务独立推进。示例 Git 仓库的 Work Agent 从托管目录交付 `quickstart.txt`，Router 从原话题返回实际可下载文件。另一项由 Work Agent 发出 Attention，经过 Issue Agent 和 Router 后在原 Chat 中答复，并由原 Task 收到决定。另一路具备 `image_gen` 的配置用真实 Codex 生成 PNG，沿原话题下载并核对文件格式。
+- **Web 与公共 API。** Chromium 的桌面和移动端覆盖原话题结果、文件下载、Attention、Issue 讨论、点击加载 rollout 和 PR 看板。丢写回执后沿原操作重试。Web 与 CLI 读取同一份持久状态。
+- **断线、等待、控制与升级。** 固定 fixture 覆盖离线执行和原身份回传、交付副本补回、Steer、停止、Queue、等待时保留目录、五分钟合并、同机接替后在原 Task 上新建 Run，以及 Server 的协议窗口预检。tsnet 的独立进程在隔离控制网验证了多入口及节点重启后的身份恢复。
+- **SQLite。** 两台 Runner 从离线完成状态分别走增量和全量补传。测量期间保留 2,000 条无关 Issue 历史，每轮各记录 40 次 Chat 收件和看板读取。部分请求体滞留时，另一 Runner 和用户 API 仍各自完成。三轮补传样本的 Chat 收件 p95 为 6.2–7.7 ms，看板读取 p95 为 1.1–1.2 ms。样本使用本机 devcontainer 和 SQLite WAL `synchronous=FULL`，包含一次单独的 Attention 写入诊断。生产持久盘延迟和长时负载另用部署数据核对。
+- **使用环境。** 使用真实 Codex 的验收在本机临时部署完成。实际 tailnet、服务账户的私有仓库只读权限和旧实例正式切换属于部署验收。首期协议从 v1 起步，升级窗口在 fixture 中用目标协议预检验证。
+
+固定入口在 `tests/e2e/`。局部复跑可选择 `external_wait.py --handoff`、`control.py`、`delivery.py --web`、`attention.py --web`、`external_routing.py` 或 `storage_load.py`，参数顺序为 Server、CLI 和 Runner 的构建产物。真实环境使用 `live_codex.py --codex-home`，常用启动配置见 [README](../../README.md)。
