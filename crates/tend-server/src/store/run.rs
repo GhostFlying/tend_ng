@@ -58,6 +58,7 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         if old.assignment_id != observation.assignment_id
             || old.thread_id != observation.thread_id
             || old.turn_id != observation.turn_id
+            || old.input_ids != observation.input_ids
             || old.phase != RunPhase::Started
         {
             return Ok(false);
@@ -73,6 +74,11 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         }
         RunPhase::Stopped {
             outcome: RunOutcome::Completed,
+            waiting_for_children: true,
+            ..
+        } if previous.is_some() => "waiting",
+        RunPhase::Stopped {
+            outcome: RunOutcome::Completed,
             ..
         } if previous.is_some() => "completed",
         RunPhase::Stopped {
@@ -83,8 +89,10 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
     };
     let expected = if previous.is_some() {
         "running"
-    } else {
+    } else if observation.input_ids.is_empty() {
         "accepted"
+    } else {
+        "waiting"
     };
     let updated = db.execute(
         "UPDATE tasks SET status = ?2 WHERE id = ?1 AND status = ?3",
@@ -103,9 +111,20 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
             original
         ],
     )?;
+    for input in &observation.input_ids {
+        if db.execute(
+            "UPDATE issue_inputs SET run_id = ?2 WHERE id = ?1 AND assignment_id = ?3
+             AND (run_id IS NULL OR run_id = ?2)",
+            params![input, observation.run_id, observation.assignment_id],
+        )? != 1
+        {
+            return Ok(false);
+        }
+    }
     db.execute(
         "INSERT INTO runner_run_events (id, runner_id, observation) VALUES (?1, ?2, ?3)",
         params![observation.event_id, runner, original],
     )?;
+    super::coordination::report_task_stop(db, observation)?;
     Ok(true)
 }

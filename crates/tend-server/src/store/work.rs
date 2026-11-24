@@ -5,14 +5,16 @@ use protocol::{DispatchIssue, IssueDispatch, RunObservation, TaskAssignment};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) const DISPATCH_QUERY: &str =
-    "SELECT i.id, t.id, d.operation_id, m.id, m.chat_id, t.category, t.status,
+    "SELECT i.id, t.id, coalesce(d.operation_id, child.operation_id), m.id, m.chat_id, t.category, t.status,
             i.title, i.objective, t.repo_ids, t.required_capabilities, d.request, a.contract,
             i.state,
             (SELECT run.observation FROM task_runs run
-              WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1)
-       FROM router_dispatches d
-       JOIN issues i ON i.id = d.issue_id
-       JOIN tasks t ON t.id = d.task_id
+              WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1),
+            i.parent_issue_id
+       FROM tasks t
+       JOIN issues i ON i.id = t.issue_id
+       LEFT JOIN router_dispatches d ON t.id = d.task_id
+       LEFT JOIN child_dispatches child ON t.id = child.task_id
        JOIN chat_messages m ON m.seq = i.source_seq
        LEFT JOIN runner_assignments a ON a.id = t.current_assignment";
 
@@ -155,7 +157,7 @@ impl Store {
 
     pub fn dispatches_for_input(&self, source: i64) -> Result<Vec<IssueDispatch>> {
         let mut statement = self.db.prepare(&format!(
-            "{DISPATCH_QUERY} WHERE i.source_seq = ?1 ORDER BY i.rowid"
+            "{DISPATCH_QUERY} WHERE i.source_seq = ?1 AND d.operation_id IS NOT NULL ORDER BY i.rowid"
         ))?;
         Ok(statement
             .query_map([source], read_dispatch)?
@@ -197,6 +199,7 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
         status: row.get(6)?,
         placement,
         issue_state: row.get(13)?,
+        parent_issue_id: row.get(15)?,
         run,
         work: DispatchIssue {
             title: row.get(7)?,

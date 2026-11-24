@@ -3,6 +3,12 @@ use serde::{Deserialize, Serialize};
 
 pub const RUNNER_PROTOCOL: u32 = 1;
 pub const RUNNER_SYNC_BATCH: usize = 32;
+pub const WORK_CATEGORIES: &[&str] = &[
+    "implementation",
+    "implementation-economy",
+    "investigation",
+    "review",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentProfile {
@@ -55,6 +61,8 @@ pub struct TaskAssignment {
     pub issue_id: String,
     pub source_message_id: String,
     pub chat_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue_id: Option<String>,
     pub work: DispatchIssue,
 }
 
@@ -78,6 +86,8 @@ pub struct RunnerSync {
     pub receipts: Vec<ClaimReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub records: Vec<RunnerRecord>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -86,6 +96,65 @@ pub struct RunnerSyncReply {
     pub confirmed_receipts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub confirmed_runs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inputs: Vec<IssueInput>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", content = "data", rename_all = "snake_case")]
+pub enum RunnerRecord {
+    Run(RunObservation),
+    Operation(WorkOperation),
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkOperation {
+    pub operation_id: String,
+    pub assignment_id: String,
+    pub run_id: String,
+    pub action: WorkAction,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkAction {
+    Delegate {
+        issue_id: String,
+        task_id: String,
+        category: String,
+        work: DispatchIssue,
+    },
+    CloseIssue {
+        summary: String,
+    },
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IssueInput {
+    pub input_id: String,
+    pub assignment_id: String,
+    pub child_issue_id: String,
+    pub child_task_id: String,
+    #[serde(flatten)]
+    pub cause: IssueInputCause,
+    pub summary: String,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum IssueInputCause {
+    IssueClosed,
+    NoCandidate {
+        missing_repo_ids: Vec<String>,
+        category: String,
+        required_capabilities: Vec<String>,
+    },
+    TaskStopped {
+        run_id: String,
+        outcome: RunOutcome,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -96,6 +165,8 @@ pub struct RunObservation {
     pub run_id: String,
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_ids: Vec<String>,
     pub phase: RunPhase,
 }
 
@@ -106,10 +177,12 @@ pub enum RunPhase {
     Stopped {
         outcome: RunOutcome,
         error: Option<String>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        waiting_for_children: bool,
     },
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum RunOutcome {
     Completed,
@@ -120,8 +193,9 @@ pub fn runner_sync_path(runner_id: &str) -> String {
     format!("/api/v1/runners/{runner_id}/sync")
 }
 
-pub fn matching_issue_agent<'a>(
+pub fn matching_task_agent<'a>(
     profile: &'a RunnerProfile,
+    category: &str,
     work: &DispatchIssue,
 ) -> Option<&'a AgentProfile> {
     if !work
@@ -131,16 +205,22 @@ pub fn matching_issue_agent<'a>(
     {
         return None;
     }
+    let satisfies = |agent: &AgentProfile| {
+        work.required_capabilities
+            .iter()
+            .all(|cap| agent.capabilities.contains(cap))
+    };
+    if category != "issue-router" {
+        return profile
+            .agents
+            .iter()
+            .find(|agent| agent.category == category && satisfies(agent));
+    }
     if !work.required_capabilities.is_empty()
-        && !profile.agents.iter().any(|agent| {
-            matches!(
-                agent.category.as_str(),
-                "implementation" | "implementation-economy" | "investigation" | "review"
-            ) && work
-                .required_capabilities
-                .iter()
-                .all(|cap| agent.capabilities.contains(cap))
-        })
+        && !profile
+            .agents
+            .iter()
+            .any(|agent| WORK_CATEGORIES.contains(&agent.category.as_str()) && satisfies(agent))
     {
         return None;
     }

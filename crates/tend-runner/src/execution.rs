@@ -1,11 +1,11 @@
 use crate::store::{Store, run::LocalRun};
+use crate::{tools, workspace};
 use anyhow::{Context, Result};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
 use protocol::{RunOutcome, TOKEN_ENV};
 use serde_json::json;
 use std::{
     ffi::OsString,
-    fs,
     path::{Path, PathBuf},
     process::Command,
     thread,
@@ -33,7 +33,7 @@ fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
     let Some(run) = store.next_run()? else {
         return Ok(false);
     };
-    let cwd = runtime.root.join(&run.id);
+    let cwd = workspace::directory(&runtime.root, &run);
     if let Some(process) = &run.process {
         if !process.is_stopped()? {
             return Ok(false);
@@ -43,7 +43,7 @@ fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
         let result = recover(runtime, &run, &cwd);
         settle(store, &run, result, true)?;
     } else {
-        launch(store, runtime, &run, &cwd)?;
+        launch(store, runtime, &run)?;
     }
     Ok(true)
 }
@@ -71,10 +71,9 @@ fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
     Ok(turn)
 }
 
-fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<()> {
-    let started = fs::create_dir_all(cwd)
-        .context("prepare local Issue Agent directory")
-        .and_then(|_| Ok(cwd.canonicalize()?))
+fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
+    let started = workspace::prepare(&runtime.root, run)
+        .context("prepare Tend workspace")
         .and_then(|directory| Ok((client(runtime, &directory)?, directory)));
     let (mut app, cwd) = match started {
         Ok(started) => started,
@@ -82,20 +81,18 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, cwd: &Path) -> R
     };
     let result = (|| {
         let agent = &run.assignment.placement.agent;
-        let thread_id = app.start_thread(
-            &cwd,
-            "You coordinate a Tend Issue. Review its objective and requirements. Clarify the intended work and leave implementation to Work Agents.",
-            &[],
-            agent.model.as_deref(),
-        )?;
+        let coordinator = agent.category == "issue-router";
+        let (instructions, tools) = tools::catalogue(coordinator);
+        let thread_id = app.start_thread(&cwd, instructions, &tools, agent.model.as_deref())?;
         store.attach_process(&run.id, &thread_id, &app.process_identity()?)?;
         let input = serde_json::to_string(&run.assignment)?;
+        let context = store.coordination_context(run)?;
         app.run_turn(
             TurnInput {
                 thread_id: &thread_id,
                 client_id: &run.id,
                 text: &input,
-                context: None,
+                context: context.as_deref(),
                 effort: agent.reasoning_effort.as_deref(),
             },
             &mut Handler { store, run },
@@ -135,10 +132,25 @@ impl TurnHandler for Handler<'_> {
         self.store.mark_started(self.run, turn_id)
     }
 
-    fn tool(&mut self, _call: ToolCall) -> Result<ToolOutput> {
-        Ok(ToolOutput {
-            success: false,
-            body: json!({"error": "This Run has no Tend tools"}),
-        })
+    fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
+        let action = match tools::action(self.run, &call) {
+            Ok(action) => action,
+            Err(error) => {
+                return Ok(ToolOutput {
+                    success: false,
+                    body: json!({"error": error.to_string()}),
+                });
+            }
+        };
+        match self.store.accept_operation(self.run, &call, action)? {
+            Some(operation) => Ok(ToolOutput {
+                success: true,
+                body: serde_json::to_value(operation)?,
+            }),
+            None => Ok(ToolOutput {
+                success: false,
+                body: json!({"error": "The original tool call has different arguments"}),
+            }),
+        }
     }
 }

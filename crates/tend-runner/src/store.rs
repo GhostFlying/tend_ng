@@ -1,3 +1,4 @@
+mod coordination;
 pub mod run;
 
 use crate::config::Config;
@@ -53,10 +54,7 @@ impl Store {
 
     pub fn unfinished(&self) -> Result<u32> {
         Ok(self.0.query_row(
-            "SELECT COUNT(*) FROM received_assignments a
-             WHERE json_extract(a.decision, '$.status') = 'accepted'
-               AND NOT EXISTS (SELECT 1 FROM local_runs r
-                               WHERE r.assignment_id = a.id AND r.state = 'stopped')",
+            "SELECT COUNT(*) FROM received_assignments WHERE execution_state IN ('queued', 'active')",
             [],
             |row| row.get(0),
         )?)
@@ -84,6 +82,8 @@ impl Store {
         if reply.assignments.is_empty()
             && reply.confirmed_receipts.is_empty()
             && reply.confirmed_runs.is_empty()
+            && reply.confirmed_operations.is_empty()
+            && reply.inputs.is_empty()
         {
             return Ok(());
         }
@@ -97,7 +97,11 @@ impl Store {
                 [acknowledged],
             )?;
         }
-        for event in reply.confirmed_runs {
+        for event in reply
+            .confirmed_runs
+            .into_iter()
+            .chain(reply.confirmed_operations)
+        {
             tx.execute(
                 "UPDATE run_outbox SET acknowledged = 1 WHERE id = ?1",
                 [event],
@@ -127,22 +131,25 @@ impl Store {
             }
 
             let decision = config.decide(&assignment, &profile);
-            let repositories = if decision == ClaimDecision::Accepted {
-                config.repositories_for(&assignment)?
+            let (repositories, state) = if decision == ClaimDecision::Accepted {
+                (config.repositories_for(&assignment)?, "queued")
             } else {
-                "[]".to_owned()
+                ("[]".to_owned(), "rejected")
             };
             tx.execute(
-                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision)
-                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision, execution_state)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
                 params![
                     id,
                     assignment.task_id,
                     contract,
                     repositories,
-                    serde_json::to_string(&decision)?
+                    serde_json::to_string(&decision)?, state
                 ],
             )?;
+        }
+        for input in reply.inputs {
+            coordination::accept_input(&tx, &input)?;
         }
         tx.commit()?;
         Ok(())

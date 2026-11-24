@@ -1,7 +1,11 @@
-use super::Store;
+use super::{Store, coordination};
+use crate::config::Repo;
 use anyhow::{Result, ensure};
 use codex_app::ProcessIdentity;
-use protocol::{RUNNER_SYNC_BATCH, RunObservation, RunOutcome, RunPhase, TaskAssignment};
+use protocol::{
+    IssueInput, RUNNER_SYNC_BATCH, RunObservation, RunOutcome, RunPhase, RunnerRecord,
+    TaskAssignment,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub struct LocalRun {
@@ -10,96 +14,143 @@ pub struct LocalRun {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub process: Option<ProcessIdentity>,
+    pub inputs: Vec<IssueInput>,
+    pub repos: Vec<Repo>,
 }
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
+    let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    ensure!(
+        version <= 1,
+        "unsupported Runner database version {version}"
+    );
+    if version == 1 {
+        return Ok(());
+    }
+    let legacy: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'local_runs')",
+        [],
+        |row| row.get(0),
+    )?;
     db.execute_batch(
-        "CREATE TABLE IF NOT EXISTS local_runs (
+        "ALTER TABLE received_assignments ADD COLUMN execution_state TEXT NOT NULL DEFAULT 'queued';
+         UPDATE received_assignments SET execution_state = 'rejected'
+             WHERE json_extract(decision, '$.status') = 'rejected';
+         CREATE INDEX assignment_execution_queue ON received_assignments(execution_state);",
+    )?;
+    if legacy {
+        db.execute_batch(
+            "ALTER TABLE local_runs RENAME TO legacy_runs;
+             ALTER TABLE run_outbox ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'run';",
+        )?;
+    }
+    db.execute_batch(
+        "CREATE TABLE local_runs (
             id TEXT PRIMARY KEY,
-            assignment_id TEXT NOT NULL UNIQUE REFERENCES received_assignments(id),
+            assignment_id TEXT NOT NULL REFERENCES received_assignments(id),
             state TEXT NOT NULL,
             thread_id TEXT,
             turn_id TEXT,
             process_pid INTEGER,
             process_start TEXT
          );
-         CREATE INDEX IF NOT EXISTS local_run_state ON local_runs(state);
          CREATE TABLE IF NOT EXISTS run_outbox (
             id TEXT PRIMARY KEY,
             assignment_id TEXT NOT NULL REFERENCES received_assignments(id),
             observation TEXT NOT NULL,
-            acknowledged INTEGER NOT NULL DEFAULT 0
+            acknowledged INTEGER NOT NULL DEFAULT 0,
+            record_kind TEXT NOT NULL DEFAULT 'run'
          );
          CREATE INDEX IF NOT EXISTS unsent_runs ON run_outbox(acknowledged) WHERE acknowledged = 0;",
     )?;
+    if legacy {
+        db.execute_batch(
+            "INSERT INTO local_runs SELECT * FROM legacy_runs ORDER BY rowid;
+             UPDATE received_assignments AS a
+                SET execution_state = coalesce((SELECT CASE WHEN state = 'stopped'
+                    THEN 'finished' ELSE 'active' END FROM legacy_runs WHERE assignment_id = a.id), execution_state)
+                WHERE execution_state = 'queued';
+             DROP TABLE legacy_runs;",
+        )?;
+    }
+    db.execute_batch(
+        "CREATE INDEX local_run_state ON local_runs(state);
+         CREATE UNIQUE INDEX local_active_assignment ON local_runs(assignment_id)
+             WHERE state IN ('prepared', 'running');",
+    )?;
+    coordination::create_tables(db)?;
+    db.pragma_update(None, "user_version", 1)?;
     Ok(())
 }
 
 impl Store {
     pub fn next_run(&mut self) -> Result<Option<LocalRun>> {
-        let active = self
-            .0
-            .query_row(
-                "SELECT r.id, a.contract, r.thread_id, r.turn_id, r.process_pid, r.process_start
-             FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
-             WHERE r.state IN ('prepared', 'running') ORDER BY r.rowid LIMIT 1",
-                [],
-                |row| {
-                    let process = match row.get::<_, Option<u32>>(4)? {
-                        Some(pid) => Some(ProcessIdentity {
-                            pid,
-                            started_at: row.get(5)?,
-                        }),
-                        None => None,
-                    };
-                    Ok((
-                        row.get(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get(2)?,
-                        row.get(3)?,
-                        process,
-                    ))
-                },
-            )
-            .optional()?;
-        if let Some((id, contract, thread_id, turn_id, process)) = active {
-            return Ok(Some(LocalRun {
-                id,
-                assignment: serde_json::from_str(&contract)?,
-                thread_id,
-                turn_id,
-                process,
-            }));
+        let active = self.0.query_row(
+            "SELECT r.id FROM local_runs r WHERE r.state IN ('prepared', 'running') ORDER BY r.rowid LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        if let Some(id) = active {
+            return self.load_run(&id).map(Some);
         }
-
-        let queued = self
-            .0
-            .query_row(
-                "SELECT a.id, a.contract FROM received_assignments a
-             WHERE json_extract(a.decision, '$.status') = 'accepted'
-               AND NOT EXISTS (SELECT 1 FROM local_runs r WHERE r.assignment_id = a.id)
-             ORDER BY a.rowid LIMIT 1",
-                [],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-            )
-            .optional()?;
-        let Some((assignment_id, contract)) = queued else {
+        let queued = self.0.query_row(
+            "SELECT id FROM received_assignments WHERE execution_state = 'queued' ORDER BY rowid LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let Some(assignment_id) = queued else {
             return Ok(None);
         };
-        let assignment: TaskAssignment = serde_json::from_str(&contract)?;
+
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let acquired = tx.execute(
+            "UPDATE received_assignments SET execution_state = 'active'
+              WHERE id = ?1 AND execution_state = 'queued'",
+            [&assignment_id],
+        )?;
+        if acquired == 0 {
+            return Ok(None);
+        }
         let id = protocol::new_id();
-        let inserted = self.0.execute(
-            "INSERT INTO local_runs (id, assignment_id, state) VALUES (?1, ?2, 'prepared')
-             ON CONFLICT(assignment_id) DO NOTHING",
+        tx.execute(
+            "INSERT INTO local_runs (id, assignment_id, state) VALUES (?1, ?2, 'prepared')",
             params![id, assignment_id],
         )?;
-        Ok((inserted == 1).then_some(LocalRun {
-            id,
-            assignment,
-            thread_id: None,
-            turn_id: None,
-            process: None,
-        }))
+        tx.execute(
+            "UPDATE local_issue_inputs SET run_id = ?1 WHERE id IN (
+                 SELECT id FROM local_issue_inputs WHERE assignment_id = ?2 AND run_id IS NULL
+                 ORDER BY rowid LIMIT ?3
+             )",
+            params![id, assignment_id, RUNNER_SYNC_BATCH],
+        )?;
+        tx.commit()?;
+        self.load_run(&id).map(Some)
+    }
+
+    fn load_run(&self, id: &str) -> Result<LocalRun> {
+        let (contract, repositories, thread_id, turn_id, process) = self.0.query_row(
+            "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start
+             FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
+             WHERE r.id = ?1", [id],
+            |row| {
+                let process = match row.get::<_, Option<u32>>(4)? {
+                    Some(pid) => Some(ProcessIdentity { pid, started_at: row.get(5)? }),
+                    None => None,
+                };
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, process))
+            },
+        )?;
+        Ok(LocalRun {
+            id: id.to_owned(),
+            assignment: serde_json::from_str(&contract)?,
+            repos: serde_json::from_str(&repositories)?,
+            thread_id,
+            turn_id,
+            process,
+            inputs: coordination::run_inputs(&self.0, id)?,
+        })
     }
 
     pub fn attach_process(
@@ -165,7 +216,31 @@ impl Store {
             )? == 1,
             "cannot settle the original Run"
         );
-        save_event(&tx, run, RunPhase::Stopped { outcome, error })?;
+        let assignment_id = &run.assignment.placement.assignment_id;
+        let waiting_for_children =
+            outcome == RunOutcome::Completed && coordination::has_followup(&tx, assignment_id)?;
+        let next_state = if waiting_for_children {
+            if coordination::has_unread_input(&tx, assignment_id)? {
+                "queued"
+            } else {
+                "waiting"
+            }
+        } else {
+            "finished"
+        };
+        tx.execute(
+            "UPDATE received_assignments SET execution_state = ?2 WHERE id = ?1",
+            params![assignment_id, next_state],
+        )?;
+        save_event(
+            &tx,
+            run,
+            RunPhase::Stopped {
+                outcome,
+                error,
+                waiting_for_children,
+            },
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -188,9 +263,9 @@ impl Store {
         Ok(running)
     }
 
-    pub fn run_events(&self) -> Result<Vec<RunObservation>> {
+    pub fn records(&self) -> Result<Vec<RunnerRecord>> {
         let mut statement = self.0.prepare(
-            "SELECT o.observation FROM run_outbox o
+            "SELECT o.observation, o.record_kind FROM run_outbox o
              JOIN received_assignments a ON a.id = o.assignment_id
              WHERE o.acknowledged = 0 AND (a.acknowledged = 1 OR a.id IN (
                  SELECT id FROM received_assignments WHERE acknowledged = 0 ORDER BY rowid LIMIT ?1
@@ -198,8 +273,17 @@ impl Store {
              ORDER BY o.rowid LIMIT ?1",
         )?;
         statement
-            .query_map([RUNNER_SYNC_BATCH], |row| row.get::<_, String>(0))?
-            .map(|row| Ok(serde_json::from_str(&row?)?))
+            .query_map([RUNNER_SYNC_BATCH], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .map(|row| {
+                let (payload, kind) = row?;
+                if kind == "run" {
+                    Ok(RunnerRecord::Run(serde_json::from_str(&payload)?))
+                } else {
+                    Ok(RunnerRecord::Operation(serde_json::from_str(&payload)?))
+                }
+            })
             .collect()
     }
 }
@@ -222,6 +306,11 @@ fn save_event(db: &Connection, run: &LocalRun, phase: RunPhase) -> Result<()> {
         run_id: run.id.clone(),
         thread_id,
         turn_id,
+        input_ids: run
+            .inputs
+            .iter()
+            .map(|input| input.input_id.clone())
+            .collect(),
         phase,
     };
     db.execute(

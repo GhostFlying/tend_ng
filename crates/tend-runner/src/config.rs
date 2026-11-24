@@ -70,9 +70,14 @@ impl Config {
 
     pub fn decide(&self, assignment: &TaskAssignment, profile: &RunnerProfile) -> ClaimDecision {
         let agent = &assignment.placement.agent;
-        let valid = agent.category == "issue-router"
-            && profile.agents.contains(agent)
-            && protocol::matching_issue_agent(profile, &assignment.work).is_some();
+        let valid = profile.agents.contains(agent)
+            && (agent.category == "issue-router"
+                || assignment
+                    .work
+                    .required_capabilities
+                    .iter()
+                    .all(|cap| agent.capabilities.contains(cap)))
+            && protocol::matching_task_agent(profile, &agent.category, &assignment.work).is_some();
         if valid {
             ClaimDecision::Accepted
         } else {

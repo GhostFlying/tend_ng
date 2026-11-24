@@ -96,6 +96,16 @@ python3 tests/e2e/runner.py target/debug/tend-server target/debug/tend target/de
 python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target/debug/tend-runner
 ```
 
+### 子 Issue 委派与同 Task 接续
+
+- Issue Agent 用注入工具发起子 Issue，Runner 在回调返回前保存原生调用、操作、子 Issue 和 Task 身份。开始、操作、停妥按原记录顺序同步。Server 在根 Issue 所属 Runner 匹配对应的 Work Agent。
+- Work Agent 在 Runner 管理的共用 Git workspace 开工。从已登记主干 fetch 后准备 worktree，并用原生工具显式结案。Server 从子 Issue 结案生成对应父协调 Task 的持久输入。
+- Runner 保留原协调 Task、领取和 Owner，等待时释放 slot 和新任务准入容量。收到输入后，在同一 Task 开新 Run。Runner 保存输入与新 Run 的关联，Server 读到消费证据后停止重传。
+- 原 Runner 暂时忙时，子项排队。当前清单没有匹配项时，Server 沿原委派送回一次需要判断的输入。子 Task 停妥时也能回报结算或失败，即使它的 Owner 尚未结案。
+- 验收用一个 Runner 和一个 slot，断开网络后建立本地委派，再恢复通信。核对实际 Work Agent 执行、父协调 Task 的两个 Run、原生回调重放，以及父子 Issue 的实际结案状态。 [父子 Issue 的等待与唤醒](../task-lifecycle.md#父子-issue-的等待与唤醒)
+
+在 devcontainer 运行 `python3 tests/e2e/coordination.py target/debug/tend-server target/debug/tend target/debug/tend-runner`。用 `--scenario task-only` 复验无显式结案的 Task，用 `--scenario no-candidate` 复验待分配反馈。
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)

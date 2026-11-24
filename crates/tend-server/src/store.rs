@@ -1,3 +1,4 @@
+mod coordination;
 mod run;
 mod runner;
 mod work;
@@ -42,7 +43,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 4,
+            version <= 5,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -113,7 +114,10 @@ impl Store {
         }
         if version < 4 {
             run::create_tables(&tx)?;
-            tx.pragma_update(None, "user_version", 4)?;
+        }
+        if version < 5 {
+            coordination::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 5)?;
         }
         tx.commit()?;
         Ok(store)
@@ -212,6 +216,7 @@ impl Store {
                 "SELECT m.seq, i.id FROM chat_messages m
                  JOIN issues i ON i.source_seq = m.seq
                  WHERE m.chat_id = ?1 AND m.seq >= ?2 AND m.seq < ?3
+                   AND i.parent_issue_id IS NULL
                  ORDER BY m.seq, i.rowid",
             )?;
             let mut issues: HashMap<i64, Vec<String>> = HashMap::new();

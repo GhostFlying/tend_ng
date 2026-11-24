@@ -1,6 +1,8 @@
 mod config;
 mod execution;
 mod store;
+mod tools;
+mod workspace;
 
 use anyhow::{Context, Result, bail, ensure};
 use config::Config;
@@ -94,7 +96,8 @@ fn sync(
         protocol: RUNNER_PROTOCOL,
         profile,
         receipts: store.receipts()?,
-        runs: store.run_events()?,
+        runs: Vec::new(),
+        records: store.records()?,
     };
     let reply = http
         .post(url)

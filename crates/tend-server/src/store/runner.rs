@@ -1,11 +1,11 @@
 use super::{
-    Store, run,
+    Store, coordination, run,
     work::{DISPATCH_QUERY, read_dispatch},
 };
 use anyhow::{Result, ensure};
 use protocol::{
-    ClaimDecision, IssueDispatch, Placement, RunnerProfile, RunnerSync, RunnerSyncReply,
-    TaskAssignment,
+    ClaimDecision, IssueDispatch, Placement, RunnerProfile, RunnerRecord, RunnerSync,
+    RunnerSyncReply, TaskAssignment,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -72,9 +72,19 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
+    let pinned: Option<String> = db.query_row(
+        "SELECT pinned_runner_id FROM tasks WHERE id = ?1",
+        [&dispatch.task_id],
+        |row| row.get(0),
+    )?;
     for available in available_runners(db)? {
         let profile = available.profile;
-        let Some(agent) = protocol::matching_issue_agent(&profile, &dispatch.work).cloned() else {
+        if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
+            continue;
+        }
+        let Some(agent) =
+            protocol::matching_task_agent(&profile, &dispatch.category, &dispatch.work).cloned()
+        else {
             continue;
         };
         let placement = Placement {
@@ -89,6 +99,7 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
             issue_id: dispatch.issue_id,
             source_message_id: dispatch.source_message_id,
             chat_id: dispatch.chat_id,
+            parent_issue_id: dispatch.parent_issue_id,
             work: dispatch.work,
         };
         let contract = serde_json::to_string(&assignment)?;
@@ -151,7 +162,8 @@ impl Store {
                 continue;
             };
             if runners.iter().any(|runner| {
-                protocol::matching_issue_agent(&runner.profile, &dispatch.work).is_some()
+                protocol::matching_task_agent(&runner.profile, &dispatch.category, &dispatch.work)
+                    .is_some()
             }) {
                 let tx = self
                     .db
@@ -195,11 +207,18 @@ impl Store {
             [&profile.runner_id],
             |row| row.get::<_, bool>(0),
         )?;
-        if !refresh && !reserved && request.receipts.is_empty() && request.runs.is_empty() {
+        if !refresh
+            && !reserved
+            && request.receipts.is_empty()
+            && request.runs.is_empty()
+            && request.records.is_empty()
+        {
             return Ok(Some(RunnerSyncReply {
                 assignments: assignments_to_send(&self.db, &profile.runner_id, false)?,
                 confirmed_receipts: Vec::new(),
                 confirmed_runs: Vec::new(),
+                confirmed_operations: Vec::new(),
+                inputs: coordination::pending_inputs(&self.db, &profile.runner_id)?,
             }));
         }
 
@@ -252,6 +271,23 @@ impl Store {
             }
             confirmed_runs.push(observation.event_id);
         }
+        let mut confirmed_operations = Vec::new();
+        for record in request.records {
+            match record {
+                RunnerRecord::Run(observation) => {
+                    if !run::apply(&tx, &profile.runner_id, &observation)? {
+                        return Ok(None);
+                    }
+                    confirmed_runs.push(observation.event_id);
+                }
+                RunnerRecord::Operation(operation) => {
+                    if !coordination::apply(&tx, profile, &operation)? {
+                        return Ok(None);
+                    }
+                    confirmed_operations.push(operation.operation_id);
+                }
+            }
+        }
 
         let assignments = assignments_to_send(&tx, &profile.runner_id, true)?;
         for assignment in &assignments {
@@ -266,11 +302,14 @@ impl Store {
                 )?;
             }
         }
+        let inputs = coordination::pending_inputs(&tx, &profile.runner_id)?;
         tx.commit()?;
         Ok(Some(RunnerSyncReply {
             assignments,
             confirmed_receipts,
             confirmed_runs,
+            confirmed_operations,
+            inputs,
         }))
     }
 }

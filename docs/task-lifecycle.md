@@ -16,6 +16,8 @@ Work Agent 可以随时提交阶段或最终产物，也可以显式结算自己
 
 **已确认。** 顶层 Issue Agent 取得 Runner 的本地持久委派回执后，手头工作处理完即可结束当前回合。Runner 确认停妥后归还 slot，待同步的委派留在本机持久记录里。父 Issue 保留当前 Owner 和工作上下文，等待期间由系统保存待处理输入。
 
+同一个尚未结算的协调目标沿原 Task 接续。等待子项时，原 Task 保留协调责任并让出执行 slot 和新任务准入容量。子项回报成为原 Task 的持久输入，Owner 在下一次开工时使用新的 Run。原协调目标结算后，由后到的独立工作建立新的 Task。
+
 派发应用失败沿原派发身份送回发起方。子 Issue 的业务状态改变、Agent 在 Issue Chat 的留言、新交付都必须沿原委派关系送达每一级上级 Issue 的 Owner，直到顶层 Issue Agent。Server 为每个上级持久记录输入，按原事件和目标 Issue 去重。空闲或等待中的 Owner 由输入重新调度，正在执行的 Owner 在下一轮消费。 [旧 Tend 的回传](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/issue-agent-design.md#L81-L84) · [执行 slot](server-runner.md#执行-slot)
 
 文件交付首次在 Server 完整可读时，沿原交付身份生成新交付输入。先到的 Task 结算和留言按各自事实送达。已交付文件的补回沿原身份恢复可用状态。 [交付副本与全量补回](server-runner.md#交付副本与全量补回)
