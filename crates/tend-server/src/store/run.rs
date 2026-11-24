@@ -84,6 +84,11 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         }
         | RunPhase::Stopped {
             outcome,
+            waiting_for_external: true,
+            ..
+        }
+        | RunPhase::Stopped {
+            outcome,
             queued_input: true,
             ..
         } if previous.is_some() || *outcome == RunOutcome::Failed => "waiting",

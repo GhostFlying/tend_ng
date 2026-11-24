@@ -72,11 +72,11 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
-    let (pinned, named, previous): (Option<String>, Option<String>, Option<String>) = db
+    let (pinned, named, previous, workspace_key): (Option<String>, Option<String>, Option<String>, Option<String>) = db
         .query_row(
-            "SELECT pinned_runner_id, pinned_agent_id, previous_task_id FROM tasks WHERE id = ?1",
+            "SELECT pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key FROM tasks WHERE id = ?1",
             [&dispatch.task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )?;
     for available in available_runners(db)? {
         let profile = available.profile;
@@ -105,6 +105,7 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
             source_message_id: dispatch.source_message_id,
             chat_id: dispatch.chat_id,
             parent_issue_id: dispatch.parent_issue_id,
+            workspace_key,
             followup: previous.map(|previous_task_id| CoordinationFollowup {
                 previous_task_id,
                 issue_state: dispatch.issue_state,

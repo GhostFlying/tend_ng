@@ -6,7 +6,7 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -24,6 +24,7 @@ fn main() -> Result<()> {
         ("chat", _) => protocol::messages_path(id),
         ("issue", "read") => protocol::issue_path(id),
         ("issue", "list") => protocol::issue_board_path(id),
+        ("pr", "watches") => format!("/api/v1/issues/{id}/watches"),
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
@@ -120,6 +121,10 @@ fn main() -> Result<()> {
             }
             let jobs: Vec<PullDiscovery> = checked(request.call())?.into_json()?;
             println!("{}", serde_json::to_string(&jobs)?);
+        }
+        ("pr", "watches", []) => {
+            let response = checked(http.get(&path).set("Authorization", &auth).call())?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }
         ("pr", "list", []) => {
             let links: Vec<PullLink> =

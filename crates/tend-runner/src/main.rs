@@ -113,7 +113,8 @@ fn main() -> Result<()> {
     }
     if config.slot_limit > 0 {
         let local = Store::open(&db_path, &config)?;
-        thread::spawn(move || execution::serve(local, runtime));
+        let execution_config = Arc::clone(&config);
+        thread::spawn(move || execution::serve(local, db_path, execution_config, runtime));
     }
 
     let mut reconnecting = true;

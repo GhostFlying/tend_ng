@@ -59,7 +59,13 @@ impl Store {
 
     pub fn unfinished(&self) -> Result<u32> {
         Ok(self.0.query_row(
-            "SELECT COUNT(*) FROM received_assignments WHERE execution_state IN ('queued', 'active')",
+            "SELECT COUNT(*) FROM received_assignments a WHERE a.execution_state = 'active'
+                OR (a.execution_state = 'queued' AND NOT EXISTS (
+                    SELECT 1 FROM received_assignments holder
+                    WHERE holder.id != a.id AND holder.retains_workspace = 1
+                    AND coalesce(json_extract(holder.contract, '$.workspace_key'), json_extract(holder.contract, '$.parent_issue_id'))
+                        = coalesce(json_extract(a.contract, '$.workspace_key'), json_extract(a.contract, '$.parent_issue_id'))
+                ))",
             [],
             |row| row.get(0),
         )?)

@@ -44,6 +44,22 @@ if number == 99 or (root / f"deny-{number}").exists():
     print(json.dumps({"errors": [{"type": "FORBIDDEN"}], "data": {"repository": None}}))
     sys.exit(1)
 
+if number == 82:
+    mode = (root / "wait-mode").read_text()
+    head = "a" * 40
+    print(json.dumps({"data": {"repository": {"pullRequest": {
+        "title": "CI wait fixture", "state": "OPEN", "isDraft": False,
+        "headRefOid": head, "headRefName": "fixture-branch",
+        "headRepository": {"nameWithOwner": "Example/Guide"},
+        "commits": {"nodes": [{"commit": {"oid": "b" * 40 if mode == "stale" else head,
+            "statusCheckRollup": {"state": "PENDING" if mode == "pending" else "SUCCESS",
+                "contexts": {"nodes": [{"name": "build-linux", "databaseId": 7,
+                    "status": "IN_PROGRESS" if mode == "pending" else "COMPLETED",
+                    "conclusion": None if mode == "pending" else "SUCCESS"}]}}
+        }}]},
+    }}}}))
+    sys.exit(0)
+
 assert number in {73, 74}, number
 print(json.dumps({"data": {"repository": {"pullRequest": {
     "title": "补充安装和验证说明",

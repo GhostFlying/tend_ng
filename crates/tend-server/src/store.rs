@@ -2,6 +2,7 @@ mod artifacts;
 mod attention;
 mod coordination;
 pub(crate) mod discovery;
+mod external;
 mod issue_chat;
 mod notification;
 pub(crate) mod pull;
@@ -55,7 +56,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 13,
+            version <= 14,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -153,7 +154,10 @@ impl Store {
         }
         if version < 13 {
             discovery::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 13)?;
+        }
+        if version < 14 {
+            external::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 14)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;

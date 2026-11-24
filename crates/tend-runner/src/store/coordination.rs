@@ -85,7 +85,37 @@ impl Store {
         }
 
         let operation_id = protocol::new_id();
-        let action = build(&operation_id)?;
+        let mut action = build(&operation_id)?;
+        if let WorkAction::WatchExternal {
+            condition,
+            mode: protocol::WatchMode::Wait,
+        } = &action
+            && (condition.head_sha.is_some()
+                || condition.event == protocol::ExternalKind::Pull && condition.state == "merged")
+        {
+            let mut saved = self.0.prepare(
+                "SELECT payload FROM local_issue_inputs WHERE assignment_id = ?1
+                 AND json_extract(payload, '$.kind') = 'external_fact' ORDER BY rowid DESC",
+            )?;
+            let observations = saved
+                .query_map([&run.assignment.placement.assignment_id], |row| {
+                    row.get::<_, String>(0)
+                })?;
+            for observed in observations {
+                let input: IssueInput = serde_json::from_str(&observed?)?;
+                if let protocol::IssueInputCause::ExternalFact {
+                    fact_id,
+                    fact,
+                    error: None,
+                    ..
+                } = input.cause
+                    && condition.matches(&fact)
+                {
+                    action = WorkAction::ConfirmExternal { fact_id, fact };
+                    break;
+                }
+            }
+        }
         if let WorkAction::ForwardIssueMessage {
             child_issue_id,
             message_id,
@@ -226,7 +256,7 @@ pub(super) fn accept_input(db: &Connection, delivery: &IssueDelivery) -> Result<
     }
     db.execute(
         "UPDATE received_assignments SET execution_state = 'queued'
-         WHERE id = ?1 AND execution_state = 'waiting'",
+         WHERE id = ?1 AND execution_state IN ('waiting', 'waiting_external')",
         [assignment_id],
     )?;
     Ok(())
@@ -279,5 +309,20 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
                AND json_extract(i.payload, '$.kind') IN ('issue_closed', 'task_stopped')))",
         [assignment],
         |row| row.get(0),
+    )?)
+}
+
+pub(super) fn waiting_for_external(db: &Connection, assignment: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_work_operations o
+          WHERE o.assignment_id = ?1 AND o.rowid > coalesce((
+             SELECT MAX(c.rowid) FROM local_work_operations c WHERE c.assignment_id = ?1
+               AND json_extract(c.operation, '$.action.kind') IN ('clear_external_waits','close_issue')
+          ), 0) AND json_extract(o.operation, '$.action.kind') = 'watch_external'
+            AND json_extract(o.operation, '$.action.mode') = 'wait'
+            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
+                AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'external_fact'
+                AND json_extract(i.payload, '$.watch_id') = o.id))",
+        [assignment], |row| row.get(0),
     )?)
 }

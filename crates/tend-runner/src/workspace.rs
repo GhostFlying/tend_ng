@@ -15,17 +15,24 @@ struct Mount {
 }
 
 pub fn directory(root: &Path, run: &LocalRun) -> PathBuf {
-    match &run.assignment.parent_issue_id {
+    match workspace_key(run) {
         Some(issue) => root.join("workspaces").join(issue),
         None => root.join(&run.id),
     }
+}
+
+fn workspace_key(run: &LocalRun) -> Option<&str> {
+    run.assignment
+        .workspace_key
+        .as_deref()
+        .or(run.assignment.parent_issue_id.as_deref())
 }
 
 pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
     let path = directory(root, run);
     fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
-    let Some(issue) = &run.assignment.parent_issue_id else {
+    let Some(issue) = workspace_key(run) else {
         return Ok(path);
     };
     let manifest = path.join("mounts.json");

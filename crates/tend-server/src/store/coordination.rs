@@ -105,6 +105,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             issue_id,
             task_id,
             category: requested,
+            isolated_workspace,
             work,
         } => {
             db.execute(
@@ -119,10 +120,10 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 ],
             )?;
             db.execute(
-                "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, pinned_runner_id)
-                 VALUES (?1, ?2, ?3, 'awaiting_assignment', ?4, ?5, ?6)",
+                "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, pinned_runner_id, workspace_key)
+                 VALUES (?1, ?2, ?3, 'awaiting_assignment', ?4, ?5, ?6, ?7)",
                 params![task_id, issue_id, requested, serde_json::to_string(&work.repo_ids)?,
-                        serde_json::to_string(&work.required_capabilities)?, runner_id],
+                        serde_json::to_string(&work.required_capabilities)?, runner_id, isolated_workspace.then_some(issue_id)],
             )?;
             db.execute(
                 "INSERT INTO child_dispatches (task_id, operation_id) VALUES (?1, ?2)",
@@ -256,6 +257,18 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 message_id,
             )?;
         }
+        WorkAction::WatchExternal { condition, mode } => {
+            super::external::register(
+                db,
+                &operation.operation_id,
+                &source_issue,
+                &source_task,
+                condition,
+                *mode,
+            )?;
+        }
+        WorkAction::ConfirmExternal { .. } => {}
+        WorkAction::ClearExternalWaits => super::external::clear_waits(db, &source_task)?,
         WorkAction::FindPull { task_id } => {
             super::discovery::queue(
                 db,
@@ -292,12 +305,13 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         error,
         waiting_for_children,
         waiting_for_attention,
+        waiting_for_external,
         queued_input,
     } = &observation.phase
     else {
         return Ok(());
     };
-    if *waiting_for_attention || *waiting_for_children || *queued_input {
+    if *waiting_for_attention || *waiting_for_children || *waiting_for_external || *queued_input {
         return Ok(());
     }
     let child = db.query_row(
@@ -379,9 +393,9 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let task = protocol::new_id();
     db.execute(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
-                            pinned_runner_id, pinned_agent_id, previous_task_id)
+                            pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key)
          SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids,
-                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id
+                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id, workspace_key
          FROM tasks WHERE id = ?2",
         params![
             task,

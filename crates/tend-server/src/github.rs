@@ -1,5 +1,5 @@
 use crate::store::Store;
-use protocol::{BranchResult, GitHubPull, PullFacts, WorkBranch};
+use protocol::{BranchResult, ExternalFact, ExternalKind, GitHubPull, PullFacts, WorkBranch};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -13,7 +13,12 @@ const QUERY: &str = "query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
       title state isDraft headRefOid headRefName headRepository { nameWithOwner }
-      commits(last:1) { nodes { commit { oid statusCheckRollup { state } } } }
+      commits(last:1) { nodes { commit { oid statusCheckRollup {
+        state contexts(first:100) { nodes {
+          ... on CheckRun { databaseId name status conclusion }
+          ... on StatusContext { context state }
+        } }
+      } } } }
     }
   }
 }";
@@ -38,7 +43,10 @@ pub fn spawn(store: Store, program: OsString) {
     });
 }
 
-fn observe(program: &OsString, pull: &GitHubPull) -> Result<PullFacts, &'static str> {
+fn observe(
+    program: &OsString,
+    pull: &GitHubPull,
+) -> Result<(PullFacts, Vec<ExternalFact>), &'static str> {
     let (owner, repo) = pull.repository.split_once('/').ok_or("invalid_reference")?;
     let output = request(
         program,
@@ -86,17 +94,67 @@ fn observe(program: &OsString, pull: &GitHubPull) -> Result<PullFacts, &'static 
     } else {
         None
     };
-    Ok(PullFacts {
-        title,
-        state,
-        draft,
-        head_sha,
-        ci: ci.map(str::to_owned),
-        head_branch: pr["headRefName"].as_str().map(str::to_owned),
-        head_repository: pr["headRepository"]["nameWithOwner"]
-            .as_str()
-            .map(str::to_ascii_lowercase),
-    })
+    let check_facts = if commit["oid"] == head_sha {
+        checks(
+            pull,
+            &head_sha,
+            &commit["statusCheckRollup"]["contexts"]["nodes"],
+        )
+    } else {
+        Vec::new()
+    };
+    Ok((
+        PullFacts {
+            title,
+            state,
+            draft,
+            head_sha,
+            ci: ci.map(str::to_owned),
+            head_branch: pr["headRefName"].as_str().map(str::to_owned),
+            head_repository: pr["headRepository"]["nameWithOwner"]
+                .as_str()
+                .map(str::to_ascii_lowercase),
+        },
+        check_facts,
+    ))
+}
+
+fn checks(pull: &GitHubPull, head: &str, nodes: &Value) -> Vec<ExternalFact> {
+    nodes
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|item| {
+            let check = item["name"].as_str().or_else(|| item["context"].as_str())?;
+            let state = match (
+                item["status"].as_str(),
+                item["conclusion"].as_str(),
+                item["state"].as_str(),
+            ) {
+                (Some("COMPLETED"), Some("SUCCESS"), _) | (_, _, Some("SUCCESS")) => "success",
+                (_, Some("CANCELLED"), _) => "cancelled",
+                (_, Some("SKIPPED" | "NEUTRAL"), _) => "skipped",
+                (
+                    _,
+                    Some("FAILURE" | "TIMED_OUT" | "ACTION_REQUIRED" | "STARTUP_FAILURE" | "STALE"),
+                    _,
+                )
+                | (_, _, Some("ERROR" | "FAILURE")) => "failure",
+                (Some("QUEUED" | "IN_PROGRESS" | "PENDING" | "WAITING" | "REQUESTED"), _, _)
+                | (_, _, Some("PENDING" | "EXPECTED")) => "pending",
+                _ => return None,
+            };
+            let run_id = item["databaseId"].as_i64().map(|id| id.to_string());
+            Some(ExternalFact {
+                url: pull.url(),
+                event: ExternalKind::Ci,
+                state: state.into(),
+                head_sha: Some(head.to_owned()),
+                check: Some(check.to_owned()),
+                run_id,
+            })
+        })
+        .collect()
 }
 
 pub fn spawn_discovery(mut store: Store, program: OsString) {

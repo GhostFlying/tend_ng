@@ -66,6 +66,8 @@ pub struct TaskAssignment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_issue_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup: Option<CoordinationFollowup>,
     pub work: DispatchIssue,
 }
@@ -136,6 +138,8 @@ pub enum WorkAction {
         issue_id: String,
         task_id: String,
         category: String,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        isolated_workspace: bool,
         work: DispatchIssue,
     },
     CloseIssue {
@@ -165,6 +169,15 @@ pub enum WorkAction {
     },
     LinkPull {
         url: String,
+    },
+    WatchExternal {
+        condition: crate::ExternalCondition,
+        mode: crate::WatchMode,
+    },
+    ClearExternalWaits,
+    ConfirmExternal {
+        fact_id: String,
+        fact: crate::ExternalFact,
     },
     FindPull {
         task_id: String,
@@ -196,6 +209,13 @@ pub struct IssueInput {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueInputCause {
+    ExternalFact {
+        watch_id: String,
+        fact_id: String,
+        mode: crate::WatchMode,
+        fact: crate::ExternalFact,
+        error: Option<String>,
+    },
     IssueClosed,
     IssueMessage {
         message: IssueMessage,
@@ -262,6 +282,8 @@ pub enum RunPhase {
         waiting_for_attention: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         queued_input: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        waiting_for_external: bool,
     },
 }
 

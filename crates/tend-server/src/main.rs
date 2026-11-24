@@ -149,6 +149,9 @@ fn main() -> Result<()> {
 fn schedule(mut store: Store) {
     let mut after = 0;
     loop {
+        if let Err(error) = store.release_external() {
+            eprintln!("Release external facts: {error:#}");
+        }
         if let Err(error) = store.schedule_assignments(&mut after) {
             eprintln!("Schedule Runner assignments: {error:#}");
         }
@@ -189,6 +192,17 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             200,
             serde_json::to_value(store.issue_board(chat_id, before)?)?,
         ));
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/watches"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        return if request.method() == &Method::Get {
+            Ok((200, serde_json::to_value(store.external_watches(issue)?)?))
+        } else {
+            Ok(api_error(405, "method not allowed"))
+        };
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")

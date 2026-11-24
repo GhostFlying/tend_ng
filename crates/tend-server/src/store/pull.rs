@@ -1,6 +1,8 @@
 use super::{PAGE_SIZE, Store};
 use anyhow::Result;
-use protocol::{GitHubPull, IssueBoard, IssueCard, LinkPull, PullFacts, PullLink, PullLinkReceipt};
+use protocol::{
+    ExternalFact, GitHubPull, IssueBoard, IssueCard, LinkPull, PullFacts, PullLink, PullLinkReceipt,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub enum Linked {
@@ -36,13 +38,18 @@ pub fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn bind(db: &Connection, issue: &str, pull: &GitHubPull) -> Result<PullLinkReceipt> {
-    let url = pull.url();
+pub(super) fn ensure_observed(db: &Connection, pull: &GitHubPull) -> Result<()> {
     db.execute(
         "INSERT INTO github_pulls(url, repository, number) VALUES (?1, ?2, ?3)
          ON CONFLICT(url) DO NOTHING",
-        params![url, pull.repository, pull.number],
+        params![pull.url(), pull.repository, pull.number],
     )?;
+    Ok(())
+}
+
+pub(super) fn bind(db: &Connection, issue: &str, pull: &GitHubPull) -> Result<PullLinkReceipt> {
+    ensure_observed(db, pull)?;
+    let url = pull.url();
     db.execute(
         "INSERT INTO issue_pulls VALUES (?1, ?2) ON CONFLICT DO NOTHING",
         params![issue, url],
@@ -175,24 +182,33 @@ impl Store {
     pub fn observe_pull(
         &self,
         pull: &GitHubPull,
-        observation: Result<PullFacts, &'static str>,
+        observation: Result<(PullFacts, Vec<ExternalFact>), &'static str>,
     ) -> Result<()> {
-        match observation {
-            Ok(facts) => {
-                let refresh = facts.state == "open" || facts.ci.as_deref() == Some("pending");
-                self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        match &observation {
+            Ok((facts, _)) => {
+                let refresh = facts.state == "open" || facts.ci.as_deref() == Some("pending")
+                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM external_watches WHERE url = ?1 AND state = 'active')",
+                        [pull.url()], |row| row.get::<_, bool>(0))?;
+                tx.execute(
                     "UPDATE github_pulls SET facts = ?2, observed_at = unixepoch(), observation_error = NULL,
                        due_at = CASE WHEN ?3 THEN unixepoch() + 300 END WHERE url = ?1",
                     params![pull.url(), serde_json::to_string(&facts)?, refresh],
                 )?;
             }
             Err(reason) => {
-                self.db.execute(
+                tx.execute(
                     "UPDATE github_pulls SET observation_error = ?2, due_at = unixepoch() + 300 WHERE url = ?1",
                     params![pull.url(), reason],
                 )?;
             }
         }
+        let (facts, checks) = match &observation {
+            Ok((facts, checks)) => (Ok(facts), checks.as_slice()),
+            Err(error) => (Err(*error), &[][..]),
+        };
+        super::external::observe(&tx, pull, facts, checks)?;
+        tx.commit()?;
         Ok(())
     }
 }

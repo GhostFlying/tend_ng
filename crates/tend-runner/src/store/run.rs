@@ -21,10 +21,13 @@ pub struct LocalRun {
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 1,
+        version <= 2,
         "unsupported Runner database version {version}"
     );
-    if version == 1 {
+    if version >= 1 {
+        if version == 1 {
+            migrate_waits(db)?;
+        }
         return Ok(());
     }
     let legacy: bool = db.query_row(
@@ -79,7 +82,15 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
              WHERE state IN ('prepared', 'running');",
     )?;
     coordination::create_tables(db)?;
-    db.pragma_update(None, "user_version", 1)?;
+    migrate_waits(db)?;
+    Ok(())
+}
+
+fn migrate_waits(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE received_assignments ADD COLUMN retains_workspace INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    db.pragma_update(None, "user_version", 2)?;
     Ok(())
 }
 
@@ -96,17 +107,23 @@ impl Store {
             .optional()?)
     }
 
-    pub fn next_run(&mut self) -> Result<Option<LocalRun>> {
-        let active = self.0.query_row(
-            "SELECT r.id FROM local_runs r WHERE r.state IN ('prepared', 'running') ORDER BY r.rowid LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        ).optional()?;
-        if let Some(id) = active {
-            return self.load_run(&id).map(Some);
-        }
+    pub fn active_runs(&self) -> Result<Vec<String>> {
+        let mut query = self.0.prepare(
+            "SELECT id FROM local_runs WHERE state IN ('prepared', 'running') ORDER BY rowid",
+        )?;
+        Ok(query
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn next_queued_run(&mut self) -> Result<Option<LocalRun>> {
         let queued = self.0.query_row(
-            "SELECT id FROM received_assignments WHERE execution_state = 'queued' ORDER BY rowid LIMIT 1",
+            "SELECT a.id FROM received_assignments a WHERE a.execution_state = 'queued'
+               AND NOT EXISTS (SELECT 1 FROM received_assignments holder
+                   WHERE holder.id != a.id AND (holder.retains_workspace = 1 OR holder.execution_state = 'active')
+                     AND coalesce(json_extract(holder.contract, '$.workspace_key'), json_extract(holder.contract, '$.parent_issue_id'))
+                         = coalesce(json_extract(a.contract, '$.workspace_key'), json_extract(a.contract, '$.parent_issue_id')))
+               ORDER BY a.rowid LIMIT 1",
             [],
             |row| row.get::<_, String>(0),
         ).optional()?;
@@ -141,7 +158,7 @@ impl Store {
         self.load_run(&id).map(Some)
     }
 
-    fn load_run(&self, id: &str) -> Result<LocalRun> {
+    pub fn load_run(&self, id: &str) -> Result<LocalRun> {
         let (contract, repositories, thread_id, turn_id, process) = self.0.query_row(
             "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start
              FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
@@ -235,23 +252,27 @@ impl Store {
             "cannot settle the original Run"
         );
         let assignment_id = &run.assignment.placement.assignment_id;
+        let waiting_for_external = coordination::waiting_for_external(&tx, assignment_id)?;
         let waiting_for_attention = coordination::waiting_for_attention(&tx, assignment_id)?;
         let has_unread = coordination::has_unread_input(&tx, assignment_id)?;
         let queued_input = outcome == RunOutcome::Completed && has_unread;
         let waiting_for_children = !waiting_for_attention
             && !queued_input
             && coordination::has_followup(&tx, assignment_id)?;
-        let next_state =
-            if queued_input || (waiting_for_attention || waiting_for_children) && has_unread {
-                "queued"
-            } else if waiting_for_attention || waiting_for_children {
-                "waiting"
-            } else {
-                "finished"
-            };
+        let next_state = if queued_input
+            || (waiting_for_attention || waiting_for_children || waiting_for_external) && has_unread
+        {
+            "queued"
+        } else if waiting_for_external {
+            "waiting_external"
+        } else if waiting_for_attention || waiting_for_children {
+            "waiting"
+        } else {
+            "finished"
+        };
         tx.execute(
-            "UPDATE received_assignments SET execution_state = ?2 WHERE id = ?1",
-            params![assignment_id, next_state],
+            "UPDATE received_assignments SET execution_state = ?2, retains_workspace = ?3 WHERE id = ?1",
+            params![assignment_id, next_state, waiting_for_external],
         )?;
         save_event(
             &tx,
@@ -262,6 +283,7 @@ impl Store {
                 waiting_for_children,
                 waiting_for_attention,
                 queued_input,
+                waiting_for_external,
             },
             branches,
         )?;

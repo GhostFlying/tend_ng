@@ -1,14 +1,19 @@
-use crate::store::{Store, run::LocalRun};
+use crate::{
+    config::Config,
+    store::{Store, run::LocalRun},
+};
 use crate::{tools, workspace};
 use anyhow::{Context, Result};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
 use protocol::{RunOutcome, TOKEN_ENV};
 use serde_json::json;
 use std::{
+    collections::HashMap,
     ffi::OsString,
     path::{Path, PathBuf},
     process::Command,
-    thread,
+    sync::Arc,
+    thread::{self, JoinHandle},
     time::Duration,
 };
 
@@ -20,34 +25,63 @@ pub struct Runtime {
     pub args: Vec<OsString>,
 }
 
-pub fn serve(mut store: Store, runtime: Runtime) {
+pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtime) {
+    let mut workers: HashMap<String, JoinHandle<()>> = HashMap::new();
     loop {
-        match advance(&mut store, &runtime) {
-            Ok(true) => continue,
-            Ok(false) => {}
-            Err(error) => eprintln!("Runner execution: {error:#}"),
+        workers.retain(|_, worker| !worker.is_finished());
+        let result = (|| {
+            let active = store.active_runs()?;
+            let mut candidates = Vec::new();
+            for id in &active {
+                if !workers.contains_key(id) {
+                    let run = store.load_run(id)?;
+                    if run
+                        .process
+                        .as_ref()
+                        .map(|process| process.is_stopped())
+                        .transpose()?
+                        .unwrap_or(true)
+                    {
+                        candidates.push(run);
+                    }
+                }
+            }
+            for _ in active.len()..config.slot_limit as usize {
+                let Some(run) = store.next_queued_run()? else {
+                    break;
+                };
+                candidates.push(run);
+            }
+            for run in candidates {
+                let local = Store::open(&db, &config)?;
+                let runtime = runtime.clone();
+                workers.insert(
+                    run.id.clone(),
+                    thread::spawn(move || {
+                        if let Err(error) = advance(local, &runtime, &run) {
+                            eprintln!("Runner execution {}: {error:#}", run.id);
+                        }
+                    }),
+                );
+            }
+            Ok::<_, anyhow::Error>(())
+        })();
+        if let Err(error) = result {
+            eprintln!("Runner execution scheduler: {error:#}");
         }
         thread::sleep(Duration::from_millis(200));
     }
 }
 
-fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
-    let Some(run) = store.next_run()? else {
-        return Ok(false);
-    };
-    let cwd = workspace::directory(&runtime.root, &run);
-    if let Some(process) = &run.process {
-        if !process.is_stopped()? {
-            return Ok(false);
-        }
-        // This is recovery of the original execution. Read history without
-        // starting new agent work for it.
-        let result = recover(runtime, &run, &cwd);
-        settle(store, &run, &cwd, result, true)?;
+fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
+    let cwd = workspace::directory(&runtime.root, run);
+    if run.process.is_some() {
+        let result = recover(runtime, run, &cwd);
+        settle(&mut store, run, &cwd, result, true)?;
     } else {
-        launch(store, runtime, &run)?;
+        launch(&mut store, runtime, run)?;
     }
-    Ok(true)
+    Ok(())
 }
 
 pub(crate) fn client(runtime: &Runtime, cwd: &Path) -> Result<Client> {

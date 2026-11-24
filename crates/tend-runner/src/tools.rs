@@ -40,6 +40,30 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
                         "additionalProperties": false}
     });
+    let condition_schema = json!({
+        "url": {"type":"string"}, "event":{"type":"string","enum":["pull","ci"]},
+        "state":{"type":"string"}, "head_sha":{"type":"string"}, "check":{"type":"string"},
+        "run_id":{"type":"string"}
+    });
+    let waitfor = json!({
+        "type":"function", "name":"tend_waitfor",
+        "description":"Persist a GitHub condition and yield this Task after the turn stops. A match resumes the same Task. Set state to terminal for any terminal CI conclusion.",
+        "inputSchema":{"type":"object","properties":condition_schema,
+                       "required":["url","event","state"],"additionalProperties":false}
+    });
+    let mut subscribe_properties = condition_schema;
+    subscribe_properties["required"] = json!({"type":"boolean"});
+    let subscribe = json!({
+        "type":"function", "name":"tend_subscribe",
+        "description":"Subscribe to a GitHub condition while continuing this turn. Use required for facts that must be durably delivered to this Owner.",
+        "inputSchema":{"type":"object","properties":subscribe_properties,
+                       "required":["url","event","state"],"additionalProperties":false}
+    });
+    let clear_waits = json!({
+        "type":"function", "name":"tend_clear_waits",
+        "description":"Withdraw this Task's outstanding GitHub waits when the objective has changed.",
+        "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
+    });
     let close = json!({
         "type": "function",
         "name": CLOSE,
@@ -80,7 +104,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                     "objective": { "type": "string" },
                     "category": { "type": "string", "enum": WORK_CATEGORIES },
                     "repo_ids": { "type": "array", "items": { "type": "string" } },
-                    "required_capabilities": { "type": "array", "items": { "type": "string" } }
+                    "required_capabilities": { "type": "array", "items": { "type": "string" } },
+                    "isolated_workspace": { "type": "boolean" }
                 },
                 "required": ["title", "objective", "category"],
                 "additionalProperties": false
@@ -133,7 +158,19 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         (
             "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request for a known GitHub PR and tend_find_pull_request for a recorded work branch. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
             vec![
-                delegate, close, report, ask, escalate, answer, post, forward, link_pull, find_pull,
+                delegate,
+                close,
+                report,
+                ask,
+                escalate,
+                answer,
+                post,
+                forward,
+                link_pull,
+                find_pull,
+                waitfor,
+                subscribe,
+                clear_waits,
             ],
         )
     } else {
@@ -150,7 +187,17 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         });
         (
             "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries, tend_link_pull_request for a known GitHub PR, tend_find_pull_request for its recorded branch, and tend_close_issue when the Issue is done.",
-            vec![close, submit, ask, post, link_pull, find_pull],
+            vec![
+                close,
+                submit,
+                ask,
+                post,
+                link_pull,
+                find_pull,
+                waitfor,
+                subscribe,
+                clear_waits,
+            ],
         )
     }
 }
@@ -158,6 +205,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Delegation {
+    #[serde(default)]
+    isolated_workspace: bool,
     title: String,
     objective: String,
     category: String,
@@ -221,6 +270,21 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        "tend_waitfor" | "tend_subscribe" => {
+            let mut condition: protocol::ExternalCondition =
+                serde_json::from_value(call.arguments.clone())?;
+            ensure!(
+                condition.normalize(),
+                "Use a specific GitHub PR or CI condition"
+            );
+            let mode = match call.tool.as_str() {
+                "tend_waitfor" => protocol::WatchMode::Wait,
+                _ if call.arguments["required"] == true => protocol::WatchMode::Required,
+                _ => protocol::WatchMode::Optional,
+            };
+            Ok(WorkAction::WatchExternal { condition, mode })
+        }
+        "tend_clear_waits" => Ok(WorkAction::ClearExternalWaits),
         FIND_PULL => {
             let supplied: Option<String> = call
                 .arguments
@@ -281,6 +345,7 @@ pub fn action(
                 issue_id: protocol::new_id(),
                 task_id: protocol::new_id(),
                 category: args.category,
+                isolated_workspace: args.isolated_workspace,
                 work: DispatchIssue {
                     title: args.title,
                     objective: args.objective,

@@ -123,6 +123,11 @@ if worker and attention and (root / "question.json").exists():
 if scenario == "issue-chat":
     import uuid
     role = f"{role}-{uuid.uuid4().hex}"
+if scenario == "external-wait":
+    if worker and (root / "wait-registration.json").exists():
+        role = "external-resumed"
+    elif worker:
+        role = "child"
 thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
 assert Path(start["params"]["cwd"]) == Path.cwd()
@@ -130,6 +135,8 @@ respond(start, {"thread": {"id": thread_id}})
 turn = request("turn/start")
 items = turn["params"]["input"]
 assignment = json.loads(items[-1]["text"])
+if scenario == "external-wait" and worker and assignment["work"]["title"] in {"Isolated B", "Shared C"}:
+    role = "other-work"
 tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
 respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
 
@@ -151,6 +158,11 @@ if role == "parent":
     delegated = tool("tend_delegate_work", args, "delegate", "original-delegate")
     assert tool("tend_delegate_work", args, "replay-delegate", "original-delegate") == delegated
     (root / "delegation.json").write_text(json.dumps(delegated))
+    if scenario == "external-wait":
+        shared = tool("tend_delegate_work", {**args, "title": "Shared C"}, "delegate-c", "delegate-c")
+        isolated = tool("tend_delegate_work", {**args, "title": "Isolated B", "isolated_workspace": True},
+                        "delegate-b", "delegate-b")
+        (root / "siblings.json").write_text(json.dumps({"isolated": isolated, "shared": shared}))
     if scenario == "late-close":
         (root / "original-parent.json").write_text(json.dumps(assignment))
         tool("tend_close_issue", {"summary": "The main objective is settled."}, "early-close", "early-close")
@@ -161,7 +173,15 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario == "pull-discovery":
+    if scenario == "external-wait":
+        url = "https://github.com/example/guide/pull/82"
+        condition = {"url": url, "event": "ci", "check": "build-linux", "state": "terminal",
+                     "head_sha": "a" * 40, "run_id": "7"}
+        receipt = tool("tend_waitfor", condition, "wait-pr", "wait-pr")
+        tool("tend_subscribe", {**condition, "state": "success", "required": True}, "required-pr", "required-pr")
+        tool("tend_subscribe", {"url": url, "event": "ci", "state": "pending"}, "optional-pr", "optional-pr")
+        (root / "wait-registration.json").write_text(json.dumps(receipt))
+    elif scenario == "pull-discovery":
         assert "tend_find_pull_request" in tools
         requested = tool("tend_find_pull_request", {}, "find-pr", "find-pr")
         assert tool("tend_find_pull_request", {}, "repeat-find-pr", "find-pr") == requested
@@ -193,6 +213,30 @@ elif role == "child":
         (root / "submitted.json").write_text(json.dumps(delivered))
     if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
+elif role == "other-work":
+    if assignment["work"]["title"] == "Isolated B":
+        assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["issue_id"]
+        assert not (root / "resumed-wait.json").exists()
+        (root / "isolated-ran").touch()
+    else:
+        assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
+        assert (root / "resumed-wait.json").exists()
+        (root / "shared-ran").touch()
+    tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-other", "close-other")
+elif role == "external-resumed":
+    saved = json.loads((root / "wait-registration.json").read_text())
+    assert assignment["placement"]["assignment_id"] == saved["assignment_id"]
+    assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
+    inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    assert {fact["mode"] for fact in inputs} == {"wait", "required", "optional"}, inputs
+    hit = next(fact for fact in inputs if fact["mode"] == "wait")
+    assert hit["watch_id"] == saved["operation_id"] and hit["fact"]["run_id"] == "7", hit
+    assert hit["fact"]["state"] == "success"
+    cached = tool("tend_waitfor", saved["action"]["condition"], "already-observed", "already-observed")
+    assert cached["action"]["kind"] == "confirm_external"
+    assert cached["action"]["fact_id"] == hit["fact_id"]
+    (root / "resumed-wait.json").write_text(json.dumps(inputs))
+    tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "decision":
     original = json.loads((root / "question.json").read_text())
     assert assignment["task_id"] == original["task_id"]
@@ -209,6 +253,12 @@ else:
     assert {"tend_delegate_work", "tend_close_issue"} <= tools
     delegated = json.loads((root / "delegation.json").read_text())
     context = json.loads(items[0]["text"].split("\n", 1)[1])
+    if scenario == "external-wait":
+        send({
+            "method": "turn/completed",
+            "params": {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed", "items": []}},
+        })
+        sys.exit(0)
     if scenario == "delivery" and assignment.get("followup"):
         [result] = context["child_inputs"]
         assert result["kind"] == "artifact_available"
@@ -246,7 +296,7 @@ else:
             args["answer"] = "精简版"
         accepted = tool(name, args, "route-question", "route-question")
         assert tool(name, args, "replay-question", "route-question") == accepted
-    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery"}:
+    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "external-wait"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":
