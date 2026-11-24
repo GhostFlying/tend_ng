@@ -14,6 +14,7 @@ use std::{
 
 pub struct Runtime {
     pub root: PathBuf,
+    pub artifacts: PathBuf,
     pub program: OsString,
     pub args: Vec<OsString>,
 }
@@ -95,7 +96,12 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
                 context: context.as_deref(),
                 effort: agent.reasoning_effort.as_deref(),
             },
-            &mut Handler { store, run },
+            &mut Handler {
+                store,
+                run,
+                cwd: &cwd,
+                artifacts: &runtime.artifacts,
+            },
         )
     })();
     // A terminal notification alone does not prove the managed process has
@@ -125,6 +131,8 @@ fn settle(store: &mut Store, run: &LocalRun, result: Result<Turn>, recovered: bo
 struct Handler<'a> {
     store: &'a mut Store,
     run: &'a LocalRun,
+    cwd: &'a Path,
+    artifacts: &'a Path,
 }
 
 impl TurnHandler for Handler<'_> {
@@ -133,23 +141,20 @@ impl TurnHandler for Handler<'_> {
     }
 
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
-        let action = match tools::action(self.run, &call) {
-            Ok(action) => action,
-            Err(error) => {
-                return Ok(ToolOutput {
-                    success: false,
-                    body: json!({"error": error.to_string()}),
-                });
-            }
-        };
-        match self.store.accept_operation(self.run, &call, action)? {
-            Some(operation) => Ok(ToolOutput {
+        match self.store.accept_operation(self.run, &call, |id| {
+            tools::action(self.run, &call, self.cwd, self.artifacts, id)
+        }) {
+            Ok(Some(operation)) => Ok(ToolOutput {
                 success: true,
                 body: serde_json::to_value(operation)?,
             }),
-            None => Ok(ToolOutput {
+            Ok(None) => Ok(ToolOutput {
                 success: false,
                 body: json!({"error": "The original tool call has different arguments"}),
+            }),
+            Err(error) => Ok(ToolOutput {
+                success: false,
+                body: json!({"error": format!("{error:#}")}),
             }),
         }
     }

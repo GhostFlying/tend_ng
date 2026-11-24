@@ -113,6 +113,33 @@ python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target
 - 复用单 slot 验收，让 Issue Agent 委派后先结案，随后恢复 Server 通信并完成子 Issue。核对只有一个新的协调 Task、原 Issue 仍结案、同一 Owner 收到晚到事实。另用丢响应路径核对待处理记录仍沿原身份去重。
 - 让原协调 Run 在持久委派后返回 Provider 错误，核对子项仍可用已让出的 slot 推进。父 Agent 收到子项事实时沿原协调 Task 接续，失败的 Run 保留原原因。
 
+### 文件交付
+
+- Work Agent 用 `tend_submit_artifact` 提交 workspace 内的文件。Runner 将原件固定在数据库相邻的文件目录，文件和本地操作落盘后返回文件 ID。工具回放返回原回执。
+- Server 先通过业务同步保存引用，同时允许 Task 结算和停妥。Runner 用独立线程上传同一文件 ID 的完整字节。文件传输在 Server 使用独立处理线程，主 Chat 收件及 Runner 同步可以继续。
+- Server 从完整原件提供 API 下载，CLI 可按文件 ID 下载。首次可读时登记一次父 Issue 输入。读取发现原件丢失时，同步请求原 Runner 从保留的副本补回。补回沿原交付，不另发唤醒。
+- 固定 fixture 在 Work Agent 开工后停止 Server，核对工具本地受理、Task 停妥及同一份文件在工作区修改后的原件内容。恢复 Server 后，挂起一次上传，核对正常 Chat 和停妥证明先到账。恢复上传，并覆盖下载、重传及原件缺失后的补回。
+
+### Router 在原话题回报
+
+- Issue Agent 用 `tend_report_result` 指定要上报的结论与实际交付文件。Runner 本地受理，Server 沿顶层 Issue 的原始 Chat 消息持久登记一条后台输入。
+- 后台回报共用 Router 的同 Chat 串行、原生回合查证及有限补发。已开始的回合先恢复，待开始的用户消息优先。后台输入只进入 Router 执行队列；用户读到 Router 的答复及已验证的文件引用。
+- 验收让 Router 在后台回报的启动回执前退出一次。保留原话题、回报和文件身份，核对恢复后发布一次答复。CLI 读取该答复并下载原件。
+
+### 按 Task 全量对账
+
+- Runner 用原 Task ID 对账，先发送留存的领取回执，再按本机关联记录的顺序发送 Run 事实和业务操作。固定这轮可覆盖的末位置，分批提交。全量读取包含已确认的事实。
+- Server 仅接受已登记到该 Runner 的 Task，复用增量的业务结算和原身份去重。逐 Task 检查该 Task 已登记文件的实物，发现缺失时向原 Runner 请求副本。
+- 增量持续处理普通收件。Runner 启动或重新连通后，独立对账待收尾和待同步的本机 Task。已确认的历史 Task 可显式对账，Runner 用 `--reconcile <task-id>` 启动单次检查和补传。
+- 验收用保留子 Task 已领取和已启动事实的 Server 快照。原 Runner 已收到全部增量确认后，仅运行该 Task 的全量对账，核对原结算和文件恢复。随后删除 Server 原件，复跑同一命令并核对同一文件身份。
+
+### 纯文本 Web Chat
+
+- 参考旧 Tend 的单列对话和底部编辑框，首屏只呈现主 Chat、连接操作、历史消息和文件下载。设计稿用白底、约 800 px 的居中阅读列、左侧 Tend 回复、右侧用户消息和深色发送按钮。窄屏保留单列和底部编辑框。
+- Web 通过同源 API 连接，首次输入预共享 token，当前浏览器标签页保留连接。每次发送在本机生成操作 ID，恢复失败后用原 ID 重试。定期读取完整消息，支持向上翻页。交付文件走同一个已鉴权下载接口。
+- Server 可通过 `--web-dir web/dist` 提供构建产物。开发环境用 Vite 代理到本机 Server。沿用 Node 24、pnpm 10、React、TypeScript、Vite 及旧 Tend 的验证工具。
+- 用真实 Server、Runner、工作区和固定 Agent 输出，从浏览器发消息并下载原件。核对宽屏和窄屏、连接和收件失败提示、刷新后回复仍在原 Chat。
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)

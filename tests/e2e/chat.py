@@ -270,7 +270,9 @@ def main():
         with sqlite3.connect(root / "server.sqlite") as database:
             attempts = database.execute(
                 "SELECT a.number, a.id, a.thread_id FROM router_attempts a "
-                "JOIN chat_messages m ON m.seq = a.seq WHERE m.id = ? ORDER BY number",
+                "JOIN router_inputs i ON i.seq = a.seq "
+                "JOIN chat_messages m ON m.seq = i.message_seq WHERE m.id = ? AND i.report_id IS NULL "
+                "ORDER BY a.number",
                 (lost["message_id"],),
             ).fetchall()
             assert [attempt[0] for attempt in attempts] == [1, 2], attempts

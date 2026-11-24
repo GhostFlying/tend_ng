@@ -44,6 +44,8 @@ pub struct Message {
     pub router_error: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issue_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -85,6 +87,8 @@ pub struct IssueDispatch {
     pub placement: Option<Placement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<RunObservation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<Artifact>,
     #[serde(flatten)]
     pub work: DispatchIssue,
 }
@@ -99,6 +103,14 @@ pub fn messages_path(chat_id: &str) -> String {
 
 pub fn issue_path(issue_id: &str) -> String {
     format!("/api/v1/issues/{issue_id}")
+}
+
+pub fn artifact_path(id: &str) -> String {
+    format!("/api/v1/artifacts/{id}")
+}
+
+pub fn artifact_upload_path(runner: &str, id: &str) -> String {
+    format!("/api/v1/runners/{runner}/artifacts/{id}")
 }
 
 pub fn valid_id(id: &str) -> bool {

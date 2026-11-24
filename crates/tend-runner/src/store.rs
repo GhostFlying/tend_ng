@@ -1,4 +1,5 @@
 mod coordination;
+mod reconcile;
 pub mod run;
 
 use crate::config::Config;
@@ -32,9 +33,13 @@ impl Store {
                  acknowledged INTEGER NOT NULL DEFAULT 0
              );
              CREATE INDEX IF NOT EXISTS unsent_claims
-                ON received_assignments(acknowledged) WHERE acknowledged = 0;",
+                ON received_assignments(acknowledged) WHERE acknowledged = 0;
+             CREATE INDEX IF NOT EXISTS local_assignments_by_task ON received_assignments(task_id);",
         )?;
         run::create_tables(&tx)?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS records_by_assignment ON run_outbox(assignment_id);",
+        )?;
         tx.execute(
             "INSERT INTO runner_instance VALUES (1, ?1, ?2) ON CONFLICT DO NOTHING",
             params![config.runner_id, config.host_id],

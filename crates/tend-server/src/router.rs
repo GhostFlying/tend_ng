@@ -13,14 +13,16 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 2;
+const TOOL_REVISION: i64 = 3;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
     "Tend may supply a replay record before the request. It means the following text is the same original input. ",
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
     "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
-    "If the remaining work is unclear, explain what Tend has already saved or ask a focused question."
+    "If the remaining work is unclear, explain what Tend has already saved or ask a focused question. ",
+    "A Tend Issue report is a background fact, not a fresh user request. Reply to the original topic, ",
+    "summarize the actual result, and mention any supplied delivery files. Tend attaches those files to your final answer."
 );
 
 fn dispatch_tool() -> Value {
@@ -142,7 +144,14 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools, None)?;
                 store.save_thread(chat, &id, TOOL_REVISION)?;
                 let context: Vec<_> = [
-                    store.recent_context(chat, input.seq)?,
+                    store.recent_context(
+                        chat,
+                        if input.report_id.is_some() {
+                            i64::MAX
+                        } else {
+                            input.message_seq
+                        },
+                    )?,
                     (number > 1)
                         .then(|| replay_context(&store, &input, number))
                         .transpose()?,
@@ -177,11 +186,17 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
     let record = json!({
         "kind": "replay",
         "source_message_id": input.message_id,
+        "report_id": input.report_id,
         "attempt_number": attempt_number,
         "committed_dispatches": store.dispatches_for_input(input.seq)?,
     });
+    let kind = if input.report_id.is_some() {
+        "Issue report"
+    } else {
+        "request"
+    };
     Ok(format!(
-        "Tend replay record. The next text is the original request.\n{record}"
+        "Tend replay record. The next text is the original {kind}.\n{record}"
     ))
 }
 

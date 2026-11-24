@@ -61,7 +61,7 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let source = tx
             .query_row(
-                "SELECT a.seq FROM router_attempts a
+                "SELECT i.message_seq FROM router_attempts a
              JOIN router_inputs i ON i.seq = a.seq
              WHERE a.id = ?1 AND a.thread_id = ?2 AND a.turn_id = ?3
                AND i.outcome IS NULL",
@@ -122,14 +122,20 @@ impl Store {
     }
 
     pub fn issue(&self, id: &str) -> Result<Option<IssueDispatch>> {
-        Ok(self
+        let issue = self
             .db
             .query_row(
                 &format!("{DISPATCH_QUERY} WHERE i.id = ?1 ORDER BY t.rowid DESC LIMIT 1"),
                 [id],
                 read_dispatch,
             )
-            .optional()?)
+            .optional()?;
+        issue
+            .map(|mut issue| {
+                issue.artifacts = self.issue_artifacts(id)?;
+                Ok(issue)
+            })
+            .transpose()
     }
 
     pub fn read_dispatch(
@@ -144,9 +150,9 @@ impl Store {
                 &format!(
                     "{DISPATCH_QUERY}
                      WHERE t.id = d.task_id AND d.operation_id = ?1 AND EXISTS (
-                         SELECT 1 FROM router_attempts a
+                         SELECT 1 FROM router_attempts a JOIN router_inputs r ON r.seq = a.seq
                          WHERE a.id = ?2 AND a.thread_id = ?3 AND a.turn_id = ?4
-                           AND a.seq = i.source_seq
+                           AND r.message_seq = i.source_seq
                      )"
                 ),
                 params![operation_id, attempt_id, call.thread_id, call.turn_id],
@@ -157,7 +163,9 @@ impl Store {
 
     pub fn dispatches_for_input(&self, source: i64) -> Result<Vec<IssueDispatch>> {
         let mut statement = self.db.prepare(&format!(
-            "{DISPATCH_QUERY} WHERE i.source_seq = ?1 AND t.id = d.task_id ORDER BY i.rowid"
+            "{DISPATCH_QUERY}
+             JOIN router_attempts o ON o.id = d.attempt_id
+             WHERE o.seq = ?1 AND t.id = d.task_id ORDER BY i.rowid"
         ))?;
         Ok(statement
             .query_map([source], read_dispatch)?
@@ -201,6 +209,7 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
         issue_state: row.get(13)?,
         parent_issue_id: row.get(15)?,
         run,
+        artifacts: Vec::new(),
         work: DispatchIssue {
             title: row.get(7)?,
             objective: row.get(8)?,

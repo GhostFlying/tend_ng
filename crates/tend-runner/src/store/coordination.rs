@@ -68,13 +68,10 @@ impl Store {
         &mut self,
         run: &LocalRun,
         call: &ToolCall,
-        action: WorkAction,
+        build: impl FnOnce(&str) -> Result<WorkAction>,
     ) -> Result<Option<WorkOperation>> {
         let request = serde_json::to_string(&(&call.tool, &call.arguments))?;
-        let tx = self
-            .0
-            .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior = tx.query_row(
+        let prior = self.0.query_row(
             "SELECT request, operation FROM local_work_operations WHERE run_id = ?1 AND call_id = ?2",
             params![run.id, call.call_id],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
@@ -87,13 +84,32 @@ impl Store {
             };
         }
 
+        let operation_id = protocol::new_id();
+        let action = build(&operation_id)?;
+        if let WorkAction::ReportIssue { artifact_ids, .. } = &action {
+            let mut known = self.0.prepare(
+                "SELECT EXISTS(SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
+                 WHERE i.id = ?1 AND json_extract(i.payload, '$.kind') = 'artifact_available'
+                 AND json_extract(a.contract, '$.issue_id') = ?2)",
+            )?;
+            for id in artifact_ids {
+                ensure!(
+                    known.query_row(params![id, run.assignment.issue_id], |row| row
+                        .get::<_, bool>(0))?,
+                    "Delivery {id} has not been received by this Issue"
+                );
+            }
+        }
         let operation = WorkOperation {
-            operation_id: protocol::new_id(),
+            operation_id,
             assignment_id: run.assignment.placement.assignment_id.clone(),
             run_id: run.id.clone(),
             action,
         };
         let serialized = serde_json::to_string(&operation)?;
+        let tx = self
+            .0
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
         tx.execute(
             "INSERT INTO local_work_operations VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![

@@ -176,6 +176,36 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 )?;
             }
         }
+        WorkAction::SubmitArtifact { name, bytes } => {
+            db.execute(
+                "INSERT INTO artifacts (id, issue_id, task_id, runner_id, name, bytes)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    operation.operation_id,
+                    source_issue,
+                    source_task,
+                    runner_id,
+                    name,
+                    bytes
+                ],
+            )?;
+        }
+        WorkAction::ReportIssue {
+            summary,
+            artifact_ids,
+        } => {
+            if category != "issue-router" {
+                return Ok(false);
+            }
+            super::reports::enqueue(
+                db,
+                operation,
+                &source_issue,
+                source_message,
+                summary,
+                artifact_ids,
+            )?;
+        }
     }
     Ok(true)
 }
@@ -240,7 +270,7 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
     )
 }
 
-fn target_task(db: &Connection, issue: &str) -> Result<Option<String>> {
+pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>> {
     let original = db
         .query_row(
             "SELECT t.id, t.status, a.contract FROM tasks t
@@ -287,7 +317,7 @@ fn target_task(db: &Connection, issue: &str) -> Result<Option<String>> {
     Ok(Some(task))
 }
 
-fn enqueue(db: &Connection, task: &str, input: IssueInput) -> Result<()> {
+pub(super) fn enqueue(db: &Connection, task: &str, input: IssueInput) -> Result<()> {
     db.execute(
         "INSERT INTO issue_inputs (id, task_id, payload) VALUES (?1, ?2, ?3)",
         params![input.input_id, task, serde_json::to_string(&input)?],
@@ -295,17 +325,21 @@ fn enqueue(db: &Connection, task: &str, input: IssueInput) -> Result<()> {
     Ok(())
 }
 
-pub fn pending_inputs(db: &Connection, runner: &str) -> Result<Vec<IssueDelivery>> {
+pub fn pending_inputs(
+    db: &Connection,
+    runner: &str,
+    task: Option<&str>,
+) -> Result<Vec<IssueDelivery>> {
     let mut statement = db.prepare(
         "SELECT i.payload, a.id FROM issue_inputs i
          JOIN tasks t ON t.id = i.task_id
          JOIN runner_assignments a ON a.id = t.current_assignment
-         WHERE i.run_id IS NULL AND a.runner_id = ?1
+         WHERE i.run_id IS NULL AND a.runner_id = ?1 AND (?3 IS NULL OR t.id = ?3)
            AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
          ORDER BY i.rowid LIMIT ?2",
     )?;
     statement
-        .query_map(params![runner, RUNNER_SYNC_BATCH], |row| {
+        .query_map(params![runner, RUNNER_SYNC_BATCH, task], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
         .map(|value| {

@@ -277,13 +277,17 @@ impl Store {
             })?
             .map(|row| {
                 let (payload, kind) = row?;
-                if kind == "run" {
-                    Ok(RunnerRecord::Run(serde_json::from_str(&payload)?))
-                } else {
-                    Ok(RunnerRecord::Operation(serde_json::from_str(&payload)?))
-                }
+                decode_record(&payload, &kind)
             })
             .collect()
+    }
+}
+
+pub(super) fn decode_record(payload: &str, kind: &str) -> Result<RunnerRecord> {
+    if kind == "run" {
+        Ok(RunnerRecord::Run(serde_json::from_str(payload)?))
+    } else {
+        Ok(RunnerRecord::Operation(serde_json::from_str(payload)?))
     }
 }
 

@@ -2,9 +2,9 @@ use anyhow::{Context, Result, bail, ensure};
 use protocol::{
     ApiError, DEFAULT_LISTEN, IssueDispatch, MessagePage, Receipt, SendMessage, TOKEN_ENV,
 };
-use std::{env, time::Duration};
+use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id]\n  tend chat read <chat-id> [before]\n  tend issue read <issue-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id]\n  tend chat read <chat-id> [before]\n  tend issue read <issue-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -21,6 +21,7 @@ fn main() -> Result<()> {
     let endpoint = match namespace.as_str() {
         "chat" => protocol::messages_path(id),
         "issue" => protocol::issue_path(id),
+        "artifact" => protocol::artifact_path(id),
         _ => bail!("{USAGE}"),
     };
     let path = format!("{}{}", base.trim_end_matches('/'), endpoint);
@@ -65,6 +66,10 @@ fn main() -> Result<()> {
             let issue: IssueDispatch =
                 checked(http.get(&path).set("Authorization", &auth).call())?.into_json()?;
             println!("{}", serde_json::to_string(&issue)?);
+        }
+        ("artifact", "download", []) => {
+            let response = checked(http.get(&path).set("Authorization", &auth).call())?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }
         _ => bail!("{USAGE}"),
     }

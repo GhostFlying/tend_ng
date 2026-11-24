@@ -108,6 +108,8 @@ pub struct RunnerSyncReply {
     pub confirmed_operations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<IssueDelivery>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uploads: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -137,6 +139,14 @@ pub enum WorkAction {
     CloseIssue {
         summary: String,
     },
+    SubmitArtifact {
+        name: String,
+        bytes: u64,
+    },
+    ReportIssue {
+        summary: String,
+        artifact_ids: Vec<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -160,6 +170,9 @@ pub struct IssueInput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueInputCause {
     IssueClosed,
+    ArtifactAvailable {
+        artifact: Artifact,
+    },
     NoCandidate {
         missing_repo_ids: Vec<String>,
         category: String,
@@ -169,6 +182,14 @@ pub enum IssueInputCause {
         run_id: String,
         outcome: RunOutcome,
     },
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Artifact {
+    pub id: String,
+    pub name: String,
+    pub bytes: u64,
+    pub available: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -205,6 +226,10 @@ pub enum RunOutcome {
 
 pub fn runner_sync_path(runner_id: &str) -> String {
     format!("/api/v1/runners/{runner_id}/sync")
+}
+
+pub fn reconcile_path(runner_id: &str, task_id: &str) -> String {
+    format!("/api/v1/runners/{runner_id}/reconcile/{task_id}")
 }
 
 pub fn matching_task_agent<'a>(

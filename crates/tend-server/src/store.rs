@@ -1,4 +1,6 @@
+mod artifacts;
 mod coordination;
+mod reports;
 mod run;
 mod runner;
 mod work;
@@ -18,8 +20,10 @@ pub struct Store {
 
 pub struct Input {
     pub seq: i64,
+    pub message_seq: i64,
     pub message_id: String,
     pub text: String,
+    pub report_id: Option<String>,
     pub attempt: Option<Attempt>,
 }
 
@@ -43,7 +47,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 6,
+            version <= 8,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -120,8 +124,15 @@ impl Store {
         }
         if version < 6 {
             coordination::migrate_input_targets(&tx)?;
-            tx.pragma_update(None, "user_version", 6)?;
         }
+        if version < 7 {
+            artifacts::create_tables(&tx)?;
+        }
+        if version < 8 {
+            reports::migrate_queue(&tx)?;
+            tx.pragma_update(None, "user_version", 8)?;
+        }
+        tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;
         Ok(store)
     }
@@ -162,7 +173,7 @@ impl Store {
             params![message_id, chat_id, request.text, request.operation_id],
         )?;
         tx.execute(
-            "INSERT INTO router_inputs (seq, chat_id) VALUES (?1, ?2)",
+            "INSERT INTO router_inputs (message_seq, chat_id) VALUES (?1, ?2)",
             params![tx.last_insert_rowid(), chat_id],
         )?;
         tx.commit()?;
@@ -174,8 +185,8 @@ impl Store {
             "SELECT m.seq, m.id, m.text, m.created_at, m.reply_to, i.seq,
                     i.outcome, i.error, a.id
                FROM chat_messages m
-               LEFT JOIN router_inputs i ON i.seq = m.seq
-               LEFT JOIN router_attempts a ON a.seq = m.seq AND a.number = 1
+               LEFT JOIN router_inputs i ON i.message_seq = m.seq AND i.report_id IS NULL
+               LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = 1
               WHERE m.chat_id = ?1 AND m.seq < ?2
               ORDER BY m.seq DESC LIMIT ?3",
         )?;
@@ -204,6 +215,7 @@ impl Store {
                     router_state,
                     router_error: row.get(7)?,
                     issue_ids: Vec::new(),
+                    artifacts: Vec::new(),
                 },
             ))
         })?;
@@ -229,9 +241,13 @@ impl Store {
                 let (seq, id) = row?;
                 issues.entry(seq).or_default().push(id);
             }
+            let mut files = reports::chat_artifacts(&self.db, chat_id, *oldest, before)?;
             for (seq, message) in &mut page {
                 if let Some(ids) = issues.remove(seq) {
                     message.issue_ids = ids;
+                }
+                if let Some(artifacts) = files.remove(seq) {
+                    message.artifacts = artifacts;
                 }
             }
         }
@@ -252,18 +268,18 @@ impl Store {
     }
 
     pub fn next_input(&self, chat_id: &str) -> Result<Option<Input>> {
-        Ok(self
+        let mut input = self
             .db
             .query_row(
                 "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
-                        a.number, a.process_pid, a.process_start, m.id
+                        a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id
                  FROM router_inputs i
-                 JOIN chat_messages m ON m.seq = i.seq
+                 JOIN chat_messages m ON m.seq = i.message_seq
                  LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
                      SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
                  )
                  WHERE i.chat_id = ?1 AND i.outcome IS NULL
-                 ORDER BY i.seq LIMIT 1",
+                 ORDER BY a.id IS NULL, i.report_id IS NOT NULL, i.seq LIMIT 1",
                 [chat_id],
                 |row| {
                     let attempt = match row.get::<_, Option<String>>(2)? {
@@ -285,12 +301,20 @@ impl Store {
                     Ok(Input {
                         seq: row.get(0)?,
                         message_id: row.get(8)?,
+                        message_seq: row.get(9)?,
+                        report_id: row.get(10)?,
                         text: row.get(1)?,
                         attempt,
                     })
                 },
             )
-            .optional()?)
+            .optional()?;
+        if let Some(input) = &mut input
+            && let Some(report) = &input.report_id
+        {
+            input.text = reports::context(&self.db, report, &input.text, &input.message_id)?;
+        }
+        Ok(input)
     }
 
     pub fn thread_id(&self, chat_id: &str, revision: i64) -> Result<Option<String>> {
@@ -341,9 +365,9 @@ impl Store {
     pub fn recent_context(&self, chat_id: &str, before: i64) -> Result<Option<String>> {
         let mut statement = self.db.prepare(
             "WITH recent AS (
-                SELECT seq, outcome FROM router_inputs
-                 WHERE chat_id = ?1 AND seq < ?2 AND outcome IS NOT NULL
-                 ORDER BY seq DESC LIMIT 6
+                SELECT message_seq AS seq, outcome FROM router_inputs
+                 WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL AND report_id IS NULL
+                 ORDER BY message_seq DESC LIMIT 6
              )
              SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome
                FROM recent i JOIN chat_messages m ON m.seq = i.seq
@@ -401,12 +425,17 @@ impl Store {
         if updated == 0 {
             return Ok(());
         }
-        for answer in answers {
+        for (index, answer) in answers.iter().enumerate() {
+            let id = protocol::new_id();
             tx.execute(
                 "INSERT INTO chat_messages (id, chat_id, text, reply_to, native_item_id)
-                 SELECT ?2, chat_id, ?3, id, ?4 FROM chat_messages WHERE seq = ?1",
-                params![seq, protocol::new_id(), answer.text, answer.item_id],
+                 SELECT ?2, m.chat_id, ?3, m.id, ?4 FROM router_inputs i
+                 JOIN chat_messages m ON m.seq = i.message_seq WHERE i.seq = ?1",
+                params![seq, id, answer.text, answer.item_id],
             )?;
+            if index + 1 == answers.len() {
+                reports::attach(&tx, &id, seq)?;
+            }
         }
         tx.commit()?;
         Ok(())

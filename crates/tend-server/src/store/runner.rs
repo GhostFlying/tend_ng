@@ -134,6 +134,29 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
 }
 
 impl Store {
+    pub fn reconcile_scope(&self, task: &str, request: &RunnerSync) -> Result<bool> {
+        let mut statement = self
+            .db
+            .prepare("SELECT id FROM runner_assignments WHERE task_id = ?1 AND runner_id = ?2")?;
+        let registered = statement
+            .query_map(params![task, request.profile.runner_id], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        let records = request.records.iter().map(|record| match record {
+            RunnerRecord::Run(run) => &run.assignment_id,
+            RunnerRecord::Operation(op) => &op.assignment_id,
+        });
+        Ok(!registered.is_empty()
+            && request
+                .receipts
+                .iter()
+                .map(|r| &r.assignment_id)
+                .chain(request.runs.iter().map(|run| &run.assignment_id))
+                .chain(records)
+                .all(|id| registered.contains(id)))
+    }
+
     pub fn schedule_assignments(&mut self, after: &mut i64) -> Result<()> {
         if self.db.query_row(
             "SELECT EXISTS(SELECT 1 FROM runner_assignments
@@ -199,7 +222,11 @@ impl Store {
         Ok(())
     }
 
-    pub fn sync_runner(&mut self, request: RunnerSync) -> Result<Option<RunnerSyncReply>> {
+    pub fn sync_runner(
+        &mut self,
+        request: RunnerSync,
+        task: Option<&str>,
+    ) -> Result<Option<RunnerSyncReply>> {
         let profile = &request.profile;
         let profile_json = serde_json::to_string(profile)?;
         let stored = self
@@ -222,14 +249,15 @@ impl Store {
         {
             return Ok(None);
         }
-        let refresh =
-            !stored.is_some_and(|(_, previous, recent)| recent && previous == profile_json);
-        let reserved = self.db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM runner_assignments
+        let refresh = task.is_none()
+            && !stored.is_some_and(|(_, previous, recent)| recent && previous == profile_json);
+        let reserved = task.is_none()
+            && self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runner_assignments
              WHERE runner_id = ?1 AND state = 'reserved' AND expires_at > unixepoch())",
-            [&profile.runner_id],
-            |row| row.get::<_, bool>(0),
-        )?;
+                [&profile.runner_id],
+                |row| row.get::<_, bool>(0),
+            )?;
         if !refresh
             && !reserved
             && request.receipts.is_empty()
@@ -237,11 +265,16 @@ impl Store {
             && request.records.is_empty()
         {
             return Ok(Some(RunnerSyncReply {
-                assignments: assignments_to_send(&self.db, &profile.runner_id, false)?,
+                assignments: if task.is_none() {
+                    assignments_to_send(&self.db, &profile.runner_id, false)?
+                } else {
+                    Vec::new()
+                },
                 confirmed_receipts: Vec::new(),
                 confirmed_runs: Vec::new(),
                 confirmed_operations: Vec::new(),
-                inputs: coordination::pending_inputs(&self.db, &profile.runner_id)?,
+                inputs: coordination::pending_inputs(&self.db, &profile.runner_id, task)?,
+                uploads: super::artifacts::pending(&self.db, &profile.runner_id, task)?,
             }));
         }
 
@@ -312,7 +345,11 @@ impl Store {
             }
         }
 
-        let assignments = assignments_to_send(&tx, &profile.runner_id, true)?;
+        let assignments = if task.is_none() {
+            assignments_to_send(&tx, &profile.runner_id, true)?
+        } else {
+            Vec::new()
+        };
         for assignment in &assignments {
             let id = &assignment.placement.assignment_id;
             if tx.execute(
@@ -325,7 +362,8 @@ impl Store {
                 )?;
             }
         }
-        let inputs = coordination::pending_inputs(&tx, &profile.runner_id)?;
+        let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task)?;
+        let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
         tx.commit()?;
         Ok(Some(RunnerSyncReply {
             assignments,
@@ -333,6 +371,7 @@ impl Store {
             confirmed_runs,
             confirmed_operations,
             inputs,
+            uploads,
         }))
     }
 }

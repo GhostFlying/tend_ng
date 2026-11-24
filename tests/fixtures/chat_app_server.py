@@ -121,7 +121,16 @@ for line in sys.stdin:
             turn_id = str(uuid.uuid4())
             text = params["input"][-1]["text"]
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
-            case = cases[text]
+            if text.startswith("Tend Issue report for the user's original topic.\n"):
+                report = json.loads(text.split("\n", 1)[1])
+                assert report["original_request"] == "Dispatch from Chat."
+                assert report["summary"] == "The requested guide is ready."
+                [file] = report["artifacts"]
+                assert file["name"] == "guide.txt"
+                case = {"answer": "The guide is ready. Download the attached guide.txt.",
+                        "drop_before_start": 1}
+            else:
+                case = cases[text]
             with database:
                 database.execute(
                     "INSERT INTO start_requests VALUES (?, ?, ?, ?)",

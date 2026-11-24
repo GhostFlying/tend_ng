@@ -1,3 +1,4 @@
+mod artifacts;
 mod router;
 mod store;
 
@@ -7,7 +8,15 @@ use protocol::{
     TOKEN_ENV,
 };
 use serde_json::{Value, json};
-use std::{env, ffi::OsString, io::Read, path::PathBuf, thread, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    io::{Cursor, Read},
+    path::{Path, PathBuf},
+    sync::mpsc::TrySendError,
+    thread,
+    time::Duration,
+};
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -58,6 +67,8 @@ fn main() -> Result<()> {
     let auth = format!("Bearer {token}");
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
     let placement = Store::open(&db)?;
+    let transfers = artifacts::serve(&db)?;
+    let artifact_root = db.with_extension("artifacts");
     thread::spawn(move || schedule(placement));
     router::spawn(router::Config {
         db,
@@ -68,13 +79,24 @@ fn main() -> Result<()> {
     eprintln!("Tend Server listening on {}", server.server_addr());
 
     for mut request in server.incoming_requests() {
-        let (status, body) = handle(&mut store, &mut request, &auth).unwrap_or_else(|error| {
-            eprintln!("User API failed: {error:#}");
-            api_error(500, "Server could not process the request")
-        });
-        let response = Response::from_string(serde_json::to_string(&body)?)
-            .with_status_code(status)
-            .with_header(Header::from_bytes("Content-Type", "application/json").unwrap());
+        let (status, body) = if !authenticated(&request, &auth) {
+            api_error(401, "valid Tend token required")
+        } else if let Some(endpoint) = artifacts::Endpoint::parse(request.url()) {
+            if let Err(
+                TrySendError::Full((request, _)) | TrySendError::Disconnected((request, _)),
+            ) = transfers.try_send((request, endpoint))
+            {
+                let (_, body) = api_error(503, "File transfer worker is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
+        } else {
+            handle(&mut store, &mut request, &artifact_root).unwrap_or_else(|error| {
+                eprintln!("User API failed: {error:#}");
+                api_error(500, "Server could not process the request")
+            })
+        };
+        let response = json_response(status, &body)?;
         if let Err(error) = request.respond(response) {
             eprintln!("Send user API response: {error}");
         }
@@ -92,15 +114,20 @@ fn schedule(mut store: Store) {
     }
 }
 
-fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, Value)> {
-    let authenticated = request
+fn json_response(status: u16, body: &Value) -> Result<Response<Cursor<Vec<u8>>>> {
+    Ok(Response::from_string(serde_json::to_string(body)?)
+        .with_status_code(status)
+        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()))
+}
+
+fn authenticated(request: &Request, auth: &str) -> bool {
+    request
         .headers()
         .iter()
-        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == auth);
-    if !authenticated {
-        return Ok(api_error(401, "valid Tend token required"));
-    }
+        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == auth)
+}
 
+fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
@@ -123,7 +150,16 @@ fn handle(store: &mut Store, request: &mut Request, auth: &str) -> Result<(u16, 
         .filter(|id| protocol::valid_id(id))
     {
         let runner_id = runner_id.to_owned();
-        return handle_runner_sync(store, request, &runner_id);
+        return handle_runner_sync(store, request, &runner_id, None);
+    }
+    if let Some((runner_id, task)) = path
+        .strip_prefix("/api/v1/runners/")
+        .and_then(|path| path.split_once("/reconcile/"))
+        .filter(|(runner, task)| protocol::valid_id(runner) && protocol::valid_id(task))
+    {
+        let scope = (task.to_owned(), artifact_root);
+        let runner_id = runner_id.to_owned();
+        return handle_runner_sync(store, request, &runner_id, Some(scope));
     }
     let chat_id = path
         .strip_prefix("/api/v1/chats/")
@@ -188,6 +224,7 @@ fn handle_runner_sync(
     store: &mut Store,
     request: &mut Request,
     runner_id: &str,
+    reconcile: Option<(String, &Path)>,
 ) -> Result<(u16, Value)> {
     if request.method() != &Method::Post {
         return Ok(api_error(405, "method not allowed"));
@@ -209,13 +246,24 @@ fn handle_runner_sync(
     {
         return Ok(api_error(400, "invalid Runner profile or receipt batch"));
     }
-    Ok(match store.sync_runner(sync)? {
-        Some(reply) => (200, serde_json::to_value(reply)?),
-        None => api_error(
-            409,
-            "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
-        ),
-    })
+    if let Some((task, root)) = &reconcile {
+        if !store.reconcile_scope(task, &sync)? {
+            return Ok(api_error(
+                409,
+                "Task is not registered for these Runner records",
+            ));
+        }
+        store.reconcile_artifacts(root, task, runner_id)?;
+    }
+    Ok(
+        match store.sync_runner(sync, reconcile.as_ref().map(|(task, _)| task.as_str()))? {
+            Some(reply) => (200, serde_json::to_value(reply)?),
+            None => api_error(
+                409,
+                "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
+            ),
+        },
+    )
 }
 
 fn api_error(status: u16, error: &str) -> (u16, Value) {
