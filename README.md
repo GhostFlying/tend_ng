@@ -46,6 +46,31 @@ In a second shell, create `.local/runner/config.json`. Replace the example repos
 
 Each Agent may set `model`, `reasoning_effort`, `description`, and verified capabilities such as `image_gen`. Configure the Router independently with `--router-model` and `--router-effort` when needed. Omitted model settings use the local Codex configuration.
 
+Set `CODEX_HOME` in the service environment to use a dedicated default Codex home. To run selected Agents with a different home, name a local launcher in `app_servers` and set `app_server` on those Agents. This Runner configuration fragment selects an Ark home for the coordinator.
+
+```json
+{
+  "app_servers": {
+    "ark": {
+      "program": "/path/to/codex",
+      "codex_home": "/path/to/tend-ark-home"
+    }
+  },
+  "agents": [
+    {
+      "id": "coordinator",
+      "category": "issue-router",
+      "revision": "1",
+      "model": "deepseek-v4.1-flash",
+      "reasoning_effort": "max",
+      "app_server": "ark"
+    }
+  ]
+}
+```
+
+The Runner stores the selected launcher with each accepted assignment and uses it to start work, reconcile native turns, and read rollout history. Update the Agent revision when changing its launcher. `args` can override the launcher's default `app-server --listen stdio://` arguments. Keep each home available for as long as its history is needed.
+
 ```sh
 export TEND_URL=http://127.0.0.1:8832
 target/release/tend-runner --config .local/runner/config.json --db .local/runner/tend.sqlite

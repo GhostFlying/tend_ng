@@ -1,5 +1,5 @@
 use crate::{
-    config::Config,
+    config::{AppServer, Config},
     store::{Store, run::LocalRun},
 };
 use crate::{tools, workspace};
@@ -99,17 +99,32 @@ fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     Ok(())
 }
 
-pub(crate) fn client(runtime: &Runtime, cwd: &Path) -> Result<Client> {
-    let mut command = Command::new(&runtime.program);
-    command
-        .args(&runtime.args)
-        .current_dir(cwd)
-        .env_remove(TOKEN_ENV);
+pub(crate) fn client(
+    runtime: &Runtime,
+    cwd: &Path,
+    app_server: Option<&AppServer>,
+) -> Result<Client> {
+    let mut command = match app_server {
+        Some(app) => {
+            let mut command = Command::new(&app.program);
+            command.args(&app.args);
+            if let Some(home) = &app.codex_home {
+                command.env("CODEX_HOME", home);
+            }
+            command
+        }
+        None => {
+            let mut command = Command::new(&runtime.program);
+            command.args(&runtime.args);
+            command
+        }
+    };
+    command.current_dir(cwd).env_remove(TOKEN_ENV);
     Client::connect(&mut command)
 }
 
 fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
-    let mut app = client(runtime, cwd)?;
+    let mut app = client(runtime, cwd, run.app_server.as_ref())?;
     let thread = run
         .thread_id
         .as_deref()
@@ -126,7 +141,12 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     let planned_cwd = workspace::directory(&runtime.root, run);
     let started = workspace::prepare(&runtime.root, run)
         .context("prepare Tend workspace")
-        .and_then(|directory| Ok((client(runtime, &directory)?, directory)));
+        .and_then(|directory| {
+            Ok((
+                client(runtime, &directory, run.app_server.as_ref())?,
+                directory,
+            ))
+        });
     let (mut app, cwd) = match started {
         Ok(started) => started,
         Err(error) => return settle(store, run, &planned_cwd, Err(error), false),

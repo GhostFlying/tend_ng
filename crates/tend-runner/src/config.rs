@@ -2,7 +2,7 @@ use anyhow::{Context, Result, ensure};
 use protocol::{AgentProfile, ClaimDecision, RunnerProfile, TaskAssignment};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::File,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -16,10 +16,26 @@ pub struct Config {
     pub slot_limit: u32,
     pub repos: Vec<Repo>,
     pub agents: Vec<AgentProfile>,
+    #[serde(default)]
+    pub app_servers: HashMap<String, AppServer>,
     pub inspect: Option<Inspection>,
     pub workspace_root: Option<PathBuf>,
     #[serde(default)]
     pub standby: bool,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AppServer {
+    pub program: String,
+    #[serde(default = "stdio_args")]
+    pub args: Vec<String>,
+    pub codex_home: Option<PathBuf>,
+}
+
+fn stdio_args() -> Vec<String> {
+    ["app-server", "--listen", "stdio://"]
+        .map(str::to_owned)
+        .to_vec()
 }
 
 #[derive(Deserialize)]
@@ -57,6 +73,23 @@ impl Config {
             );
             repo.path = root.join(&repo.path);
         }
+        for (id, app) in &mut config.app_servers {
+            ensure!(
+                protocol::valid_id(id) && !app.program.trim().is_empty(),
+                "invalid App Server configuration {id}"
+            );
+            let program = Path::new(&app.program);
+            if program.is_relative() && program.components().count() > 1 {
+                app.program = root
+                    .join(program)
+                    .to_str()
+                    .context("invalid App Server path")?
+                    .to_owned();
+            }
+            if let Some(home) = &mut app.codex_home {
+                *home = root.join(&*home);
+            }
+        }
         if let Some(inspect) = &config.inspect {
             ensure!(
                 inspect
@@ -73,6 +106,15 @@ impl Config {
             config.agents.iter().all(|agent| agents.insert(&agent.id)),
             "duplicate named Agent ID"
         );
+        for agent in &config.agents {
+            if let Some(id) = &agent.app_server {
+                ensure!(
+                    config.app_servers.contains_key(id),
+                    "Agent {} names an unconfigured App Server {id}",
+                    agent.id
+                );
+            }
+        }
         Ok(config)
     }
 

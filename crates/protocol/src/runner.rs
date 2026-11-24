@@ -17,6 +17,8 @@ pub struct AgentProfile {
     pub revision: String,
     pub model: Option<String>,
     pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub app_server: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -88,6 +90,7 @@ impl RunnerProfile {
             && self.available_for_assignment <= self.slot_limit - self.running_slots
             && self.agents.iter().all(|agent| {
                 crate::valid_id(&agent.id)
+                    && agent.app_server.as_deref().is_none_or(crate::valid_id)
                     && !agent.category.is_empty()
                     && !agent.revision.is_empty()
             })

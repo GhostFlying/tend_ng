@@ -161,6 +161,17 @@ impl Store {
             }
 
             let decision = config.decide(&assignment, &profile);
+            let app_server = if decision == ClaimDecision::Accepted {
+                assignment
+                    .placement
+                    .agent
+                    .app_server
+                    .as_ref()
+                    .map(|id| serde_json::to_string(&config.app_servers[id]))
+                    .transpose()?
+            } else {
+                None
+            };
             let (repositories, state) = if decision == ClaimDecision::Accepted {
                 let state = match assignment.handoff.as_ref().map(|context| &context.phase) {
                     Some(protocol::HandoffPhase::Waiting) => "waiting",
@@ -172,14 +183,18 @@ impl Store {
                 ("[]".to_owned(), "rejected")
             };
             tx.execute(
-                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision, execution_state, retains_workspace)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision,
+                                                   execution_state, retains_workspace, app_server)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     id,
                     assignment.task_id,
                     contract,
                     repositories,
-                    serde_json::to_string(&decision)?, state, state == "waiting_external"
+                    serde_json::to_string(&decision)?,
+                    state,
+                    state == "waiting_external",
+                    app_server
                 ],
             )?;
         }

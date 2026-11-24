@@ -1,5 +1,6 @@
 """Fixed native callbacks for a parent, its work child, and the resumed parent."""
 import json
+import os
 from pathlib import Path
 import sys
 import time
@@ -97,13 +98,14 @@ def issue_chat(turn, assignment, items, tools):
         {"type": "agentMessage", "id": turn_id + "-detail", "phase": "commentary",
          "text": "核对安装步骤和验证命令。" if worker else "协调指南的整理工作。"},
     ]}
-    with (root / f"{thread_id}.json").open("w") as saved:
+    with (history_home / f"{thread_id}.json").open("w") as saved:
         json.dump(history, saved)
     send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": history}})
 
 
 root = Path(sys.argv[1])
 scenario = sys.argv[2]
+history_home = Path(os.environ.get("CODEX_HOME", root))
 respond(request("initialize"), {})
 request("initialized")
 start = json.loads(sys.stdin.readline())
@@ -111,7 +113,7 @@ if scenario == "issue-chat" and start["method"] == "thread/turns/list":
     thread = start["params"]["threadId"]
     with (root / "inspection.jsonl").open("a") as visits:
         visits.write(json.dumps(thread) + "\n")
-    saved = root / f"{thread}.json"
+    saved = history_home / f"{thread}.json"
     respond(start, {"data": [json.loads(saved.read_text())] if saved.exists() else [], "nextCursor": None})
     sys.exit(0)
 assert start["method"] == "thread/start", start

@@ -61,7 +61,26 @@ def main():
         root = Path(directory)
         address, inspect = free_port(), free_port()
         prepare(root, inspect)
-        env = {**os.environ, "TEND_TOKEN": "issue-chat-fixture", "TEND_URL": f"http://{address}"}
+        default_home, alternate_home, replacement_home = (
+            root / name for name in ("default-codex", "alternate-codex", "replacement-codex"))
+        for home in (default_home, alternate_home, replacement_home):
+            home.mkdir()
+        config = root / "runner.json"
+        settings = json.loads(config.read_text())
+        settings["agents"][1]["app_server"] = "alternate"
+        settings["app_servers"] = {"alternate": {
+            "program": sys.executable,
+            "args": [str(TESTS / "fixtures/coordination_app_server.py"), str(root), "issue-chat"],
+            "codex_home": "alternate-codex",
+        }}
+        config.write_text(json.dumps(settings))
+        env = {**os.environ, "TEND_TOKEN": "issue-chat-fixture", "TEND_URL": f"http://{address}",
+               "CODEX_HOME": str(default_home)}
+        runner_command = [
+            args.runner, "--config", config, "--db", root / "runner.sqlite",
+            "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py",
+            root, "issue-chat",
+        ]
 
         def cli(*words, error=None):
             result = subprocess.run([args.cli, *words], env=env, text=True,
@@ -85,11 +104,7 @@ def main():
 
         with server(args.server, root, env, listen=address, web_dir=WEB / "dist" if args.web else None):
             with (root / "runner.stderr").open("w") as stderr:
-                runner = subprocess.Popen([
-                    args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
-                    "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py",
-                    root, "issue-chat",
-                ], env=env, stderr=stderr)
+                runner = subprocess.Popen(runner_command, env=env, stderr=stderr)
                 try:
                     original = cli("chat", "send", "main", REQUEST)["message_id"]
                     messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
@@ -164,6 +179,21 @@ def main():
                                                          relay["id"] for item in inputs))
                     assert [item["message"]["id"] for line in inputs
                             if (item := json.loads(line))["kind"] == "issue_message"].count(first["id"]) == 1
+                    assert list(default_home.glob("fixture-parent-*-thread.json"))
+                    assert list(alternate_home.glob("fixture-child-*-thread.json"))
+                    runner.terminate()
+                    runner.wait(timeout=8)
+                    settings["app_servers"]["alternate"]["codex_home"] = str(replacement_home)
+                    config.write_text(json.dumps(settings))
+                    runner = subprocess.Popen(runner_command, env=env, stderr=stderr)
+                    check = [args.cli, "run", "rollout", first["run_id"]]
+                    restored = wait_for(
+                        lambda: subprocess.run(check, env=env, capture_output=True, timeout=8),
+                        lambda result: result.returncode == 0,
+                    )
+                    assert json.loads(restored.stdout)["turn"]["items"][1]["text"] == DETAIL
+                    assert not list(replacement_home.glob("fixture-*-thread.json"))
+
                 except BaseException:
                     print((root / "runner.stderr").read_text(), end="", file=sys.stderr)
                     raise

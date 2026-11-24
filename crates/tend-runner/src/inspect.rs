@@ -56,10 +56,10 @@ fn authenticated(request: &Request, auth: &str) -> bool {
 }
 
 fn read_turn(store: &Store, runtime: &execution::Runtime, run: &str) -> Result<Option<Turn>> {
-    let Some((thread, turn)) = store.native_turn(run)? else {
+    let Some((thread, turn, app_server)) = store.native_turn(run)? else {
         return Ok(None);
     };
-    let mut app = execution::client(runtime, &env::current_dir()?)?;
+    let mut app = execution::client(runtime, &env::current_dir()?, app_server.as_ref())?;
     let found = app.find_turn(&thread, Some(&turn), run)?;
     app.stop()?;
     Ok(found)

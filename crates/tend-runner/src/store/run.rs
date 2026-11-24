@@ -1,5 +1,5 @@
 use super::{Store, coordination};
-use crate::config::Repo;
+use crate::config::{AppServer, Repo};
 use anyhow::{Result, ensure};
 use codex_app::ProcessIdentity;
 use protocol::{
@@ -16,12 +16,13 @@ pub struct LocalRun {
     pub process: Option<ProcessIdentity>,
     pub inputs: Vec<IssueInput>,
     pub repos: Vec<Repo>,
+    pub app_server: Option<AppServer>,
 }
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 5,
+        version <= 6,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -36,6 +37,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 5 {
             super::reclaim::migrate(db)?;
+        }
+        if version < 6 {
+            migrate_app_servers(db)?;
         }
         return Ok(());
     }
@@ -95,6 +99,13 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     super::control::migrate(db)?;
     super::handoff::migrate(db)?;
     super::reclaim::migrate(db)?;
+    migrate_app_servers(db)?;
+    Ok(())
+}
+
+fn migrate_app_servers(db: &Connection) -> Result<()> {
+    db.execute_batch("ALTER TABLE received_assignments ADD COLUMN app_server TEXT;")?;
+    db.pragma_update(None, "user_version", 6)?;
     Ok(())
 }
 
@@ -107,16 +118,24 @@ fn migrate_waits(db: &Connection) -> Result<()> {
 }
 
 impl Store {
-    pub fn native_turn(&self, run: &str) -> Result<Option<(String, String)>> {
-        Ok(self
-            .0
+    pub fn native_turn(&self, run: &str) -> Result<Option<(String, String, Option<AppServer>)>> {
+        self.0
             .query_row(
-                "SELECT thread_id, turn_id FROM local_runs WHERE id = ?1
-               AND thread_id IS NOT NULL AND turn_id IS NOT NULL",
+                "SELECT r.thread_id, r.turn_id, a.app_server FROM local_runs r
+                 JOIN received_assignments a ON a.id = r.assignment_id
+                 WHERE r.id = ?1 AND r.thread_id IS NOT NULL AND r.turn_id IS NOT NULL",
                 [run],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Option<String>>(2)?)),
             )
-            .optional()?)
+            .optional()?
+            .map(|(thread, turn, app)| {
+                Ok((
+                    thread,
+                    turn,
+                    app.as_deref().map(serde_json::from_str).transpose()?,
+                ))
+            })
+            .transpose()
     }
 
     pub fn active_runs(&self) -> Result<Vec<String>> {
@@ -172,8 +191,8 @@ impl Store {
     }
 
     pub fn load_run(&self, id: &str) -> Result<LocalRun> {
-        let (contract, repositories, thread_id, turn_id, process) = self.0.query_row(
-            "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start
+        let (contract, repositories, thread_id, turn_id, process, app) = self.0.query_row(
+            "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start, a.app_server
              FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
              WHERE r.id = ?1", [id],
             |row| {
@@ -181,7 +200,8 @@ impl Store {
                     Some(pid) => Some(ProcessIdentity { pid, started_at: row.get(5)? }),
                     None => None,
                 };
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, process))
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, process,
+                    row.get::<_, Option<String>>(6)?))
             },
         )?;
         Ok(LocalRun {
@@ -191,6 +211,7 @@ impl Store {
             thread_id,
             turn_id,
             process,
+            app_server: app.as_deref().map(serde_json::from_str).transpose()?,
             inputs: coordination::run_inputs(&self.0, id)?,
         })
     }
