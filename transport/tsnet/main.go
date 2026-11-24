@@ -44,6 +44,7 @@ type configuration struct {
 	hostname   string
 	controlURL string
 	inbound    routes
+	inboundTLS routes
 	outbound   routes
 }
 
@@ -58,20 +59,28 @@ func execute(ctx context.Context, config configuration) error {
 	if err != nil {
 		return fmt.Errorf("start tsnet node: %w", err)
 	}
-	proxy := make([]binding, 0, len(config.inbound)+len(config.outbound))
+	proxy := make([]binding, 0, len(config.inbound)+len(config.inboundTLS)+len(config.outbound))
 	defer func() {
 		cancel()
 		for _, entry := range proxy {
 			entry.listener.Close()
 		}
 	}()
-	for _, entry := range config.inbound {
-		listener, err := node.Listen("tcp", entry.listen)
-		if err != nil {
-			return fmt.Errorf("bind tailnet %s: %w", entry.listen, err)
+	dialer := &net.Dialer{}
+	for _, inbound := range []struct {
+		routes routes
+		listen func(string, string) (net.Listener, error)
+	}{
+		{config.inbound, node.Listen},
+		{config.inboundTLS, node.ListenTLS},
+	} {
+		for _, entry := range inbound.routes {
+			listener, err := inbound.listen("tcp", entry.listen)
+			if err != nil {
+				return fmt.Errorf("bind tailnet %s: %w", entry.listen, err)
+			}
+			proxy = append(proxy, binding{listener: listener, target: entry.target, dial: dialer.DialContext})
 		}
-		dialer := &net.Dialer{}
-		proxy = append(proxy, binding{listener: listener, target: entry.target, dial: dialer.DialContext})
 	}
 	for _, entry := range config.outbound {
 		listener, err := net.Listen("tcp", entry.listen)
@@ -149,9 +158,10 @@ func main() {
 	flag.StringVar(&config.hostname, "hostname", "", "tailnet node name")
 	flag.StringVar(&config.controlURL, "control-url", "", "optional Tailscale control URL")
 	flag.Var(&config.inbound, "inbound", "tailnet listen address=local service address; repeatable")
+	flag.Var(&config.inboundTLS, "inbound-tls", "tailnet HTTPS listen address=local HTTP service address; repeatable")
 	flag.Var(&config.outbound, "outbound", "local listen address=tailnet service address; repeatable")
 	flag.Parse()
-	if config.dir == "" || config.hostname == "" || len(config.inbound)+len(config.outbound) == 0 {
+	if config.dir == "" || config.hostname == "" || len(config.inbound)+len(config.inboundTLS)+len(config.outbound) == 0 {
 		flag.Usage()
 		os.Exit(2)
 	}
