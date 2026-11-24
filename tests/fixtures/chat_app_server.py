@@ -12,6 +12,8 @@ ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
 ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
+ROUTER_SUBSCRIBE = "Subscribe to demo CI."
+cases[ROUTER_SUBSCRIBE] = {"answer": "I will follow demo CI."}
 PINNED_REVIEW = "Prepare a guide from the pinned demo branch."
 cases[PINNED_REVIEW] = {"dispatch": True}
 BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
@@ -166,6 +168,8 @@ for line in sys.stdin:
                 assert attention["original_request"] == ATTENTION_REQUEST
                 assert attention["request"]["options"] == ["精简版", "完整版"]
                 case = {"attention": attention, "answer": "The question was published."}
+            elif text.startswith("Tend external facts collected for this Chat.\n"):
+                case = {"answer": "TEND_NO_UPDATE"}
             elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
                 assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
@@ -206,6 +210,15 @@ for line in sys.stdin:
                     saved.write_text(receipt["question_message_id"])
                     sys.exit(0)
                 assert receipt["question_message_id"] == saved.read_text()
+                answer = case["answer"]
+            elif text == ROUTER_SUBSCRIBE:
+                condition = {"url": "https://github.com/example/guide/pull/82",
+                             "event": "ci", "state": "pending"}
+                receipt = decision_tool("tend_subscribe", condition, thread_id, turn_id,
+                                        params["clientUserMessageId"])
+                repeated = decision_tool("tend_subscribe", condition, thread_id, turn_id,
+                                         params["clientUserMessageId"])
+                assert repeated == receipt
                 answer = case["answer"]
             elif text == ATTENTION_REPLY:
                 if context and "explicitly replies to this Tend Attention" in context:

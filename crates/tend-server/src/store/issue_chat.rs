@@ -250,7 +250,8 @@ impl Store {
              JOIN chat_messages user ON user.seq = input.message_seq
              JOIN issues i ON i.id = ?4 JOIN chat_messages origin ON origin.seq = i.source_seq
              WHERE r.id = ?1 AND r.thread_id = ?2 AND r.turn_id = ?3 AND input.outcome IS NULL
-               AND input.report_id IS NULL AND input.attention_id IS NULL AND origin.chat_id = input.chat_id",
+               AND input.report_id IS NULL AND input.attention_id IS NULL
+               AND input.external_batch IS NULL AND origin.chat_id = input.chat_id",
             params![attempt, call.thread_id, call.turn_id, issue],
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).optional()?;

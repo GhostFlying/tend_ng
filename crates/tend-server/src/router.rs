@@ -1,7 +1,7 @@
 use crate::store::{Attempt, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{DispatchIssue, IssueDispatch};
+use protocol::{DispatchIssue, ExternalCondition, IssueDispatch};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 6;
+const TOOL_REVISION: i64 = 7;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -27,7 +27,10 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "A Tend Attention is a decision the user may need to make. Use tend_publish_attention with its original ID ",
     "to ask the question in the original Chat when warranted by priority and timing. Do not guess a decision. ",
     "Use tend_read_attentions to inspect open decisions and tend_answer_attention only when the current user message ",
-    "actually answers an identified question. When the answer is unclear, ask the user to clarify."
+    "actually answers an identified question. When the answer is unclear, ask the user to clarify. ",
+    "Use tend_subscribe to receive GitHub facts relevant to an existing topic. ",
+    "A Tend external facts batch is background input with each fact's original topic. ",
+    "When no user update is needed, answer exactly TEND_NO_UPDATE. Make timely decisions about useful user updates."
 );
 
 fn dispatch_tool() -> Value {
@@ -75,6 +78,18 @@ fn relay_tool() -> Value {
             "required": ["issue_id"],
             "additionalProperties": false
         }
+    })
+}
+
+fn subscribe_tool() -> Value {
+    json!({
+        "type":"function", "name":"tend_subscribe",
+        "description":"Subscribe this Router to an explicit GitHub pull request or CI condition for the current topic.",
+        "inputSchema":{"type":"object","properties":{
+            "url":{"type":"string"}, "event":{"type":"string","enum":["pull","ci"]},
+            "state":{"type":"string"}, "head_sha":{"type":"string"}, "check":{"type":"string"},
+            "run_id":{"type":"string"}
+        },"required":["url","event","state"],"additionalProperties":false}
     })
 }
 
@@ -157,7 +172,12 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;
-    let mut tools = vec![dispatch_tool(), read_dispatch_tool(), relay_tool()];
+    let mut tools = vec![
+        dispatch_tool(),
+        read_dispatch_tool(),
+        relay_tool(),
+        subscribe_tool(),
+    ];
     tools.extend(attention_tools());
     while let Some(input) = store.next_input(chat)? {
         let number = if let Some(attempt) = &input.attempt {
@@ -194,7 +214,10 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 let context: Vec<_> = [
                     store.recent_context(
                         chat,
-                        if input.report_id.is_some() || input.attention_id.is_some() {
+                        if input.report_id.is_some()
+                            || input.attention_id.is_some()
+                            || input.external_batch.is_some()
+                        {
                             i64::MAX
                         } else {
                             input.message_seq
@@ -237,6 +260,7 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
         "source_message_id": input.message_id,
         "report_id": input.report_id,
         "attention_id": input.attention_id,
+        "external_batch": input.external_batch,
         "attempt_number": attempt_number,
         "committed_dispatches": store.dispatches_for_input(input.seq)?,
     });
@@ -244,6 +268,8 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
         "Attention"
     } else if input.report_id.is_some() {
         "Issue report"
+    } else if input.external_batch.is_some() {
+        "external facts batch"
     } else {
         "request"
     };
@@ -281,6 +307,28 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" => self.dispatch(&call),
+            "tend_subscribe" => {
+                let Ok(mut condition) =
+                    serde_json::from_value::<ExternalCondition>(call.arguments.clone())
+                else {
+                    return Ok(tool_error("Use a specific GitHub PR or CI condition"));
+                };
+                if !condition.normalize() {
+                    return Ok(tool_error("Use a specific GitHub PR or CI condition"));
+                }
+                Ok(
+                    match self
+                        .store
+                        .router_subscribe(self.attempt_id, &call, &condition)?
+                    {
+                        Some(id) => ToolOutput {
+                            success: true,
+                            body: json!({"watch_id": id}),
+                        },
+                        None => tool_error("Cannot verify the subscription's original topic"),
+                    },
+                )
+            }
             "tend_relay_issue_message" => {
                 let Some(issue) = call.arguments["issue_id"]
                     .as_str()
@@ -420,7 +468,13 @@ fn recover(client: &mut Client, store: &Store, attempt: &Attempt) -> Result<Opti
 fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()> {
     match turn.status {
         TurnStatus::Completed if input.attention_id.is_some() => store.finish(input.seq, &[], None),
-        TurnStatus::Completed => store.finish(input.seq, &turn.answers()?, None),
+        TurnStatus::Completed => {
+            let mut answers = turn.answers()?;
+            if input.external_batch.is_some() {
+                answers.retain(|answer| answer.text.trim() != "TEND_NO_UPDATE");
+            }
+            store.finish(input.seq, &answers, None)
+        }
         TurnStatus::Failed | TurnStatus::Interrupted => {
             let error = turn
                 .error

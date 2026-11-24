@@ -6,7 +6,7 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
@@ -28,6 +28,7 @@ fn main() -> Result<()> {
         ("issue", "read") => protocol::issue_path(id),
         ("issue", "reviews") => format!("/api/v1/issues/{id}/reviews"),
         ("issue", "list") => protocol::issue_board_path(id),
+        ("pr", "require") => format!("/api/v1/messages/{id}/required-facts"),
         ("pr", "watches") => format!("/api/v1/issues/{id}/watches"),
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
@@ -189,6 +190,19 @@ fn main() -> Result<()> {
             }
             let jobs: Vec<PullDiscovery> = checked(request.call())?.into_json()?;
             println!("{}", serde_json::to_string(&jobs)?);
+        }
+        ("pr", "require", [condition] | [condition, _]) => {
+            let operation_id = rest.get(1).cloned().unwrap_or_else(protocol::new_id);
+            ensure!(protocol::valid_id(&operation_id), "invalid operation ID");
+            let mut condition: protocol::ExternalCondition = serde_json::from_str(condition)?;
+            ensure!(condition.normalize(), "invalid GitHub condition");
+            let request = protocol::RequireExternal {
+                operation_id,
+                condition,
+            };
+            let mut response =
+                send(&http, &path, &auth, &serde_json::to_value(&request)?)?.into_reader();
+            io::copy(&mut response, &mut io::stdout().lock())?;
         }
         ("pr", "watches", []) | ("issue", "reviews", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;

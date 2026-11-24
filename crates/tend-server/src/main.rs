@@ -163,6 +163,9 @@ fn schedule(mut store: Store) {
         if let Err(error) = store.release_external() {
             eprintln!("Release external facts: {error:#}");
         }
+        if let Err(error) = store.release_external_routes() {
+            eprintln!("Release routed external facts: {error:#}");
+        }
         if let Err(error) = store.schedule_assignments(&mut after) {
             eprintln!("Schedule Runner assignments: {error:#}");
         }
@@ -187,6 +190,13 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
+    }
+    if let Some(message) = path
+        .strip_prefix("/api/v1/messages/")
+        .and_then(|path| path.strip_suffix("/required-facts"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        return require_external(store, &message.to_owned(), request);
     }
     if let Some(id) = path
         .strip_prefix("/api/v1/workspace-reclaims/")
@@ -612,6 +622,39 @@ fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u
         }
         store::pull::Linked::Missing => api_error(404, "Issue not found"),
     })
+}
+
+fn require_external(
+    store: &mut Store,
+    message: &str,
+    request: &mut Request,
+) -> Result<(u16, Value)> {
+    use store::external_routing::Registration;
+    if request.method() != &Method::Post {
+        return Ok(api_error(405, "method not allowed"));
+    }
+    let Some(bytes) = request_bytes(request)? else {
+        return Ok(api_error(413, "external watch request too large"));
+    };
+    let Ok(mut watch) = serde_json::from_slice::<protocol::RequireExternal>(&bytes) else {
+        return Ok(api_error(400, "expected operation_id and condition"));
+    };
+    if !protocol::valid_id(&watch.operation_id) || !watch.condition.normalize() {
+        return Ok(api_error(
+            400,
+            "valid operation ID and GitHub condition required",
+        ));
+    }
+    Ok(
+        match store.require_external(&watch.operation_id, message, &watch.condition)? {
+            Registration::Saved(id) => (200, json!({"watch_id": id})),
+            Registration::Missing => api_error(404, "original user message not found"),
+            Registration::Conflict => api_error(
+                409,
+                "operation ID is already used for another external watch",
+            ),
+        },
+    )
 }
 
 fn page_cursor(query: &str) -> Option<i64> {

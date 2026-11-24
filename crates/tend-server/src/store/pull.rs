@@ -188,7 +188,8 @@ impl Store {
         match &observation {
             Ok((facts, _)) => {
                 let refresh = facts.state == "open" || facts.ci.as_deref() == Some("pending")
-                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM external_watches WHERE url = ?1 AND state = 'active')",
+                    || tx.query_row("SELECT EXISTS(SELECT 1 FROM external_watches WHERE url = ?1 AND state = 'active')
+                                            OR EXISTS(SELECT 1 FROM external_routes WHERE url = ?1)",
                         [pull.url()], |row| row.get::<_, bool>(0))?;
                 tx.execute(
                     "UPDATE github_pulls SET facts = ?2, observed_at = unixepoch(), observation_error = NULL,

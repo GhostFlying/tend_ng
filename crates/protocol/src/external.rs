@@ -92,3 +92,9 @@ pub enum WatchMode {
     Required,
     Wait,
 }
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RequireExternal {
+    pub operation_id: String,
+    pub condition: ExternalCondition,
+}

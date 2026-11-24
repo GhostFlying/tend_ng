@@ -4,6 +4,7 @@ pub(crate) mod control;
 mod coordination;
 pub(crate) mod discovery;
 mod external;
+pub(crate) mod external_routing;
 mod handoff;
 mod issue_chat;
 mod notification;
@@ -35,6 +36,7 @@ pub struct Input {
     pub text: String,
     pub report_id: Option<String>,
     pub attention_id: Option<String>,
+    pub external_batch: Option<String>,
     pub reply_context: Option<String>,
     pub attempt: Option<Attempt>,
 }
@@ -60,7 +62,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 19,
+            version <= 20,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -176,7 +178,10 @@ impl Store {
         }
         if version < 19 {
             reclaim::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 19)?;
+        }
+        if version < 20 {
+            external_routing::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 20)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;
@@ -251,7 +256,7 @@ impl Store {
                     i.outcome, i.error, a.id
                FROM chat_messages m
                LEFT JOIN router_inputs i ON i.message_seq = m.seq
-                 AND i.report_id IS NULL AND i.attention_id IS NULL
+                 AND i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL
                LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = 1
               WHERE m.chat_id = ?1 AND m.seq < ?2
               ORDER BY m.seq DESC LIMIT ?3",
@@ -342,14 +347,15 @@ impl Store {
             .query_row(
                 "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
                         a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id,
-                        i.attention_id, m.reply_to
+                        i.attention_id, m.reply_to, i.external_batch
                  FROM router_inputs i
                  JOIN chat_messages m ON m.seq = i.message_seq
                  LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
                      SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
                  )
                  WHERE i.chat_id = ?1 AND i.outcome IS NULL
-                 ORDER BY a.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL), i.seq LIMIT 1",
+                 ORDER BY a.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL OR
+                                        i.external_batch IS NOT NULL), i.seq LIMIT 1",
                 [chat_id],
                 |row| {
                     let attempt = match row.get::<_, Option<String>>(2)? {
@@ -368,16 +374,20 @@ impl Store {
                         }),
                         None => None,
                     };
-                    Ok((Input {
-                        seq: row.get(0)?,
-                        message_id: row.get(8)?,
-                        message_seq: row.get(9)?,
-                        report_id: row.get(10)?,
-                        attention_id: row.get(11)?,
-                        reply_context: None,
-                        text: row.get(1)?,
-                        attempt,
-                    }, row.get::<_, Option<String>>(12)?))
+                    Ok((
+                        Input {
+                            seq: row.get(0)?,
+                            message_id: row.get(8)?,
+                            message_seq: row.get(9)?,
+                            report_id: row.get(10)?,
+                            attention_id: row.get(11)?,
+                            external_batch: row.get(13)?,
+                            reply_context: None,
+                            text: row.get(1)?,
+                            attempt,
+                        },
+                        row.get::<_, Option<String>>(12)?,
+                    ))
                 },
             )
             .optional()?;
@@ -397,6 +407,8 @@ impl Store {
                 "original_request": input.text,
             });
             input.text = format!("Tend Attention for the user's original topic.\n{payload}");
+        } else if let Some(batch) = &input.external_batch {
+            input.text = external_routing::context(&self.db, batch)?;
         } else if let Some(reply_to) = reply_to {
             let context = if let Some(fact) = attention::quoted(&self.db, chat_id, &reply_to)? {
                 format!(
@@ -477,7 +489,7 @@ impl Store {
             "WITH recent AS (
                 SELECT message_seq AS seq, outcome FROM router_inputs
                  WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL
-                   AND report_id IS NULL AND attention_id IS NULL
+                   AND report_id IS NULL AND attention_id IS NULL AND external_batch IS NULL
                  ORDER BY message_seq DESC LIMIT 6
              )
              SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome

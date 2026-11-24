@@ -123,16 +123,7 @@ fn matches(watch: &Watch, fact: &ExternalFact, error: Option<&str>) -> bool {
 }
 
 fn queue(db: &Connection, watch: &Watch, fact: &str) -> Result<()> {
-    if db.execute(
-        "INSERT INTO external_deliveries(id, watch_id, fact_id) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
-        params![protocol::new_id(), watch.id, fact],
-    )? == 0 {
-        return Ok(());
-    }
-    db.execute(
-        "INSERT INTO external_batches(task_id, due_at) VALUES (?1, unixepoch() + 300) ON CONFLICT DO NOTHING",
-        [&watch.task],
-    )?;
+    queue_delivery(db, &watch.id, &watch.task, fact)?;
     if watch.mode == WatchMode::Wait {
         db.execute(
             "UPDATE external_watches SET state = 'matched' WHERE id = ?1",
@@ -140,6 +131,43 @@ fn queue(db: &Connection, watch: &Watch, fact: &str) -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+fn queue_delivery(db: &Connection, watch: &str, task: &str, fact: &str) -> Result<()> {
+    if db.execute(
+        "INSERT INTO external_deliveries(id, watch_id, fact_id) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
+        params![protocol::new_id(), watch, fact],
+    )? == 0 {
+        return Ok(());
+    }
+    db.execute(
+        "INSERT INTO external_batches(task_id, due_at) VALUES (?1, unixepoch() + 300) ON CONFLICT DO NOTHING",
+        [task],
+    )?;
+    Ok(())
+}
+
+pub(super) fn queue_required(
+    db: &Connection,
+    route: &str,
+    fact: &str,
+    url: &str,
+    issue: &str,
+    origin: &str,
+    task: &str,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO external_watches(id, issue_id, task_id, url, condition, mode, state, route_id, origin_issue)
+         SELECT ?2, ?3, ?4, ?5, condition, 'required', 'routed', id, ?6 FROM external_routes WHERE id = ?1
+         ON CONFLICT DO NOTHING",
+        params![route, protocol::new_id(), issue, task, url, origin],
+    )?;
+    let watch: String = db.query_row(
+        "SELECT id FROM external_watches WHERE route_id = ?1 AND task_id = ?2",
+        params![route, task],
+        |row| row.get(0),
+    )?;
+    queue_delivery(db, &watch, task, fact)
 }
 
 pub fn observe(
@@ -243,6 +271,9 @@ fn save_fact(
             queue(db, &watch, &id)?;
         }
     }
+    if error.is_none() {
+        super::external_routing::observe(db, &id, fact)?;
+    }
     Ok(())
 }
 
@@ -266,9 +297,12 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deliveries = {
             let mut statement = tx.prepare(
-                "SELECT d.id, w.id, w.issue_id, w.mode, w.state, f.id, f.fact, f.error, t.status
+                "SELECT d.id, coalesce(w.route_id, w.id), w.issue_id, w.mode, w.state, f.id, f.fact, f.error,
+                        t.status, w.origin_issue, m.chat_id
                  FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
                  JOIN external_facts f ON f.id = d.fact_id JOIN tasks t ON t.id = w.task_id
+                 LEFT JOIN external_routes r ON r.id = w.route_id
+                 LEFT JOIN chat_messages m ON m.seq = r.message_seq
                  WHERE w.task_id = ?1 AND d.released_at IS NULL ORDER BY d.rowid",
             )?;
             statement
@@ -283,11 +317,15 @@ impl Store {
                         row.get::<_, String>(6)?,
                         row.get::<_, Option<String>>(7)?,
                         row.get::<_, String>(8)?,
+                        row.get::<_, Option<String>>(9)?,
+                        row.get::<_, Option<String>>(10)?,
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state) in deliveries {
+        for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
+            deliveries
+        {
             let mode = watch_mode(&mode);
             let target = if state == "withdrawn" || task_state == "cancelled" {
                 None
@@ -311,7 +349,7 @@ impl Store {
                     &target,
                     IssueInput {
                         input_id: id.clone(),
-                        child_issue_id: issue,
+                        child_issue_id: origin.unwrap_or(issue),
                         child_task_id: task.clone(),
                         summary,
                         cause: IssueInputCause::ExternalFact {
@@ -322,6 +360,15 @@ impl Store {
                             error,
                         },
                     },
+                )?;
+            } else if let Some(chat) = chat {
+                super::external_routing::queue_router(
+                    &tx,
+                    &watch_id,
+                    &fact_id,
+                    &chat,
+                    origin.as_deref(),
+                    Some(0),
                 )?;
             }
             tx.execute(

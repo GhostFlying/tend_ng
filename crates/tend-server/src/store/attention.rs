@@ -199,18 +199,32 @@ struct RouterInput {
 }
 
 fn router_input(db: &Connection, attempt: &str, call: &ToolCall) -> Result<Option<RouterInput>> {
-    Ok(db.query_row(
-        "SELECT i.chat_id, m.id, m.seq, m.reply_to, i.report_id IS NULL AND i.attention_id IS NULL, m.text
+    Ok(db
+        .query_row(
+            "SELECT i.chat_id, m.id, m.seq, m.reply_to,
+                i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL, m.text
          FROM router_attempts r JOIN router_inputs i ON i.seq = r.seq
          JOIN chat_messages m ON m.seq = i.message_seq
          WHERE r.id = ?1 AND r.thread_id = ?2 AND r.turn_id = ?3 AND i.outcome IS NULL",
-        params![attempt, call.thread_id, call.turn_id], |row| {
-            let user = if row.get::<_, bool>(4)? {
-                Some(UserInput { id: row.get(1)?, seq: row.get(2)?, reply_to: row.get(3)?, text: row.get(5)? })
-            } else { None };
-            Ok(RouterInput { chat: row.get(0)?, user })
-        },
-    ).optional()?)
+            params![attempt, call.thread_id, call.turn_id],
+            |row| {
+                let user = if row.get::<_, bool>(4)? {
+                    Some(UserInput {
+                        id: row.get(1)?,
+                        seq: row.get(2)?,
+                        reply_to: row.get(3)?,
+                        text: row.get(5)?,
+                    })
+                } else {
+                    None
+                };
+                Ok(RouterInput {
+                    chat: row.get(0)?,
+                    user,
+                })
+            },
+        )
+        .optional()?)
 }
 
 impl Store {
