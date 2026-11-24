@@ -8,7 +8,7 @@ from pathlib import Path
 cases = json.loads(Path(__file__).with_name("chat.json").read_text())
 database = sqlite3.connect(sys.argv[1], timeout=5)
 database.executescript("""
-    CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY);
+    CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, tools TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS turns (
         seq INTEGER PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -21,6 +21,7 @@ database.executescript("""
         input TEXT NOT NULL,
         context TEXT
     );
+    CREATE TABLE IF NOT EXISTS dispatch_receipts (input TEXT PRIMARY KEY, receipt TEXT NOT NULL);
 """)
 release = Path(sys.argv[1]).with_suffix(".release")
 
@@ -40,6 +41,31 @@ def missing_thread(request):
     }), flush=True)
 
 
+def dispatch(thread_id, turn_id, token):
+    tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
+    assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
+    params = {
+        "threadId": thread_id, "turnId": turn_id, "callId": "create-work",
+        "tool": "tend_dispatch_issue", "namespace": None,
+        "arguments": {
+            "title": "Prepare a demo", "objective": "Write a small fixture document.",
+            "repo_ids": ["example"], "required_capabilities": ["image_gen"],
+        },
+    }
+    # The start response is lost. The native input event supplies its identity.
+    print(json.dumps({"id": "first-call", "method": "item/tool/call", "params": params}), flush=True)
+    notify("item/started", threadId=thread_id, turnId=turn_id, item={
+        "type": "userMessage", "clientId": token,
+    })
+    result = json.loads(sys.stdin.readline())
+    assert result["id"] == "first-call" and result["result"]["success"], result
+    receipt = json.loads(result["result"]["contentItems"][0]["text"])
+    print(json.dumps({"id": "replay-call", "method": "item/tool/call", "params": params}), flush=True)
+    replay = json.loads(sys.stdin.readline())
+    assert replay["id"] == "replay-call" and replay["result"] == result["result"], replay
+    return receipt
+
+
 for line in sys.stdin:
     request = json.loads(line)
     params = request.get("params", {})
@@ -52,7 +78,10 @@ for line in sys.stdin:
         case "thread/start":
             thread_id = str(uuid.uuid4())
             with database:
-                database.execute("INSERT INTO threads VALUES (?)", (thread_id,))
+                database.execute(
+                    "INSERT INTO threads VALUES (?, ?)",
+                    (thread_id, json.dumps(params.get("dynamicTools", []))),
+                )
             respond(request, {"thread": {"id": thread_id}})
         case "thread/resume":
             if database.execute(
@@ -77,6 +106,24 @@ for line in sys.stdin:
             ).fetchone()[0]
             if starts <= case.get("drop_before_start", 0):
                 sys.exit(0)
+            if case.get("dispatch"):
+                if starts == 1:
+                    receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"])
+                    with database:
+                        database.execute(
+                            "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))
+                        )
+                    if case.get("drop_after_dispatch"):
+                        sys.exit(0)
+                else:
+                    receipt, = database.execute(
+                        "SELECT receipt FROM dispatch_receipts WHERE input = ?", (text,)
+                    ).fetchone()
+                    receipt = json.loads(receipt)
+                    assert receipt["operation_id"] in context and receipt["issue_id"] in context
+                answer = f"Issue {receipt['issue_id']} is waiting for assignment."
+            else:
+                answer = case["answer"]
             turn = {
                 "id": turn_id,
                 "status": "completed",
@@ -88,7 +135,7 @@ for line in sys.stdin:
                     },
                     {
                         "type": "agentMessage", "id": f"{turn_id}-answer",
-                        "phase": "final_answer", "text": case["answer"],
+                        "phase": "final_answer", "text": answer,
                     },
                 ],
             }
@@ -99,7 +146,8 @@ for line in sys.stdin:
                 )
             if case.get("drop_start_response"):
                 sys.exit(0)
-            respond(request, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
+            if not case.get("dispatch") or starts > 1:
+                respond(request, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
             if case.get("wait"):
                 deadline = time.monotonic() + 30
                 while not release.exists():

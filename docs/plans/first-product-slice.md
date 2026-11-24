@@ -66,6 +66,13 @@ python3 tests/e2e/chat.py target/debug/tend-server target/debug/tend
 
 派发要求和结案动作来自固定 Agent 输出，Server 按正常匹配规则选具名 Agent。测试核对原 Chat 消息、Issue 归属、Task 和 Run、操作身份以及实际产物。 [分配与投递](../server-runner.md#分配与投递) · [工作委派与 Issue 结案](../task-lifecycle.md#工作委派与-issue-结案)
 
+### Router 派发入口
+
+- Router 通过 App Server 注入的工具提交标题、目标和已知的仓库及能力要求。Server 从原生回合与持久尝试确定原 Chat 消息，在短事务中保存顶层 Issue、待匹配 Task 和派发回执。首次领取前可查询实际的待分配状态。
+- 工具回调沿原生调用身份返回原回执。启动响应丢失时用原生用户输入事件中的 `clientId` 确认回合归属。原消息需要换 session 接续时，带上已提交的派发引用。
+- native thread 的工具声明在创建时绑定。改动工具声明时，新 session 使用当前声明和已保存的相关上下文。已在途的原回合和历史仍按原身份查证。
+- 用固定 App Server 输出验证一次正常调用、回执重放以及已提交派发后的回合接续。Chat 消息页带原消息的 Issue 引用，`tend issue read <issue-id>` 读取实际派发及待分配状态。 [Codex 注入 Tend 工具](../agent-tools.md#codex-注入-tend-工具)
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)

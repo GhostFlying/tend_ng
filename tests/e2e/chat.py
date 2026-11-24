@@ -120,9 +120,9 @@ def main():
     with tempfile.TemporaryDirectory(prefix="tend-chat-") as temp:
         root = Path(temp)
 
-        def cli(address, *words, accepts=True):
+        def cli(address, *words, accepts=True, namespace="chat"):
             result = subprocess.run(
-                [args.cli, "chat", *words], capture_output=True, text=True,
+                [args.cli, namespace, *words], capture_output=True, text=True,
                 env={**env, "TEND_URL": f"http://{address}"}, timeout=14,
             )
             if accepts:
@@ -229,9 +229,24 @@ def main():
                 restarted[-2:], in_flight, "Hold across restart.", "The original turn finished."
             )
 
+            for text in ("Dispatch from Chat.", "Recover dispatched work."):
+                receipt = cli(address, "send", "dispatch", text)
+                dispatched = wait_for(
+                    lambda: messages(address, "dispatch"),
+                    lambda rows: rows[-1]["reply_to"] == receipt["message_id"],
+                )
+                issue_id = dispatched[-1]["text"].split()[1]
+                assert dispatched[-2]["issue_ids"] == [issue_id], dispatched[-2]
+                readback = cli(address, "read", issue_id, namespace="issue")
+                assert readback["source_message_id"] == receipt["message_id"], readback
+                assert readback["status"] == "awaiting_assignment"
+                assert readback["category"] == "issue-router"
+                assert readback["repo_ids"] == ["example"]
+                assert readback["required_capabilities"] == ["image_gen"]
+
         with sqlite3.connect(root / "app.sqlite") as database:
             turns = database.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-            assert turns == 8, turns
+            assert turns == 10, turns
             replay_attempts = database.execute(
                 "SELECT thread_id, context FROM start_requests WHERE input = 'Replay once.' ORDER BY rowid"
             ).fetchall()
@@ -249,7 +264,9 @@ def main():
             ).fetchall()
             assert [attempt[0] for attempt in attempts] == [1, 2], attempts
             assert attempts[0][1:] != attempts[1][1:], attempts
-    print("PASS durable Chat receipts, native recovery, bounded retries, and per-Chat ordering")
+            for table in ("issues", "tasks", "router_dispatches"):
+                assert database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 2
+    print("PASS durable Chat receipts, bounded retries, and idempotent Router dispatch")
 
 
 if __name__ == "__main__":

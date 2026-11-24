@@ -1,9 +1,11 @@
+mod work;
+
 use anyhow::{Result, ensure};
 use codex_app::{Answer, ProcessIdentity};
 use protocol::{Author, Message, MessagePage, Receipt, RouterState, SendMessage};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
-use std::{path::Path, time::Duration};
+use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
 
@@ -37,7 +39,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 1,
+            version <= 2,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -96,7 +98,13 @@ impl Store {
                      DROP TABLE old_router_attempts;",
                 )?;
             }
-            tx.pragma_update(None, "user_version", 1)?;
+        }
+        if version < 2 {
+            tx.execute_batch(
+                "ALTER TABLE router_threads ADD COLUMN tool_revision INTEGER NOT NULL DEFAULT 0;",
+            )?;
+            work::create_tables(&tx)?;
+            tx.pragma_update(None, "user_version", 2)?;
         }
         tx.commit()?;
         Ok(store)
@@ -179,6 +187,7 @@ impl Store {
                     reply_to: row.get(4)?,
                     router_state,
                     router_error: row.get(7)?,
+                    issue_ids: Vec::new(),
                 },
             ))
         })?;
@@ -189,6 +198,26 @@ impl Store {
         } else {
             None
         };
+        if let Some((oldest, _)) = page.last() {
+            let mut statement = self.db.prepare(
+                "SELECT m.seq, i.id FROM chat_messages m
+                 JOIN issues i ON i.source_seq = m.seq
+                 WHERE m.chat_id = ?1 AND m.seq >= ?2 AND m.seq < ?3
+                 ORDER BY m.seq, i.rowid",
+            )?;
+            let mut issues: HashMap<i64, Vec<String>> = HashMap::new();
+            for row in statement.query_map(params![chat_id, oldest, before], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })? {
+                let (seq, id) = row?;
+                issues.entry(seq).or_default().push(id);
+            }
+            for (seq, message) in &mut page {
+                if let Some(ids) = issues.remove(seq) {
+                    message.issue_ids = ids;
+                }
+            }
+        }
         let messages = page.into_iter().rev().map(|(_, message)| message).collect();
         Ok(MessagePage {
             messages,
@@ -246,22 +275,23 @@ impl Store {
             .optional()?)
     }
 
-    pub fn thread_id(&self, chat_id: &str) -> Result<Option<String>> {
+    pub fn thread_id(&self, chat_id: &str, revision: i64) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
-                "SELECT thread_id FROM router_threads WHERE chat_id = ?1",
-                [chat_id],
+                "SELECT thread_id FROM router_threads WHERE chat_id = ?1 AND tool_revision = ?2",
+                params![chat_id, revision],
                 |row| row.get(0),
             )
             .optional()?)
     }
 
-    pub fn save_thread(&self, chat_id: &str, thread_id: &str) -> Result<()> {
+    pub fn save_thread(&self, chat_id: &str, thread_id: &str, revision: i64) -> Result<()> {
         self.db.execute(
-            "INSERT INTO router_threads (chat_id, thread_id) VALUES (?1, ?2)
-             ON CONFLICT(chat_id) DO UPDATE SET thread_id = excluded.thread_id",
-            [chat_id, thread_id],
+            "INSERT INTO router_threads (chat_id, thread_id, tool_revision) VALUES (?1, ?2, ?3)
+             ON CONFLICT(chat_id) DO UPDATE
+               SET thread_id = excluded.thread_id, tool_revision = excluded.tool_revision",
+            params![chat_id, thread_id, revision],
         )?;
         Ok(())
     }

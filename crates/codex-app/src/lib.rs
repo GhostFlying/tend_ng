@@ -53,6 +53,34 @@ pub struct Answer<'a> {
     pub text: &'a str,
 }
 
+pub struct TurnInput<'a> {
+    pub thread_id: &'a str,
+    pub client_id: &'a str,
+    pub text: &'a str,
+    pub context: Option<&'a str>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolCall {
+    pub thread_id: String,
+    pub turn_id: String,
+    pub call_id: String,
+    pub tool: String,
+    pub namespace: Option<String>,
+    pub arguments: Value,
+}
+
+pub struct ToolOutput {
+    pub success: bool,
+    pub body: Value,
+}
+
+pub trait TurnHandler {
+    fn started(&mut self, turn_id: &str) -> Result<()>;
+    fn tool(&mut self, call: ToolCall) -> Result<ToolOutput>;
+}
+
 #[derive(Debug)]
 struct RpcError {
     method: String,
@@ -142,13 +170,18 @@ impl Client {
         Ok(client)
     }
 
-    pub fn start_thread(&mut self, cwd: &Path) -> Result<String> {
+    pub fn start_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        tools: &[Value],
+    ) -> Result<String> {
         let response = self.call(
             "thread/start",
             json!({
                 "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
-                "developerInstructions": "You are the user's Tend Router. Answer ordinary chat directly. Delegate work to the responsible agents when Tend tools are available."
+                "developerInstructions": instructions, "dynamicTools": tools
             }),
         )?;
         Ok(response["thread"]["id"]
@@ -170,31 +203,6 @@ impl Client {
             Err(error) if missing_thread(&error, thread_id) => Ok(false),
             Err(error) => Err(error),
         }
-    }
-
-    pub fn start_turn(
-        &mut self,
-        thread_id: &str,
-        client_id: &str,
-        text: &str,
-        context: Option<&str>,
-    ) -> Result<String> {
-        let mut input = Vec::new();
-        if let Some(context) = context {
-            input.push(json!({ "type": "text", "text": context, "text_elements": [] }));
-        }
-        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
-        let response = self.call(
-            "turn/start",
-            json!({
-                "threadId": thread_id, "clientUserMessageId": client_id,
-                "input": input
-            }),
-        )?;
-        Ok(response["turn"]["id"]
-            .as_str()
-            .context("turn/start missing turn ID")?
-            .to_owned())
     }
 
     pub fn find_turn(
@@ -240,16 +248,49 @@ impl Client {
         }
     }
 
-    pub fn await_turn(&mut self, thread_id: &str, turn_id: &str, client_id: &str) -> Result<Turn> {
+    pub fn run_turn(
+        &mut self,
+        input: TurnInput<'_>,
+        handler: &mut impl TurnHandler,
+    ) -> Result<Turn> {
+        let TurnInput {
+            thread_id,
+            client_id,
+            text,
+            context,
+        } = input;
+        let mut items = Vec::new();
+        if let Some(context) = context {
+            items.push(json!({ "type": "text", "text": context, "text_elements": [] }));
+        }
+        items.push(json!({ "type": "text", "text": text, "text_elements": [] }));
+        let request_id = self.send_request(
+            "turn/start",
+            json!({
+                "threadId": thread_id, "clientUserMessageId": client_id, "input": items
+            }),
+        )?;
+        let startup_deadline = Instant::now() + RPC_TIMEOUT;
+        let mut turn_id: Option<String> = None;
+        let mut before_start = VecDeque::new();
         let mut messages = Vec::new();
         loop {
+            let wait = if turn_id.is_some() {
+                Duration::from_secs(10)
+            } else {
+                startup_deadline.saturating_duration_since(Instant::now())
+            };
+            ensure!(
+                !wait.is_zero(),
+                "App Server turn/start could not be confirmed"
+            );
             let event = match self.notifications.pop_front() {
                 Some(event) => event,
-                None => match self.events.recv_timeout(Duration::from_secs(10)) {
+                None => match self.events.recv_timeout(wait) {
                     Ok(event) => event?,
-                    Err(RecvTimeoutError::Timeout) => {
-                        // Check history if the live terminal notification was missed.
-                        if let Ok(Some(turn)) = self.find_turn(thread_id, Some(turn_id), client_id)
+                    Err(RecvTimeoutError::Timeout) if turn_id.is_some() => {
+                        if let Ok(Some(turn)) =
+                            self.find_turn(thread_id, turn_id.as_deref(), client_id)
                             && turn.status != TurnStatus::InProgress
                         {
                             return Ok(turn);
@@ -259,23 +300,83 @@ impl Client {
                     Err(error) => return Err(error).context("reading the App Server turn"),
                 },
             };
-            if let Some(request_id) = event.get("id")
-                && event.get("method").is_some()
+            let params = &event["params"];
+            let method = event["method"].as_str();
+            let started = if method.is_none() && event["id"] == request_id {
+                Some(
+                    rpc_result(&event, "turn/start")?["turn"]["id"]
+                        .as_str()
+                        .context("turn/start missing turn ID")?
+                        .to_owned(),
+                )
+            } else if matches!(method, Some("item/started" | "item/completed"))
+                && params["threadId"] == thread_id
+                && params["item"]["type"] == "userMessage"
+                && params["item"]["clientId"] == client_id
             {
-                self.reject_request(request_id)?;
+                Some(
+                    params["turnId"]
+                        .as_str()
+                        .context("user message missing turn ID")?
+                        .to_owned(),
+                )
+            } else {
+                None
+            };
+            if let Some(started) = started {
+                if let Some(previous) = &turn_id {
+                    ensure!(
+                        previous == &started,
+                        "App Server returned conflicting turn identities"
+                    );
+                } else {
+                    handler.started(&started)?;
+                    turn_id = Some(started);
+                    before_start.append(&mut self.notifications);
+                    self.notifications = std::mem::take(&mut before_start);
+                }
                 continue;
             }
-            let params = &event["params"];
+            if let Some(id) = event.get("id").filter(|_| method.is_some()) {
+                if method != Some("item/tool/call") || params["threadId"] != thread_id {
+                    self.reject_request(id)?;
+                    continue;
+                }
+                let Some(turn_id) = &turn_id else {
+                    before_start.push_back(event);
+                    continue;
+                };
+                let call: ToolCall = serde_json::from_value(params.clone())?;
+                if &call.turn_id != turn_id {
+                    self.reject_request(id)?;
+                    continue;
+                }
+                let output = handler.tool(call)?;
+                self.write(&json!({
+                    "id": id,
+                    "result": {
+                        "success": output.success,
+                        "contentItems": [{ "type": "inputText", "text": output.body.to_string() }]
+                    }
+                }))?;
+                continue;
+            }
             if params["threadId"] != thread_id {
                 continue;
             }
-            match event["method"].as_str() {
+            let Some(turn_id) = &turn_id else {
+                if matches!(method, Some("item/completed" | "turn/completed")) {
+                    before_start.push_back(event);
+                }
+                continue;
+            };
+            match method {
                 Some("item/completed")
-                    if params["turnId"] == turn_id && params["item"]["type"] == "agentMessage" =>
+                    if params["turnId"] == *turn_id && params["item"]["type"] == "agentMessage" =>
                 {
                     messages.push(params["item"].clone());
                 }
-                Some("turn/completed") if params["turn"]["id"] == turn_id => {
+                Some("turn/completed") if params["turn"]["id"] == *turn_id => {
                     let mut turn: Turn = serde_json::from_value(params["turn"].clone())?;
                     for message in messages {
                         if !turn.items.iter().any(|item| item["id"] == message["id"]) {
@@ -289,10 +390,15 @@ impl Client {
         }
     }
 
-    fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+    fn send_request(&mut self, method: &str, params: Value) -> Result<u64> {
         self.request_id += 1;
         let id = self.request_id;
         self.write(&json!({"id": id, "method": method, "params": params}))?;
+        Ok(id)
+    }
+
+    fn call(&mut self, method: &str, params: Value) -> Result<Value> {
+        let id = self.send_request(method, params)?;
         let deadline = Instant::now() + RPC_TIMEOUT;
         loop {
             let wait = deadline.saturating_duration_since(Instant::now());
@@ -301,32 +407,17 @@ impl Client {
                 .events
                 .recv_timeout(wait)
                 .with_context(|| format!("waiting for App Server {method} response"))??;
-            if event.get("method").is_some() {
-                if let Some(request_id) = event.get("id") {
-                    self.reject_request(request_id)?;
-                } else if matches!(
-                    event["method"].as_str(),
-                    Some("item/completed" | "turn/completed")
-                ) {
+            match event["method"].as_str() {
+                Some("item/started" | "item/completed" | "turn/completed" | "item/tool/call") => {
                     self.notifications.push_back(event);
                 }
-                continue;
-            }
-            if event["id"] == id {
-                if let Some(error) = event.get("error") {
-                    return Err(RpcError {
-                        method: method.to_owned(),
-                        code: error["code"]
-                            .as_i64()
-                            .context("missing JSON-RPC error code")?,
-                        message: error["message"].as_str().unwrap_or_default().to_owned(),
+                Some(_) => {
+                    if let Some(request_id) = event.get("id") {
+                        self.reject_request(request_id)?;
                     }
-                    .into());
                 }
-                return event
-                    .get("result")
-                    .cloned()
-                    .context("missing JSON-RPC result");
+                None if event["id"] == id => return rpc_result(&event, method),
+                None => {}
             }
         }
     }
@@ -345,6 +436,23 @@ impl Client {
         stdin.flush()?;
         Ok(())
     }
+}
+
+fn rpc_result(event: &Value, method: &str) -> Result<Value> {
+    if let Some(error) = event.get("error") {
+        return Err(RpcError {
+            method: method.to_owned(),
+            code: error["code"]
+                .as_i64()
+                .context("missing JSON-RPC error code")?,
+            message: error["message"].as_str().unwrap_or_default().to_owned(),
+        }
+        .into());
+    }
+    event
+        .get("result")
+        .cloned()
+        .context("missing JSON-RPC result")
 }
 
 impl Drop for Client {

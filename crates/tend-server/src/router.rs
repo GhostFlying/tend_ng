@@ -1,6 +1,8 @@
 use crate::store::{Attempt, Store};
 use anyhow::{Result, ensure};
-use codex_app::{Client, Turn, TurnStatus};
+use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
+use protocol::DispatchIssue;
+use serde_json::{Value, json};
 use std::{
     collections::HashMap,
     ffi::OsString,
@@ -11,6 +13,27 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
+const TOOL_REVISION: i64 = 1;
+const ROUTER_INSTRUCTIONS: &str = "You are the user's Tend Router. Answer ordinary chat directly. Use tend_dispatch_issue to delegate project work. The returned status tells you whether the Issue is waiting for assignment. When resuming work, use committed dispatch receipts for goals already handed off.";
+
+fn dispatch_tool() -> Value {
+    json!({
+        "type": "function",
+        "name": "tend_dispatch_issue",
+        "description": "Queue a top-level Tend Issue for an Issue Agent. Return the durable Issue, Task, and operation identities.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "title": { "type": "string" },
+                "objective": { "type": "string" },
+                "repo_ids": { "type": "array", "items": { "type": "string" } },
+                "required_capabilities": { "type": "array", "items": { "type": "string" } }
+            },
+            "required": ["title", "objective"],
+            "additionalProperties": false
+        }
+    })
+}
 
 #[derive(Clone)]
 pub struct Config {
@@ -64,6 +87,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;
+    let tools = [dispatch_tool()];
     while let Some(input) = store.next_input(chat)? {
         let number = if let Some(attempt) = input.attempt {
             if let Some(turn) = recover(&mut client, &store, &attempt)? {
@@ -85,7 +109,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         };
 
         let previous_thread = if number == 1 {
-            store.thread_id(chat)?
+            store.thread_id(chat, TOOL_REVISION)?
         } else {
             None
         };
@@ -94,20 +118,83 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 (id, None)
             }
             _ => {
-                let id = client.start_thread(&config.cwd)?;
-                store.save_thread(chat, &id)?;
-                (id, store.recent_context(chat, input.seq)?)
+                let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools)?;
+                store.save_thread(chat, &id, TOOL_REVISION)?;
+                let context: Vec<_> = [
+                    store.recent_context(chat, input.seq)?,
+                    store.dispatch_context(input.seq)?,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                (id, (!context.is_empty()).then(|| context.join("\n\n")))
             }
         };
         loaded_thread = Some(thread_id.clone());
         let attempt_id = store.start_attempt(input.seq, number, &thread_id, &process)?;
-        let turn_id =
-            client.start_turn(&thread_id, &attempt_id, &input.text, context.as_deref())?;
-        store.save_turn_id(&attempt_id, &turn_id)?;
-        let turn = client.await_turn(&thread_id, &turn_id, &attempt_id)?;
+        let turn = client.run_turn(
+            TurnInput {
+                thread_id: &thread_id,
+                client_id: &attempt_id,
+                text: &input.text,
+                context: context.as_deref(),
+            },
+            &mut DispatchHandler {
+                store: &mut store,
+                attempt_id: &attempt_id,
+            },
+        )?;
         finish(&mut store, input.seq, turn)?;
     }
     Ok(())
+}
+
+struct DispatchHandler<'a> {
+    store: &'a mut Store,
+    attempt_id: &'a str,
+}
+
+impl TurnHandler for DispatchHandler<'_> {
+    fn started(&mut self, turn_id: &str) -> Result<()> {
+        self.store.save_turn_id(self.attempt_id, turn_id)
+    }
+
+    fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
+        if call.tool != "tend_dispatch_issue" || call.namespace.is_some() {
+            return Ok(tool_error("Unknown Router tool"));
+        }
+        let work: DispatchIssue = match serde_json::from_value(call.arguments.clone()) {
+            Ok(work) => work,
+            Err(error) => return Ok(tool_error(&format!("Invalid dispatch request ({error})"))),
+        };
+        if work.title.trim().is_empty()
+            || work.objective.trim().is_empty()
+            || work
+                .repo_ids
+                .iter()
+                .chain(&work.required_capabilities)
+                .any(|id| id.trim().is_empty())
+        {
+            return Ok(tool_error(
+                "Dispatch needs a title, objective, and valid requirements",
+            ));
+        }
+        let receipt = self.store.dispatch_issue(self.attempt_id, &call, &work)?;
+        Ok(match receipt {
+            Some(receipt) => ToolOutput {
+                success: true,
+                body: serde_json::to_value(receipt)?,
+            },
+            None => tool_error("Dispatch call does not match its saved origin or intent"),
+        })
+    }
+}
+
+fn tool_error(message: &str) -> ToolOutput {
+    ToolOutput {
+        success: false,
+        body: json!({ "error": message }),
+    }
 }
 
 fn recover(client: &mut Client, store: &Store, attempt: &Attempt) -> Result<Option<Turn>> {

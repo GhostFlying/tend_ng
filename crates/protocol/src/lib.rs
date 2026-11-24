@@ -39,6 +39,8 @@ pub struct Message {
     pub reply_to: Option<String>,
     pub router_state: Option<RouterState>,
     pub router_error: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issue_ids: Vec<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -52,8 +54,36 @@ pub struct ApiError {
     pub error: String,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DispatchIssue {
+    pub title: String,
+    pub objective: String,
+    #[serde(default)]
+    pub repo_ids: Vec<String>,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IssueDispatch {
+    pub issue_id: String,
+    pub task_id: String,
+    pub operation_id: String,
+    pub source_message_id: String,
+    pub chat_id: String,
+    pub category: String,
+    pub status: String,
+    #[serde(flatten)]
+    pub work: DispatchIssue,
+}
+
 pub fn messages_path(chat_id: &str) -> String {
     format!("/api/v1/chats/{chat_id}/messages")
+}
+
+pub fn issue_path(issue_id: &str) -> String {
+    format!("/api/v1/issues/{issue_id}")
 }
 
 pub fn valid_id(id: &str) -> bool {
