@@ -6,6 +6,7 @@ import sys
 
 root = Path(sys.argv[1])
 secondary = (root / "interrupted").exists()
+agent_stop = (root / "agent-stop").exists()
 thread = "fixture-second-thread" if secondary else "fixture-original-thread"
 turn = "fixture-second-turn" if secondary else "fixture-original-turn"
 
@@ -35,6 +36,19 @@ if secondary:
     [message] = payload["child_inputs"]
     assert message["message"]["text"] == "Queue the unsent correction."
     (root / "queued-message.json").write_text(json.dumps(message))
+elif agent_stop:
+    assignment = json.loads(request["params"]["input"][-1]["text"])
+    send({"id": "stop-self", "method": "item/tool/call", "params": {
+        "threadId": thread, "turnId": turn, "callId": "stop-self", "tool": "tend_stop_task",
+        "arguments": {"task_id": assignment["task_id"]}}})
+    response = json.loads(sys.stdin.readline())
+    assert response["result"]["success"], response
+    receipt = json.loads(response["result"]["contentItems"][0]["text"])
+    (root / "self-stop.json").write_text(json.dumps(receipt))
+    stop = read("turn/interrupt")
+    assert stop["params"] == {"threadId": thread, "turnId": turn}
+    (root / "interrupted").touch()
+    respond(stop, {})
 else:
     steer = read("turn/steer")
     args = steer["params"]

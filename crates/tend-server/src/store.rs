@@ -8,6 +8,7 @@ mod handoff;
 mod issue_chat;
 mod notification;
 pub(crate) mod pull;
+mod reclaim;
 mod reports;
 mod review;
 mod run;
@@ -59,7 +60,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 17,
+            version <= 19,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -169,7 +170,13 @@ impl Store {
         }
         if version < 17 {
             review::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 17)?;
+        }
+        if version < 18 {
+            tx.execute_batch("ALTER TABLE tasks ADD COLUMN base_refs TEXT NOT NULL DEFAULT '{}';")?;
+        }
+        if version < 19 {
+            reclaim::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 19)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;

@@ -12,6 +12,8 @@ ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
 ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
+PINNED_REVIEW = "Prepare a guide from the pinned demo branch."
+cases[PINNED_REVIEW] = {"dispatch": True}
 BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
 cases[BOARD_WAITING] = {"dispatch": True}
 cases[ISSUE_CHAT_REQUEST] = {"dispatch": True}
@@ -57,7 +59,7 @@ def missing_thread(request):
     }), flush=True)
 
 
-def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False):
+def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False, pinned=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
@@ -71,6 +73,8 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     }
     if guide:
         params["arguments"].update(title="示例仓库上手指南", objective="整理示例仓库的快速上手指南。")
+    if pinned:
+        params["arguments"]["base_refs"] = {"example": "pinned-demo"}
     if pending:
         params["arguments"].update(title="整理发布记录", objective="准备另一个仓库的发布记录。",
                                    repo_ids=["release-notes"], required_capabilities=[])
@@ -229,7 +233,7 @@ for line in sys.stdin:
             elif case.get("dispatch"):
                 if starts == 1:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"],
-                                       guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING)
+                                       guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING, pinned=text == PINNED_REVIEW)
                     with database:
                         database.execute(
                             "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))

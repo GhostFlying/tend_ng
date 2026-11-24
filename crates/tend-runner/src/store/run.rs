@@ -21,7 +21,7 @@ pub struct LocalRun {
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 4,
+        version <= 5,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -33,6 +33,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 4 {
             super::handoff::migrate(db)?;
+        }
+        if version < 5 {
+            super::reclaim::migrate(db)?;
         }
         return Ok(());
     }
@@ -91,6 +94,7 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     migrate_waits(db)?;
     super::control::migrate(db)?;
     super::handoff::migrate(db)?;
+    super::reclaim::migrate(db)?;
     Ok(())
 }
 

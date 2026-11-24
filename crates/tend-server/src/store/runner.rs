@@ -75,6 +75,12 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issues i ON i.id = t.issue_id
+             JOIN workspace_reclaims w ON w.issue_id = coalesce(i.parent_issue_id, i.id) AND w.receipt IS NULL
+             WHERE t.id = ?1)",
+        [&dispatch.task_id], |row| row.get::<_, bool>(0),
+    )? { return Ok(()) }
     let (pinned, named, previous, workspace_key, continuation) = db.query_row(
         "SELECT coalesce(h.runner_id, t.pinned_runner_id), t.pinned_agent_id, t.previous_task_id, t.workspace_key, t.handoff
          FROM tasks t JOIN issues i ON i.id = t.issue_id
@@ -298,8 +304,15 @@ impl Store {
             && request.runs.is_empty()
             && request.records.is_empty()
             && !request.drained
+            && request.reclaim_receipts.is_empty()
         {
             return Ok(Some(RunnerSyncReply {
+                workspace_reclaims: if task.is_none() {
+                    super::reclaim::pending(&self.db, &profile.runner_id)?
+                } else {
+                    Vec::new()
+                },
+                confirmed_reclaims: Vec::new(),
                 assignments: if task.is_none() {
                     assignments_to_send(&self.db, &profile.runner_id, false)?
                 } else {
@@ -401,7 +414,11 @@ impl Store {
                     if !super::control::acknowledge(&tx, &profile.runner_id, &ack)? {
                         return Ok(None);
                     }
-                    confirmed_operations.push(ack.id);
+                    confirmed_operations.push(if ack.event_id.is_empty() {
+                        ack.id
+                    } else {
+                        ack.event_id
+                    });
                 }
                 RunnerRecord::Operation(operation) => {
                     if !coordination::apply(&tx, profile, &operation)? {
@@ -412,6 +429,18 @@ impl Store {
             }
         }
 
+        let mut confirmed_reclaims = Vec::new();
+        for receipt in request.reclaim_receipts {
+            if !super::reclaim::accept(&tx, &profile.runner_id, &receipt)? {
+                return Ok(None);
+            }
+            confirmed_reclaims.push(receipt.id);
+        }
+        let workspace_reclaims = if task.is_none() {
+            super::reclaim::pending(&tx, &profile.runner_id)?
+        } else {
+            Vec::new()
+        };
         let assignments = if task.is_none() {
             assignments_to_send(&tx, &profile.runner_id, true)?
         } else {
@@ -438,6 +467,8 @@ impl Store {
         }
         tx.commit()?;
         Ok(Some(RunnerSyncReply {
+            workspace_reclaims,
+            confirmed_reclaims,
             assignments,
             confirmed_receipts,
             confirmed_runs,

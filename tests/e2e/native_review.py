@@ -17,6 +17,12 @@ def main():
         root = Path(directory)
         address = free_port()
         prepare(root, free_port(), "A fixed repository.\n")
+        source = root / "source"
+        subprocess.run(["git", "-C", source, "branch", "pinned-demo"], check=True)
+        (source / "README.md").write_text("A later main commit.\n")
+        subprocess.run(["git", "-C", source, "-c", "user.name=Fixture", "-c",
+                        "user.email=fixture@example.invalid", "commit", "-qam", "later main"], check=True)
+        pinned = subprocess.check_output(["git", "-C", source, "rev-parse", "pinned-demo"], text=True).strip()
         options = json.loads((root / "runner.json").read_text())
         options["agents"][0]["reasoning_effort"] = "low"
         (root / "runner.json").write_text(json.dumps(options))
@@ -33,19 +39,40 @@ def main():
                 root, "native-review",
             ], env=env)
             try:
-                cli("chat", "send", "main", "Dispatch from Chat.")
+                cli("chat", "send", "main", "Prepare a guide from the pinned demo branch.")
                 wait_for(lambda: (root / "review.json").exists(), bool)
                 child = json.loads((root / "delegation.json").read_text())["action"]["issue_id"]
+                issue = cli("issue", "read", child)
+                assert issue["base_refs"] == {"example": "pinned-demo"}
+                workspace = root / "runner.runs" / "workspaces" / issue["parent_issue_id"]
+                [mount] = json.loads((workspace / "mounts.json").read_text())
+                assert mount["base"] == pinned
                 rows = wait_for(lambda: cli("issue", "reviews", child), lambda rows: len(rows) == 4)
                 assert len({row["run_id"] for row in rows}) == 1
                 assert [row["action"]["observation"]["agentsStates"]["native-review-child"]["status"]
                         for row in rows[:-1]] == ["running", "running", "completed"]
                 assert rows[-1] == json.loads((root / "review.json").read_text())
                 assert rows[-1]["action"]["review"]["candidate"] == "guide-v1"
+                parent = issue["parent_issue_id"]
+                wait_for(lambda: cli("issue", "read", parent),
+                         lambda current: current["status"] == "completed" and current["issue_state"] == "closed")
+                assert cli("workspace", "reclaim", parent, "dirty-reclaim")["operation_id"] == "dirty-reclaim"
+                dirty = wait_for(lambda: cli("workspace", "status", "dirty-reclaim"),
+                                 lambda receipt: receipt["state"] != "pending")
+                assert dirty["state"] == "failed" and "uncommitted changes" in dirty["result"]["error"]
+                assert workspace.is_dir()
+                (workspace / "repos/example/guide.txt").unlink()
+                expected = cli("workspace", "reclaim", parent, "clean-reclaim")
+                wait_for(lambda: cli("workspace", "status", "clean-reclaim"),
+                         lambda receipt: receipt["state"] == "reclaimed")
+                assert not workspace.exists()
+                assert cli("workspace", "reclaim", parent, "clean-reclaim") == expected
+                subprocess.run(["git", "-C", root / "example", "show-ref", "--verify", "--quiet",
+                                f"refs/heads/tend/{parent}/example"], check=True)
             finally:
                 runner.terminate()
                 runner.wait(timeout=7)
-    print("PASS native subagent state, original child identity, recorded review, and observational replay")
+    print("PASS native review evidence, explicit workspace base, and explicit clean reclaim")
 
 
 if __name__ == "__main__":

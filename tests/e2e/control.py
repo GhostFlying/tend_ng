@@ -13,11 +13,14 @@ from issue_chat import TESTS, free_port, prepare
 
 
 def main():
-    server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:])
+    server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:4])
+    self_stop = "--agent-stop" in sys.argv[4:]
     with tempfile.TemporaryDirectory(prefix="tend-control-") as directory:
         root = Path(directory)
         addr = free_port()
         prepare(root, free_port())
+        if self_stop:
+            (root / "agent-stop").touch()
         env = {**os.environ, "TEND_TOKEN": "control-fixture", "TEND_URL": f"http://{addr}"}
 
         def cli(*words):
@@ -33,6 +36,23 @@ def main():
                 message = wait_for(lambda: cli("chat", "read", "main")["messages"][0],
                                    lambda message: message.get("issue_ids"))
                 [issue] = message["issue_ids"]
+                if self_stop:
+                    wait_for(lambda: (root / "self-stop.json").exists(), bool)
+                    requested = json.loads((root / "self-stop.json").read_text())
+                    def read_control():
+                        try:
+                            return cli("control", "read", requested["operation_id"])
+                        except subprocess.CalledProcessError:
+                            return {}
+                    receipt = wait_for(read_control,
+                                       lambda result: result.get("state") == "stopped")
+                    assert receipt["task_id"] == requested["action"]["task_id"]
+                    assert cli("issue", "read", issue)["status"] == "cancelled"
+                    with sqlite3.connect(root / "runner.sqlite") as db:
+                        assert db.execute("SELECT count(DISTINCT id) FROM run_outbox WHERE id = ? OR "
+                                          "json_extract(observation, '$.id') = ?", [requested["operation_id"]]*2).fetchone() == (2,)
+                    print("PASS native stop request and its Runner receipt use separate persistent identities")
+                    return
                 original = wait_for(lambda: cli("issue", "read", issue),
                                     lambda issue: issue["status"] == "running")
                 task, run = original["task_id"], original["run"]["run_id"]

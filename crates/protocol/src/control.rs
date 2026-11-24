@@ -25,6 +25,8 @@ pub struct RunnerControl {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ControlAck {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub event_id: String,
     pub id: String,
     pub assignment_id: String,
     pub state: ControlState,

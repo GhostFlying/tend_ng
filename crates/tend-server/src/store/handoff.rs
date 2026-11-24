@@ -29,6 +29,7 @@ pub fn note_drained(db: &Connection, runner: &str) -> Result<()> {
         "UPDATE runner_replacements SET drained_at = unixepoch()
          WHERE predecessor = ?1 AND drained_at IS NULL
            AND NOT EXISTS(SELECT 1 FROM artifacts WHERE runner_id = ?1 AND available = 0)
+           AND NOT EXISTS(SELECT 1 FROM workspace_reclaims WHERE runner_id = ?1 AND receipt IS NULL)
            AND NOT EXISTS(SELECT 1 FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
                   WHERE a.runner_id = ?1 AND t.status NOT IN ('completed','failed','cancelled'))",
         [runner],

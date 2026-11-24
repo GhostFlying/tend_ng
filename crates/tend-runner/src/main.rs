@@ -114,6 +114,11 @@ fn main() -> Result<()> {
             auth,
         )?;
     }
+    workspace::serve_reclaims(
+        Store::open(&db_path, &config)?,
+        Arc::clone(&config),
+        runtime.root.clone(),
+    );
     if config.slot_limit > 0 {
         let local = Store::open(&db_path, &config)?;
         let execution_config = Arc::clone(&config);
@@ -188,6 +193,7 @@ impl Server {
         let request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
             drained: store.drain_finished()?,
+            reclaim_receipts: store.reclaim_receipts()?,
             profile,
             receipts,
             runs: Vec::new(),

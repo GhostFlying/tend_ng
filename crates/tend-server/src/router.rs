@@ -13,7 +13,7 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 5;
+const TOOL_REVISION: i64 = 6;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -41,6 +41,7 @@ fn dispatch_tool() -> Value {
                 "title": { "type": "string" },
                 "objective": { "type": "string" },
                 "repo_ids": { "type": "array", "items": { "type": "string" } },
+                "base_refs": { "type":"object", "additionalProperties": {"type":"string"} },
                 "required_capabilities": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["title", "objective"],
@@ -107,6 +108,7 @@ pub struct Config {
     pub cwd: PathBuf,
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub effort: Option<String>,
 }
 
 pub fn spawn(config: Config) {
@@ -217,7 +219,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 client_id: &attempt_id,
                 text: &input.text,
                 context: context.as_deref(),
-                effort: None,
+                effort: config.effort.as_deref(),
             },
             &mut DispatchHandler {
                 store: &mut store,
@@ -343,6 +345,9 @@ impl DispatchHandler<'_> {
         };
         if work.title.trim().is_empty()
             || work.objective.trim().is_empty()
+            || work.base_refs.iter().any(|(repo, reference)| {
+                !work.repo_ids.contains(repo) || reference.trim().is_empty()
+            })
             || work
                 .repo_ids
                 .iter()

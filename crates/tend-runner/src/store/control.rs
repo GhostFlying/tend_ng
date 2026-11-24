@@ -56,6 +56,7 @@ pub fn accept(db: &Connection, control: &RunnerControl) -> Result<()> {
 
 pub(super) fn finish(db: &Connection, command: &RunnerControl, state: ControlState) -> Result<()> {
     let ack = ControlAck {
+        event_id: protocol::new_id(),
         id: command.id.clone(),
         assignment_id: command.assignment_id.clone(),
         state,
@@ -66,7 +67,7 @@ pub(super) fn finish(db: &Connection, command: &RunnerControl, state: ControlSta
     )?;
     db.execute(
         "INSERT INTO run_outbox(id, assignment_id, observation, record_kind) VALUES (?1, ?2, ?3, 'control')",
-        params![command.id, command.assignment_id, serde_json::to_string(&ack)?],
+        params![ack.event_id, command.assignment_id, serde_json::to_string(&ack)?],
     )?;
     Ok(())
 }

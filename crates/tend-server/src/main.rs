@@ -23,7 +23,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-effort <effort>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -32,6 +32,7 @@ fn main() -> Result<()> {
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut cwd = env::current_dir()?;
     let mut web_dir = None;
+    let mut router_effort = None;
     let mut program = OsString::from("codex");
     let mut github_cli = OsString::from("gh");
     let mut app_args = ["app-server", "--listen", "stdio://"]
@@ -49,6 +50,15 @@ fn main() -> Result<()> {
             }
             Some("--router-cwd") => {
                 cwd = PathBuf::from(args.next().context("--router-cwd needs a directory")?)
+            }
+            Some("--router-effort") => {
+                let effort = args
+                    .next()
+                    .context("--router-effort needs a value")?
+                    .into_string()
+                    .map_err(|_| anyhow!("invalid Router effort"))?;
+                ensure!(!effort.trim().is_empty(), "Router effort must not be empty");
+                router_effort = Some(effort);
             }
             Some("--web-dir") => {
                 let directory = PathBuf::from(args.next().context("--web-dir needs a directory")?);
@@ -94,6 +104,7 @@ fn main() -> Result<()> {
         cwd,
         program,
         args: app_args,
+        effort: router_effort,
     });
     eprintln!("Tend Server listening on {}", server.server_addr());
 
@@ -176,6 +187,36 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
+    }
+    if let Some(id) = path
+        .strip_prefix("/api/v1/workspace-reclaims/")
+        .filter(|id| protocol::valid_id(id))
+        && request.method() == &Method::Get
+    {
+        return Ok(match store.workspace_reclaim(id)? {
+            Some(receipt) => (200, receipt),
+            None => api_error(404, "workspace reclaim not found"),
+        });
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/reclaim"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        let issue = issue.to_owned();
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(body) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let Ok(input) = serde_json::from_slice::<protocol::ControlRequest>(&body) else {
+            return Ok(api_error(400, "expected operation ID"));
+        };
+        if !protocol::valid_id(&input.operation_id) {
+            return Ok(api_error(400, "valid operation ID required"));
+        }
+        return control_response(store.reclaim_workspace(&issue, &input.operation_id)?);
     }
     if path == "/api/v1/runners" && request.method() == &Method::Get {
         return Ok((200, serde_json::to_value(store.runner_instances()?)?));
@@ -620,6 +661,7 @@ fn handle_runner_sync(
         || sync.receipts.len() > RUNNER_SYNC_BATCH
         || sync.runs.len() > RUNNER_SYNC_BATCH
         || sync.records.len() > RUNNER_SYNC_BATCH
+        || sync.reclaim_receipts.len() > RUNNER_SYNC_BATCH
     {
         return Ok(api_error(400, "invalid Runner profile or receipt batch"));
     }

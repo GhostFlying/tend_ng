@@ -1,6 +1,7 @@
 mod control;
 mod coordination;
 mod handoff;
+mod reclaim;
 mod reconcile;
 pub mod run;
 
@@ -99,6 +100,8 @@ impl Store {
             && reply.inputs.is_empty()
             && reply.controls.is_empty()
             && reply.drain_to.is_none()
+            && reply.workspace_reclaims.is_empty()
+            && reply.confirmed_reclaims.is_empty()
         {
             return Ok(());
         }
@@ -108,6 +111,15 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(target) = &reply.drain_to {
             handoff::accept_drain(&tx, target)?;
+        }
+        for id in reply.confirmed_reclaims {
+            tx.execute(
+                "UPDATE local_workspace_reclaims SET acknowledged = 1 WHERE id = ?1",
+                [&id],
+            )?;
+        }
+        for command in reply.workspace_reclaims {
+            reclaim::accept(&tx, &command)?;
         }
         for acknowledged in reply.confirmed_receipts {
             tx.execute(

@@ -103,6 +103,8 @@ pub struct RunnerSync {
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drained: bool,
     pub profile: RunnerProfile,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reclaim_receipts: Vec<crate::WorkspaceReclaimReceipt>,
     pub receipts: Vec<ClaimReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub runs: Vec<RunObservation>,
@@ -112,6 +114,10 @@ pub struct RunnerSync {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSyncReply {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspace_reclaims: Vec<crate::WorkspaceReclaim>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_reclaims: Vec<String>,
     pub assignments: Vec<TaskAssignment>,
     pub confirmed_receipts: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

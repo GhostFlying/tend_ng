@@ -10,6 +10,7 @@ mod handoff;
 mod issue_chat;
 mod notification;
 mod pull;
+mod reclaim;
 mod review;
 pub use control::*;
 pub use external::*;
@@ -17,6 +18,7 @@ pub use handoff::*;
 pub use issue_chat::*;
 pub use notification::*;
 pub use pull::*;
+pub use reclaim::*;
 pub use review::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
@@ -88,6 +90,8 @@ pub struct DispatchIssue {
     pub repo_ids: Vec<String>,
     #[serde(default)]
     pub required_capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub base_refs: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

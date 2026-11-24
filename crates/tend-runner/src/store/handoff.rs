@@ -37,7 +37,8 @@ impl Store {
         Ok(self.0.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_drain)
                AND NOT EXISTS(SELECT 1 FROM received_assignments WHERE execution_state NOT IN ('handed_off','rejected') OR acknowledged = 0)
-               AND NOT EXISTS(SELECT 1 FROM run_outbox WHERE acknowledged = 0)",
+               AND NOT EXISTS(SELECT 1 FROM run_outbox WHERE acknowledged = 0)
+               AND NOT EXISTS(SELECT 1 FROM local_workspace_reclaims WHERE acknowledged = 0)",
             [], |row| row.get(0),
         )?)
     }

@@ -33,3 +33,11 @@ CLI 可用 `tend task stop <task-id>`、`tend run steer <run-id> <text>`、`tend
 ## 原生审阅记录
 
 Runner 从父回合的 Codex 原生协作条目记录子线程和其实际状态。子线程创建、进行中和终态分别保留，父回合可以显式登记所审候选、范围和结论。CLI 从对应工作 Issue 读取观察和审阅结论。固定夹具核对创建、等待期间运行中、终态和重复回放。
+
+## Workspace 的显式起点
+
+Router 或 Issue Agent 在派发里按已登记 repo 提供起点。Runner 先 fetch，再优先解析远端同名分支，也支持明确提交和完整引用。每个新建 mount 保存其实际 SHA。已有 worktree 保留原起点和目录，后续 Task 保留派发的起点记录。固定 fixture 使用主干前进后留下的远端分支，核对实际 HEAD。
+
+## 显式回收 Workspace
+
+CLI 为已结束的顶层 Issue 登记回收。Server 暂停该树的新准入，原 Runner 或已接替该树的 Runner 确认本地无执行或等待占用后，从 Git 的工作树登记中移除托管目录。回收保留分支、执行历史和已提交的交付。存在工作区改动时显示具体失败原因，用户可以保留改动或处理后重新提交。单次请求与结果沿原操作 ID 查询。

@@ -13,7 +13,7 @@ pub(super) const DISPATCH_QUERY: &str =
             i.state,
             (SELECT run.observation FROM task_runs run
               WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1),
-            i.parent_issue_id
+            i.parent_issue_id, t.base_refs
        FROM tasks t
        JOIN issues i ON i.id = t.issue_id
        LEFT JOIN router_dispatches d ON i.id = d.issue_id
@@ -94,13 +94,14 @@ impl Store {
             params![issue_id, source, work.title, work.objective],
         )?;
         tx.execute(
-            "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
-                VALUES (?1, ?2, 'issue-router', 'awaiting_assignment', ?3, ?4)",
+            "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, base_refs)
+                VALUES (?1, ?2, 'issue-router', 'awaiting_assignment', ?3, ?4, ?5)",
             params![
                 task_id,
                 issue_id,
                 serde_json::to_string(&work.repo_ids)?,
-                serde_json::to_string(&work.required_capabilities)?
+                serde_json::to_string(&work.required_capabilities)?,
+                serde_json::to_string(&work.base_refs)?
             ],
         )?;
         tx.execute(
@@ -230,6 +231,13 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
             objective: row.get(8)?,
             repo_ids: read_list(row, 9)?,
             required_capabilities: read_list(row, 10)?,
+            base_refs: serde_json::from_str(row.get_ref(16)?.as_str()?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    16,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
         },
     })
 }

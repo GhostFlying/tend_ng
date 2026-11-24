@@ -125,7 +125,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                     "category": { "type": "string", "enum": WORK_CATEGORIES },
                     "repo_ids": { "type": "array", "items": { "type": "string" } },
                     "required_capabilities": { "type": "array", "items": { "type": "string" } },
-                    "isolated_workspace": { "type": "boolean" }
+                    "isolated_workspace": { "type": "boolean" },
+                    "base_refs": { "type":"object", "additionalProperties": {"type":"string"} }
                 },
                 "required": ["title", "objective", "category"],
                 "additionalProperties": false
@@ -233,6 +234,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
 struct Delegation {
     #[serde(default)]
     isolated_workspace: bool,
+    #[serde(default)]
+    base_refs: std::collections::BTreeMap<String, String>,
     title: String,
     objective: String,
     category: String,
@@ -402,6 +405,18 @@ pub fn action(
                 !args.title.trim().is_empty() && !args.objective.trim().is_empty(),
                 "Specify the title and work objective"
             );
+            let repo_ids = args
+                .repo_ids
+                .unwrap_or_else(|| run.assignment.work.repo_ids.clone());
+            ensure!(
+                args.base_refs.iter().all(
+                    |(repo, reference)| repo_ids.contains(repo) && !reference.trim().is_empty()
+                ),
+                "A base reference selects a requested repository and a branch or commit"
+            );
+            let mut base_refs = run.assignment.work.base_refs.clone();
+            base_refs.retain(|repo, _| repo_ids.contains(repo));
+            base_refs.extend(args.base_refs);
             Ok(WorkAction::Delegate {
                 issue_id: protocol::new_id(),
                 task_id: protocol::new_id(),
@@ -410,9 +425,8 @@ pub fn action(
                 work: DispatchIssue {
                     title: args.title,
                     objective: args.objective,
-                    repo_ids: args
-                        .repo_ids
-                        .unwrap_or_else(|| run.assignment.work.repo_ids.clone()),
+                    repo_ids,
+                    base_refs,
                     required_capabilities: args.required_capabilities,
                 },
             })
