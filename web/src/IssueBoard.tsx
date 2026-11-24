@@ -11,6 +11,8 @@ const columns: { id: BoardStage; title: string }[] = [
   { id: "cancelled", title: "已取消" },
 ];
 
+const cancelledPreferenceKey = "tend.ng.board.cancelled-expanded";
+
 const queuedLabels: Record<string, string> = {
   awaiting_assignment: "待分配",
   awaiting_receipt: "待领取",
@@ -133,7 +135,13 @@ export function IssueBoard({
   const [page, setPage] = useState<BoardPage | null>(null);
   const [error, setError] = useState("");
   const [mobileStage, setMobileStage] = useState<BoardStage>();
-  const [cancelledExpanded, setCancelledExpanded] = useState(false);
+  const [cancelledExpanded, setCancelledExpanded] = useState(() => {
+    try {
+      return localStorage.getItem(cancelledPreferenceKey) !== "false";
+    } catch {
+      return true;
+    }
+  });
   const mobileTabs = useRef<HTMLDivElement>(null);
   const before = cursors.at(-1);
   const loaded = page !== null;
@@ -184,6 +192,16 @@ export function IssueBoard({
     setCursors((saved) =>
       next === undefined ? saved.slice(0, -1) : [...saved, next],
     );
+  }
+
+  function toggleCancelled() {
+    const expanded = !cancelledExpanded;
+    setCancelledExpanded(expanded);
+    try {
+      localStorage.setItem(cancelledPreferenceKey, String(expanded));
+    } catch {
+      // Keep the current view usable when storage is unavailable.
+    }
   }
 
   const byStage = new Map<BoardStage, BoardIssue[]>(
@@ -245,25 +263,39 @@ export function IssueBoard({
                       aria-hidden="true"
                       data-column={id}
                     />
-                    <span className="board-column-title">{title}</span>
-                    <small>{cards.length}</small>
-                    {id === "cancelled" && (
-                      <button
-                        type="button"
-                        className="board-column-toggle"
-                        aria-label={
-                          cancelledExpanded ? "收起已取消" : "展开已取消"
-                        }
-                        aria-expanded={cancelledExpanded}
-                        onClick={() => setCancelledExpanded((value) => !value)}
-                      >
-                        <span aria-hidden="true">
-                          {cancelledExpanded ? "‹" : "›"}
+                    {id === "cancelled" ? (
+                      <>
+                        <button
+                          type="button"
+                          className="board-column-toggle"
+                          aria-label={
+                            cancelledExpanded ? "收起已取消" : "展开已取消"
+                          }
+                          aria-expanded={cancelledExpanded}
+                          aria-controls="board-cancelled-content"
+                          onClick={toggleCancelled}
+                        >
+                          <span className="board-column-title">{title}</span>
+                          <small>{cards.length}</small>
+                        </button>
+                        <span className="board-mobile-heading">
+                          {title}
+                          <small>{cards.length}</small>
                         </span>
-                      </button>
+                      </>
+                    ) : (
+                      <>
+                        <span className="board-column-title">{title}</span>
+                        <small>{cards.length}</small>
+                      </>
                     )}
                   </h2>
-                  <div className="board-column-content">
+                  <div
+                    id={
+                      id === "cancelled" ? "board-cancelled-content" : undefined
+                    }
+                    className="board-column-content"
+                  >
                     {cards.length ? (
                       <ul className="board-cards">
                         {cards.map((issue) => (

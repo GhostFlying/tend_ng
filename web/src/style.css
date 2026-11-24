@@ -594,21 +594,41 @@ a {
 }
 
 .board {
+  --board-secondary: rgba(15, 17, 21, 0.72);
+  --board-tertiary: rgba(15, 17, 21, 0.52);
+  --board-caption: rgba(15, 17, 21, 0.38);
+  display: flex;
+  flex-direction: column;
   flex: 1;
   min-height: 0;
-  overflow: auto;
-  padding: 16px 20px 20px;
 }
 
-.board-tabs {
+@media (prefers-color-scheme: dark) {
+  .board {
+    --board-secondary: rgba(236, 237, 240, 0.74);
+    --board-tertiary: rgba(236, 237, 240, 0.54);
+    --board-caption: rgba(236, 237, 240, 0.4);
+  }
+}
+
+.board > :is(.error, [role="status"]) {
+  margin: 16px 20px;
+}
+
+.board-tabs,
+.board-mobile-heading {
   display: none;
 }
 
 .board-columns {
   display: grid;
+  flex: 1;
+  min-height: 0;
   grid-template-columns: repeat(5, minmax(180px, 1fr)) 44px;
   gap: 8px;
   align-items: start;
+  overflow: auto;
+  padding: 16px 20px 20px;
 }
 
 .board-columns[data-cancelled-expanded="true"] {
@@ -636,7 +656,8 @@ a {
 
 .board-column h2 small,
 .board-tabs small {
-  color: var(--muted);
+  color: var(--board-tertiary);
+  font-size: 12px;
   font-weight: 400;
   font-variant-numeric: tabular-nums;
 }
@@ -668,27 +689,44 @@ a {
 }
 
 .board-column-toggle {
-  margin-left: auto;
-  padding: 0 4px;
-  color: var(--muted);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  min-height: 24px;
+  border-radius: 6px;
+  color: var(--board-secondary);
   background: transparent;
   border: 0;
-  font: inherit;
-  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.board-column-toggle:hover {
+  background: var(--active);
+}
+
+.board-column-toggle small {
+  padding: 0 4px;
+  border-radius: 999px;
+  color: var(--board-secondary);
+  background: var(--active);
 }
 
 .board-column[data-collapsed="true"] h2 {
   flex-direction: column;
-  margin: 4px 0 0;
+  margin: 0;
 }
 
 .board-column[data-collapsed="true"] .board-column-title {
   writing-mode: vertical-rl;
-  text-orientation: upright;
 }
 
 .board-column[data-collapsed="true"] .board-column-toggle {
-  margin: 0;
+  flex-direction: column;
+  flex: 1;
+  min-height: 84px;
+  padding: 4px 0;
 }
 
 .board-column[data-collapsed="true"] .board-column-content {
@@ -697,7 +735,7 @@ a {
 
 .board-empty {
   margin: 20px 4px 12px;
-  color: var(--muted);
+  color: var(--board-caption);
   font-size: 12px;
 }
 
@@ -715,7 +753,7 @@ a {
 
 .board-card {
   min-width: 0;
-  padding: 12px;
+  padding: 10px 12px 12px;
   border: 1px solid var(--border);
   border-radius: 8px;
   background: var(--bg);
@@ -729,14 +767,15 @@ a {
 .board-card-repos {
   margin-bottom: 8px;
   font-size: 12px;
-  color: var(--muted);
+  color: var(--board-tertiary);
 }
 
 .board-card-title {
   display: block;
+  color: var(--board-secondary);
   font-size: 14px;
-  font-weight: 530;
-  line-height: 1.5;
+  font-weight: 500;
+  line-height: 22px;
   text-decoration: none;
 }
 
@@ -751,7 +790,7 @@ a {
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: var(--muted);
+  color: var(--board-tertiary);
   font-size: 12px;
 }
 
@@ -787,7 +826,7 @@ a {
 }
 
 .board-pages {
-  margin-top: 16px;
+  padding: 0 20px 16px;
 }
 
 @media (max-width: 760px) {
@@ -796,11 +835,17 @@ a {
   }
 
   .board {
+    overflow: auto;
     padding: 0 16px 20px;
+  }
+
+  .board > :is(.error, [role="status"]) {
+    margin-inline: 0;
   }
 
   .board-tabs {
     display: flex;
+    flex: none;
     gap: 8px;
     margin: 0 -16px 14px;
     padding: 0 16px;
@@ -818,7 +863,7 @@ a {
     padding: 0 6px;
     border: 0;
     border-bottom: 2px solid transparent;
-    color: var(--muted);
+    color: var(--board-tertiary);
     background: transparent;
     font: inherit;
     font-size: 13px;
@@ -834,6 +879,9 @@ a {
   .board-columns,
   .board-columns[data-cancelled-expanded="true"] {
     display: block;
+    flex: none;
+    overflow: visible;
+    padding: 0;
   }
 
   .board-column {
@@ -852,12 +900,14 @@ a {
   .board-column[data-collapsed="true"] h2 {
     flex-direction: row;
     margin: 0 0 10px;
-    color: var(--muted);
+    color: var(--board-tertiary);
     font-weight: 400;
   }
 
-  .board-column[data-collapsed="true"] .board-column-title {
-    writing-mode: horizontal-tb;
+  .board-mobile-heading {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
   }
 
   .board-column h2 .board-dot,
@@ -866,6 +916,10 @@ a {
   }
 
   .board-card {
-    padding: 14px;
+    padding: 10px 14px 14px;
+  }
+
+  .board-pages {
+    padding: 16px 0 0;
   }
 }

@@ -27,6 +27,17 @@ try {
     const parent = "示例仓库上手指南";
     if (width === 390) {
       await page.getByRole("button", { name: /^已完成/ }).click();
+    } else {
+      const close = page.getByRole("button", { name: "收起已取消" });
+      await close.waitFor();
+      assert.equal(await close.getAttribute("aria-expanded"), "true");
+      assert.equal(
+        await close.evaluate(
+          (node) =>
+            globalThis.getComputedStyle(node.firstElementChild).writingMode,
+        ),
+        "horizontal-tb",
+      );
     }
     const card = page
       .locator(".board-card")
@@ -42,6 +53,12 @@ try {
     );
     await card.getByRole("link", { name: "example/guide #99" }).waitFor();
     await card.getByText("CI 未确认").waitFor();
+    assert.equal(
+      await card
+        .locator(".board-card-title")
+        .evaluate((node) => globalThis.getComputedStyle(node).fontWeight),
+      "500",
+    );
     assert.equal(
       await page.getByRole("link", { name: "核对安装步骤" }).count(),
       0,
@@ -60,11 +77,36 @@ try {
     await page.getByRole("heading", { name: parent, exact: true }).waitFor();
     await page.getByRole("link", { name: "看板", exact: true }).click();
     if (width === 390) {
+      await page.getByRole("button", { name: /^已取消/ }).click();
+      await page.locator("#board-cancelled-content .board-empty").waitFor();
       await page.getByRole("button", { name: /^待安排/ }).click();
     } else {
-      await page.getByRole("button", { name: "展开已取消" }).click();
-      await page.getByRole("button", { name: "收起已取消" }).waitFor();
       await page.getByRole("button", { name: "收起已取消" }).click();
+      await page.reload();
+      await page
+        .locator("#board-cancelled-content")
+        .waitFor({ state: "attached" });
+      assert.equal(
+        await page.locator("#board-cancelled-content").isVisible(),
+        false,
+      );
+      await page.getByRole("button", { name: "展开已取消" }).click();
+      await page.locator("#board-cancelled-content .board-empty").waitFor();
+      await page.setViewportSize({ width: 1024, height });
+      const scroll = page.locator(".board-columns");
+      const box = await scroll.boundingBox();
+      await page.mouse.move(box.x + 40, box.y + 140);
+      await page.mouse.wheel(900, 0);
+      await page.waitForFunction(
+        () => document.querySelector(".board-columns").scrollLeft > 0,
+      );
+      assert.equal(await page.evaluate(() => globalThis.scrollX), 0);
+      assert.equal(
+        await page.evaluate(() => document.documentElement.scrollWidth),
+        1024,
+      );
+      await page.getByRole("button", { name: "收起已取消" }).click();
+      await page.setViewportSize({ width, height });
     }
     await page.getByRole("link", { name: "稍后整理发布说明" }).click();
     await page.getByText("暂无 Issue Owner。", { exact: false }).waitFor();
