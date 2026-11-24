@@ -225,6 +225,28 @@ impl TurnHandler for Handler<'_> {
         true
     }
 
+    fn native_item(&mut self, thread: &str, turn: &str, item: &serde_json::Value) -> Result<()> {
+        let Ok(observation) = serde_json::from_value::<protocol::SubagentObservation>(item.clone())
+        else {
+            return Ok(());
+        };
+        if observation.sender_thread_id != thread {
+            return Ok(());
+        }
+        let call = ToolCall {
+            thread_id: thread.to_owned(),
+            turn_id: turn.to_owned(),
+            call_id: format!("native-{}-{}", observation.id, observation.status),
+            tool: "observe_native_subagent".to_owned(),
+            namespace: None,
+            arguments: serde_json::to_value(&observation)?,
+        };
+        self.store.accept_operation(self.run, &call, |_| {
+            Ok(protocol::WorkAction::ObserveSubagent { observation })
+        })?;
+        Ok(())
+    }
+
     fn observed_user_message(&mut self, client_id: &str) -> Result<()> {
         self.store.observe_steer(&self.run.id, client_id)
     }

@@ -76,6 +76,14 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         "inputSchema":{"type":"object","properties":{"state":{"type":"string","enum":["open","cancelled"]}, "reason":{"type":"string"}},
                        "required":["state","reason"],"additionalProperties":false}
     });
+    let record_review = json!({
+        "type":"function", "name":"tend_record_review",
+        "description":"Save independent review evidence from a Codex child thread already observed in this work Issue.",
+        "inputSchema":{"type":"object","properties":{
+            "child_thread_id":{"type":"string"},"candidate":{"type":"string"},
+            "scope":{"type":"string"},"conclusion":{"type":"string"}},
+            "required":["child_thread_id","candidate","scope","conclusion"],"additionalProperties":false}
+    });
     let close = json!({
         "type": "function",
         "name": CLOSE,
@@ -185,6 +193,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 clear_waits,
                 stop_task,
                 issue_state,
+                record_review,
             ],
         )
     } else {
@@ -213,6 +222,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 clear_waits,
                 stop_task,
                 issue_state,
+                record_review,
             ],
         )
     }
@@ -286,6 +296,18 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        "tend_record_review" => {
+            let review: protocol::ReviewConclusion =
+                serde_json::from_value(call.arguments.clone())?;
+            ensure!(
+                protocol::valid_id(&review.child_thread_id)
+                    && [&review.candidate, &review.scope, &review.conclusion]
+                        .iter()
+                        .all(|value| !value.trim().is_empty()),
+                "Use the observed child thread, candidate, scope, and review conclusion"
+            );
+            Ok(WorkAction::RecordReview { review })
+        }
         "tend_stop_task" => {
             let task_id = call.arguments["task_id"]
                 .as_str()

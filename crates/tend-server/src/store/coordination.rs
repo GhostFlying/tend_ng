@@ -257,6 +257,9 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 message_id,
             )?;
         }
+        WorkAction::ObserveSubagent { .. } | WorkAction::RecordReview { .. } => {
+            super::review::record(db, &source_issue, operation)?;
+        }
         WorkAction::StopTask { task_id } => {
             let related = db.query_row(
                 "WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL

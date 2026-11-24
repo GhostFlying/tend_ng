@@ -262,6 +262,17 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     }
     if let Some(issue) = path
         .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/reviews"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        return if request.method() == &Method::Get {
+            Ok((200, serde_json::to_value(store.issue_reviews(issue)?)?))
+        } else {
+            Ok(api_error(405, "method not allowed"))
+        };
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
         .and_then(|path| path.strip_suffix("/state"))
         .filter(|id| protocol::valid_id(id))
     {

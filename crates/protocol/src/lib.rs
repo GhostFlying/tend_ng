@@ -10,12 +10,14 @@ mod handoff;
 mod issue_chat;
 mod notification;
 mod pull;
+mod review;
 pub use control::*;
 pub use external::*;
 pub use handoff::*;
 pub use issue_chat::*;
 pub use notification::*;
 pub use pull::*;
+pub use review::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
 pub const TOKEN_ENV: &str = "TEND_TOKEN";

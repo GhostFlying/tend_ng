@@ -6,7 +6,7 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
@@ -26,6 +26,7 @@ fn main() -> Result<()> {
     let endpoint = match (namespace.as_str(), command.as_str()) {
         ("chat", _) => protocol::messages_path(id),
         ("issue", "read") => protocol::issue_path(id),
+        ("issue", "reviews") => format!("/api/v1/issues/{id}/reviews"),
         ("issue", "list") => protocol::issue_board_path(id),
         ("pr", "watches") => format!("/api/v1/issues/{id}/watches"),
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
@@ -187,7 +188,7 @@ fn main() -> Result<()> {
             let jobs: Vec<PullDiscovery> = checked(request.call())?.into_json()?;
             println!("{}", serde_json::to_string(&jobs)?);
         }
-        ("pr", "watches", []) => {
+        ("pr", "watches", []) | ("issue", "reviews", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;
             io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }

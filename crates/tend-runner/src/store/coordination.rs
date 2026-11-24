@@ -116,6 +116,18 @@ impl Store {
                 }
             }
         }
+        if let WorkAction::RecordReview { review } = &action {
+            let confirmed = self.0.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                     WHERE json_extract(a.contract, '$.issue_id') = ?1
+                       AND json_extract(o.operation, '$.action.kind') = 'observe_subagent'
+                       AND EXISTS(SELECT 1 FROM json_each(o.operation, '$.action.observation.receiverThreadIds') child
+                                  WHERE child.value = ?2))",
+                params![run.assignment.issue_id, review.child_thread_id], |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(confirmed, "Reference a child thread observed in this Issue");
+        }
         if let WorkAction::ForwardIssueMessage {
             child_issue_id,
             message_id,

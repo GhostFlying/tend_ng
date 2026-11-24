@@ -29,3 +29,7 @@ CLI 可用 `tend task stop <task-id>`、`tend run steer <run-id> <text>`、`tend
 - Server 按永久 Runner 记录保存其协议代数。升级前 CLI 提供只读预检。前驱回传收尾后报告已排空，并从 Runner 进程退出。现场验收实际退出，同时确认后继仍能同步和执行。
 
 在两个 Runner 配置相同的 `workspace_root` 和 `host_id`。后继配置 `standby: true`，并使用独立的数据库和 `runner_id`。先用 `tend runner list` 核对两个实例，再运行 `tend runner replace <predecessor-id> <successor-id>`。确认前驱进程已退出后执行 `tend runner retire <predecessor-id>`。升级 Server 前用 `tend server upgrade-check <target-protocol>` 检查仍需兼容的 Runner。
+
+## 原生审阅记录
+
+Runner 从父回合的 Codex 原生协作条目记录子线程和其实际状态。子线程创建、进行中和终态分别保留，父回合可以显式登记所审候选、范围和结论。CLI 从对应工作 Issue 读取观察和审阅结论。固定夹具核对创建、等待期间运行中、终态和重复回放。

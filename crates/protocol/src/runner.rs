@@ -148,6 +148,12 @@ pub struct WorkOperation {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum WorkAction {
+    ObserveSubagent {
+        observation: crate::SubagentObservation,
+    },
+    RecordReview {
+        review: crate::ReviewConclusion,
+    },
     Delegate {
         issue_id: String,
         task_id: String,

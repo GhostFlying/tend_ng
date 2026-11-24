@@ -176,7 +176,23 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario == "external-wait":
+    if scenario == "native-review":
+        receiver = "native-review-child"
+        history = [
+            {"id": "spawn", "tool": "spawnAgent", "status": "completed", "agentsStates": {receiver: {"status": "running"}}},
+            {"id": "wait-pending", "tool": "wait", "status": "completed", "agentsStates": {receiver: {"status": "running"}}},
+            {"id": "wait-finished", "tool": "wait", "status": "completed", "agentsStates": {receiver: {"status": "completed"}}},
+        ]
+        for item in history:
+            item.update(type="collabAgentToolCall", senderThreadId=thread_id, receiverThreadIds=[receiver])
+            notification = {"method": "item/completed", "params": {"threadId": thread_id, "turnId": turn_id, "item": item}}
+            send(notification)
+            send(notification)
+        review = tool("tend_record_review", {"child_thread_id": receiver, "candidate": "guide-v1",
+                      "scope": "installation instructions", "conclusion": "accepted"},
+                      "record-review", "record-review")
+        (root / "review.json").write_text(json.dumps(review))
+    elif scenario == "external-wait":
         url = "https://github.com/example/guide/pull/82"
         condition = {"url": url, "event": "ci", "check": "build-linux", "state": "terminal",
                      "head_sha": "a" * 40, "run_id": "7"}
@@ -214,7 +230,7 @@ elif role == "child":
         guide.write_text("A later edit to the workspace file.\n")
         assert tool("tend_submit_artifact", arguments, "replay-submit", "delivery") == delivered
         (root / "submitted.json").write_text(json.dumps(delivered))
-    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery"}:
+    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "native-review"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "other-work":
     if assignment["work"]["title"] == "Isolated B":
@@ -304,7 +320,7 @@ else:
             args["answer"] = "精简版"
         accepted = tool(name, args, "route-question", "route-question")
         assert tool(name, args, "replay-question", "route-question") == accepted
-    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "external-wait"}:
+    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "external-wait", "native-review"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":

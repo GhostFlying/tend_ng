@@ -84,6 +84,9 @@ pub trait TurnHandler {
     fn controls(&mut self, _client: &mut Client, _thread: &str, _turn: &str) -> Result<()> {
         Ok(())
     }
+    fn native_item(&mut self, _thread: &str, _turn: &str, _item: &Value) -> Result<()> {
+        Ok(())
+    }
     fn observed_user_message(&mut self, _client_id: &str) -> Result<()> {
         Ok(())
     }
@@ -436,6 +439,12 @@ impl Client {
             {
                 handler.observed_user_message(client_id)?;
             }
+            if matches!(method, Some("item/started" | "item/completed"))
+                && params["turnId"] == *turn_id
+                && params["item"]["type"] == "collabAgentToolCall"
+            {
+                handler.native_item(thread_id, turn_id, &params["item"])?;
+            }
             match method {
                 Some("item/completed")
                     if params["turnId"] == *turn_id && params["item"]["type"] == "agentMessage" =>
@@ -444,6 +453,11 @@ impl Client {
                 }
                 Some("turn/completed") if params["turn"]["id"] == *turn_id => {
                     let mut turn: Turn = serde_json::from_value(params["turn"].clone())?;
+                    for item in &turn.items {
+                        if item["type"] == "collabAgentToolCall" {
+                            handler.native_item(thread_id, turn_id, item)?;
+                        }
+                    }
                     for message in messages {
                         if !turn.items.iter().any(|item| item["id"] == message["id"]) {
                             turn.items.push(message);
