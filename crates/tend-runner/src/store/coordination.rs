@@ -306,7 +306,7 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
          WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'delegate'
            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = o.assignment_id
                AND i.child_issue_id = json_extract(o.operation, '$.action.issue_id')
-               AND json_extract(i.payload, '$.kind') IN ('issue_closed', 'task_stopped')))",
+               AND json_extract(i.payload, '$.kind') IN ('issue_closed', 'task_stopped', 'task_cancelled')))",
         [assignment],
         |row| row.get(0),
     )?)

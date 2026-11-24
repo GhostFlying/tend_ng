@@ -231,51 +231,9 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let prior: Option<(String, String, String, Option<String>)> = tx.query_row(
-            "SELECT id, viewed_issue_id, text, reply_to FROM issue_messages WHERE operation_id = ?1",
-            [&request.operation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        ).optional()?;
-        if let Some((message_id, viewed, text, reply)) = prior {
-            return Ok(Some(
-                if viewed == issue && text == request.text && reply == request.reply_to {
-                    Accepted::Received(Receipt { message_id })
-                } else {
-                    Accepted::Conflict
-                },
-            ));
-        }
-
-        let target = if let Some(reply) = &request.reply_to {
-            let target: Option<String> = tx
-                .query_row(
-                    &format!(
-                        "{TREE}
-                 SELECT m.issue_id FROM issue_messages m JOIN tree ON tree.id = m.issue_id
-                 WHERE m.id = ?2 AND m.kind != 'run'"
-                    ),
-                    params![issue, reply],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            let Some(target) = target else {
-                return Ok(Some(Accepted::InvalidReply));
-            };
-            target
-        } else {
-            issue.to_owned()
-        };
-        let Some(task) = coordination::target_task(&tx, &target)? else {
-            return Ok(None);
-        };
-        let message_id = protocol::new_id();
-        tx.execute(
-            "INSERT INTO issue_messages (id, issue_id, kind, author, text, reply_to, operation_id, viewed_issue_id)
-             VALUES (?1, ?2, 'user', 'user', ?3, ?4, ?5, ?6)",
-            params![message_id, target, request.text, request.reply_to, request.operation_id, issue],
-        )?;
-        enqueue(&tx, &task, &task, &message(&tx, &message_id)?)?;
+        let result = post_message(&tx, issue, request)?;
         tx.commit()?;
-        Ok(Some(Accepted::Received(Receipt { message_id })))
+        Ok(result)
     }
 
     pub fn relay_to_issue(
@@ -320,4 +278,55 @@ impl Store {
         tx.commit()?;
         Ok(Some(saved))
     }
+}
+
+pub(super) fn post_message(
+    db: &Connection,
+    issue: &str,
+    request: &SendMessage,
+) -> Result<Option<Accepted>> {
+    let prior: Option<(String, String, String, Option<String>)> = db.query_row(
+            "SELECT id, viewed_issue_id, text, reply_to FROM issue_messages WHERE operation_id = ?1",
+            [&request.operation_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        ).optional()?;
+    if let Some((message_id, viewed, text, reply)) = prior {
+        return Ok(Some(
+            if viewed == issue && text == request.text && reply == request.reply_to {
+                Accepted::Received(Receipt { message_id })
+            } else {
+                Accepted::Conflict
+            },
+        ));
+    }
+
+    let target = if let Some(reply) = &request.reply_to {
+        let target: Option<String> = db
+            .query_row(
+                &format!(
+                    "{TREE}
+                 SELECT m.issue_id FROM issue_messages m JOIN tree ON tree.id = m.issue_id
+                 WHERE m.id = ?2 AND m.kind != 'run'"
+                ),
+                params![issue, reply],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(target) = target else {
+            return Ok(Some(Accepted::InvalidReply));
+        };
+        target
+    } else {
+        issue.to_owned()
+    };
+    let Some(task) = coordination::target_task(db, &target)? else {
+        return Ok(None);
+    };
+    let message_id = protocol::new_id();
+    db.execute(
+            "INSERT INTO issue_messages (id, issue_id, kind, author, text, reply_to, operation_id, viewed_issue_id)
+             VALUES (?1, ?2, 'user', 'user', ?3, ?4, ?5, ?6)",
+            params![message_id, target, request.text, request.reply_to, request.operation_id, issue],
+        )?;
+    enqueue(db, &task, &task, &message(db, &message_id)?)?;
+    Ok(Some(Accepted::Received(Receipt { message_id })))
 }

@@ -257,6 +257,34 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 message_id,
             )?;
         }
+        WorkAction::StopTask { task_id } => {
+            let related = db.query_row(
+                "WITH RECURSIVE tree(id) AS (SELECT ?1 UNION ALL
+                   SELECT i.id FROM issues i JOIN tree p ON i.parent_issue_id = p.id)
+                 SELECT EXISTS(SELECT 1 FROM tasks JOIN tree ON tree.id = tasks.issue_id WHERE tasks.id = ?2)",
+                params![source_issue, task_id], |row| row.get::<_, bool>(0),
+            )?;
+            if related {
+                super::control::submit(
+                    db,
+                    &operation.operation_id,
+                    task_id,
+                    None,
+                    &protocol::ControlAction::Stop,
+                )?;
+            }
+        }
+        WorkAction::SetIssueState { state, reason } => {
+            super::control::transition(
+                db,
+                &source_issue,
+                &protocol::IssueTransition {
+                    operation_id: operation.operation_id.clone(),
+                    state: state.clone(),
+                    reason: reason.clone(),
+                },
+            )?;
+        }
         WorkAction::WatchExternal { condition, mode } => {
             super::external::register(
                 db,
@@ -327,11 +355,13 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         },
     )?;
     let (child_issue_id, parent_issue, state) = child;
-    if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL)",
-        [&observation.task_id],
-        |row| row.get::<_, bool>(0),
-    )? {
+    if *outcome != RunOutcome::Cancelled
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL)",
+            [&observation.task_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
         target_task(db, &child_issue_id)?;
     }
     let Some(parent_issue) = parent_issue else {
@@ -367,6 +397,7 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let original = db
         .query_row(
             "SELECT t.id, t.status, a.contract FROM tasks t
+             JOIN issues i ON i.id = t.issue_id AND i.state != 'cancelled'
              LEFT JOIN runner_assignments a ON a.id = t.current_assignment
              WHERE t.issue_id = ?1
              ORDER BY t.rowid DESC LIMIT 1",
@@ -383,7 +414,7 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let Some((previous, status, contract)) = original else {
         return Ok(None);
     };
-    if !matches!(status.as_str(), "completed" | "failed") {
+    if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
         return Ok(Some(previous));
     }
     let Some(contract) = contract else {

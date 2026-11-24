@@ -6,7 +6,10 @@ import time
 
 
 def request(method):
-    call = json.loads(sys.stdin.readline())
+    line = sys.stdin.readline()
+    if not line:
+        sys.exit(0)
+    call = json.loads(line)
     assert call["method"] == method, call
     return call
 
@@ -220,7 +223,7 @@ elif role == "other-work":
         (root / "isolated-ran").touch()
     else:
         assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
-        assert (root / "resumed-wait.json").exists()
+        assert (root / "resumed-wait.json").exists() or (root / "cancelled-wait").exists()
         (root / "shared-ran").touch()
     tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-other", "close-other")
 elif role == "external-resumed":

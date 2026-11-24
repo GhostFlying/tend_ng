@@ -15,7 +15,8 @@ PULL = "https://github.com/example/guide/pull/82"
 
 
 def main():
-    server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:])
+    server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:4])
+    cancelling = "--cancel" in sys.argv[4:]
     with tempfile.TemporaryDirectory(prefix="tend-wait-") as directory:
         root = Path(directory)
         addr = free_port()
@@ -78,6 +79,20 @@ def main():
                 reschedule("matching")
                 assert sql("server", "SELECT count(*) FROM external_deliveries") == [(3,)]
                 assert not (root / "resumed-wait.json").exists()
+                if cancelling:
+                    (root / "cancelled-wait").touch()
+                    cli("task", "stop", task, "stop-wait")
+                    wait_for(lambda: cli("control", "read", "stop-wait"),
+                             lambda command: command["state"] == "stopped")
+                    wait_for(lambda: cli("issue", "read", issue), lambda result: result["status"] == "cancelled")
+                    sql("server", "UPDATE external_batches SET due_at = 0 WHERE task_id = ?", task)
+                    wait_for(lambda: sql("server", "SELECT COUNT(*) FROM external_batches"),
+                             lambda rows: rows == [(0,)])
+                    wait_for(lambda: (root / "shared-ran").exists(), bool)
+                    assert not (root / "resumed-wait.json").exists()
+                    assert sql("runner", "SELECT retains_workspace FROM received_assignments WHERE task_id = ?", task) == [(0,)]
+                    print("PASS cancelled wait releases the workspace and preserves the stopped Run")
+                    return
                 sql("server", "UPDATE external_batches SET due_at = 0 WHERE task_id = ?", task)
                 wait_for(lambda: (root / "resumed-wait.json").exists(), bool)
                 ended = wait_for(lambda: cli("issue", "read", issue), lambda result: result["status"] == "completed")

@@ -6,7 +6,7 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -28,6 +28,11 @@ fn main() -> Result<()> {
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
+        ("task", "stop") => format!("/api/v1/tasks/{id}/stop"),
+        ("run", "steer") => format!("/api/v1/runs/{id}/steer"),
+        ("control", "read") => format!("/api/v1/controls/{id}"),
+        ("control", "queue") => format!("/api/v1/controls/{id}/queue"),
+        ("issue", "cancel" | "reopen") => format!("/api/v1/issues/{id}/state"),
         ("run", "rollout") => protocol::rollout_path(id),
         ("artifact", _) => protocol::artifact_path(id),
         ("attention", _) => protocol::attentions_path(id),
@@ -84,6 +89,42 @@ fn main() -> Result<()> {
                 _ => serde_json::to_string(&response.into_json::<MessagePage>()?)?,
             };
             println!("{page}");
+        }
+        ("task", "stop", [] | [_]) => {
+            let id = rest.first().cloned().unwrap_or_else(protocol::new_id);
+            ensure!(protocol::valid_id(&id), "invalid operation ID");
+            let body = serde_json::json!({"operation_id": id});
+            let response = send(&http, &path, &auth, &body)
+                .with_context(|| format!("control operation {id}"))?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
+        }
+        ("run", "steer", [text, operation @ ..])
+        | ("issue", "cancel" | "reopen", [text, operation @ ..])
+            if operation.len() <= 1 =>
+        {
+            let id = operation.first().cloned().unwrap_or_else(protocol::new_id);
+            ensure!(protocol::valid_id(&id), "invalid operation ID");
+            let body = if command == "steer" {
+                serde_json::json!({"operation_id": id, "text": text})
+            } else {
+                let state = if command == "reopen" {
+                    "open"
+                } else {
+                    "cancelled"
+                };
+                serde_json::json!({"operation_id": id, "reason": text, "state": state})
+            };
+            let response = send(&http, &path, &auth, &body)
+                .with_context(|| format!("control operation {id}"))?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
+        }
+        ("control", "read" | "queue", []) => {
+            let response = if command == "read" {
+                checked(http.get(&path).set("Authorization", &auth).call())?
+            } else {
+                send(&http, &path, &auth, &serde_json::Value::Null)?
+            };
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }
         ("pr", "link", [url, operation @ ..]) if operation.len() <= 1 => {
             let operation_id = operation.first().cloned().unwrap_or_else(protocol::new_id);

@@ -177,6 +177,67 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
     }
+    if let Some(rest) = path.strip_prefix("/api/v1/controls/") {
+        if let Some(id) = rest
+            .strip_suffix("/queue")
+            .filter(|id| protocol::valid_id(id))
+        {
+            if request.method() != &Method::Post {
+                return Ok(api_error(405, "method not allowed"));
+            }
+            return control_response(store.queue_steer(id)?);
+        }
+        if protocol::valid_id(rest) && request.method() == &Method::Get {
+            return Ok(match store.control(rest)? {
+                Some(view) => (200, serde_json::to_value(view)?),
+                None => api_error(404, "control not found"),
+            });
+        }
+    }
+    if let Some((id, stop)) = path
+        .strip_prefix("/api/v1/tasks/")
+        .and_then(|tail| tail.strip_suffix("/stop"))
+        .map(|id| (id, true))
+        .or_else(|| {
+            path.strip_prefix("/api/v1/runs/")
+                .and_then(|tail| tail.strip_suffix("/steer"))
+                .map(|id| (id, false))
+        })
+        .filter(|(id, _)| protocol::valid_id(id))
+    {
+        let id = id.to_owned();
+        return request_control(store, request, &id, stop);
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/state"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        let issue = issue.to_owned();
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let Ok(input) = serde_json::from_slice::<protocol::IssueTransition>(&bytes) else {
+            return Ok(api_error(400, "expected operation_id, state and reason"));
+        };
+        if !protocol::valid_id(&input.operation_id)
+            || !matches!(input.state.as_str(), "open" | "cancelled")
+            || input.reason.trim().is_empty()
+        {
+            return Ok(api_error(
+                400,
+                "a valid issue transition and reason are required",
+            ));
+        }
+        return control_response(match store.transition_issue(&issue, &input)? {
+            store::control::ResultState::Found(()) => store::control::ResultState::Found(input),
+            store::control::ResultState::Conflict => store::control::ResultState::Conflict,
+            store::control::ResultState::Missing => store::control::ResultState::Missing,
+        });
+    }
     if let Some(chat_id) = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/issues"))
@@ -366,6 +427,46 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
         }
         _ => Ok(api_error(405, "method not allowed")),
     }
+}
+
+fn request_control(
+    store: &mut Store,
+    request: &mut Request,
+    id: &str,
+    stop: bool,
+) -> Result<(u16, Value)> {
+    if request.method() != &Method::Post {
+        return Ok(api_error(405, "method not allowed"));
+    }
+    let Some(bytes) = request_bytes(request)? else {
+        return Ok(api_error(413, "request too large"));
+    };
+    let Ok(input) = serde_json::from_slice::<protocol::ControlRequest>(&bytes) else {
+        return Ok(api_error(400, "expected a control operation ID"));
+    };
+    if !protocol::valid_id(&input.operation_id) {
+        return Ok(api_error(400, "valid operation ID required"));
+    }
+    let action = if stop {
+        protocol::ControlAction::Stop
+    } else {
+        let Some(text) = input.text.filter(|text| !text.trim().is_empty()) else {
+            return Ok(api_error(400, "Steer requires complete message text"));
+        };
+        protocol::ControlAction::Steer { text }
+    };
+    control_response(store.new_control(&input.operation_id, id, &action)?)
+}
+
+fn control_response<T: serde::Serialize>(
+    result: store::control::ResultState<T>,
+) -> Result<(u16, Value)> {
+    use store::control::ResultState;
+    Ok(match result {
+        ResultState::Found(value) => (200, serde_json::to_value(value)?),
+        ResultState::Conflict => api_error(409, "control conflicts with saved intent or outcome"),
+        ResultState::Missing => api_error(404, "control target not found"),
+    })
 }
 
 fn find_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u16, Value)> {

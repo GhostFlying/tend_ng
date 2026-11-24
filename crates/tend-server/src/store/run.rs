@@ -100,6 +100,10 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
             outcome: RunOutcome::Failed,
             ..
         } => "failed",
+        RunPhase::Stopped {
+            outcome: RunOutcome::Cancelled,
+            ..
+        } => "cancelled",
         _ => return Ok(false),
     };
     let updated = db.execute(

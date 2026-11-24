@@ -528,6 +528,7 @@ dependencies = [
  "codex-app",
  "protocol",
  "rusqlite",
+ "serde",
  "serde_json",
  "tiny_http",
  "ureq",

@@ -3,9 +3,9 @@ use crate::{
     store::{Store, run::LocalRun},
 };
 use crate::{tools, workspace};
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{RunOutcome, TOKEN_ENV};
+use protocol::{ControlAction, ControlState, RunOutcome, TOKEN_ENV};
 use serde_json::json;
 use std::{
     collections::HashMap,
@@ -75,6 +75,15 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
 
 fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
     let cwd = workspace::directory(&runtime.root, run);
+    if run.process.is_none() && store.has_stop(&run.assignment.placement.assignment_id)? {
+        return settle(
+            &mut store,
+            run,
+            &cwd,
+            Err(anyhow::anyhow!("Task cancelled before launch")),
+            false,
+        );
+    }
     if run.process.is_some() {
         let result = recover(runtime, run, &cwd);
         settle(&mut store, run, &cwd, result, true)?;
@@ -160,13 +169,27 @@ fn settle(
         Ok(turn) => {
             let observed = (recovered && run.turn_id.is_none()).then_some(turn.id.as_str());
             if turn.status == TurnStatus::Completed {
-                store.finish(run, RunOutcome::Completed, None, observed, &branches)
+                store.finish(
+                    run,
+                    RunOutcome::Completed,
+                    None,
+                    observed,
+                    &branches,
+                    &turn.items,
+                )
             } else {
                 let reason = turn.error.map_or_else(
                     || format!("Codex turn ended with {:?}", turn.status),
                     |error| error.message,
                 );
-                store.finish(run, RunOutcome::Failed, Some(reason), observed, &branches)
+                store.finish(
+                    run,
+                    RunOutcome::Failed,
+                    Some(reason),
+                    observed,
+                    &branches,
+                    &turn.items,
+                )
             }
         }
         Err(error) => store.finish(
@@ -175,6 +198,7 @@ fn settle(
             Some(format!("{error:#}")),
             None,
             &branches,
+            &[],
         ),
     }
 }
@@ -190,6 +214,37 @@ struct Handler<'a> {
 impl TurnHandler for Handler<'_> {
     fn started(&mut self, turn_id: &str) -> Result<()> {
         self.store.mark_started(self.run, turn_id, self.branches)
+    }
+
+    fn checks_controls(&self) -> bool {
+        true
+    }
+
+    fn observed_user_message(&mut self, client_id: &str) -> Result<()> {
+        self.store.observe_steer(&self.run.id, client_id)
+    }
+
+    fn controls(&mut self, client: &mut Client, thread: &str, turn: &str) -> Result<()> {
+        let assignment = &self.run.assignment.placement.assignment_id;
+        let Some(control) = self.store.next_control(assignment, &self.run.id)? else {
+            return Ok(());
+        };
+        self.store.sending_control(&control.id)?;
+        match &control.action {
+            ControlAction::Stop => {
+                let _ = client.interrupt(thread, turn);
+                bail!("Task cancelled by stop control {}", control.id);
+            }
+            ControlAction::Steer { text } => {
+                let state = match client.steer(thread, turn, &control.id, text) {
+                    Ok(true) => ControlState::Delivered,
+                    Ok(false) => ControlState::Undelivered,
+                    Err(_) => return Ok(()),
+                };
+                self.store.finish_control(&control, state)?;
+            }
+        }
+        Ok(())
     }
 
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {

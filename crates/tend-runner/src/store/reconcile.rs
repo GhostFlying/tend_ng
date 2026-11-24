@@ -7,7 +7,7 @@ impl Store {
     pub fn reconciliation_tasks(&self) -> Result<Vec<String>> {
         let mut statement = self.0.prepare(
             "SELECT task_id FROM received_assignments
-             WHERE execution_state IN ('queued', 'active', 'waiting') OR acknowledged = 0
+             WHERE execution_state IN ('queued', 'active', 'waiting', 'waiting_external') OR acknowledged = 0
              UNION
              SELECT a.task_id FROM run_outbox r
              JOIN received_assignments a ON a.id = r.assignment_id WHERE r.acknowledged = 0",

@@ -1,3 +1,4 @@
+mod control;
 mod coordination;
 mod reconcile;
 pub mod run;
@@ -95,6 +96,7 @@ impl Store {
             && reply.confirmed_runs.is_empty()
             && reply.confirmed_operations.is_empty()
             && reply.inputs.is_empty()
+            && reply.controls.is_empty()
         {
             return Ok(());
         }
@@ -158,6 +160,9 @@ impl Store {
                     serde_json::to_string(&decision)?, state
                 ],
             )?;
+        }
+        for command in reply.controls {
+            control::accept(&tx, &command)?;
         }
         for input in reply.inputs {
             coordination::accept_input(&tx, &input)?;

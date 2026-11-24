@@ -64,6 +64,18 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         "description":"Withdraw this Task's outstanding GitHub waits when the objective has changed.",
         "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
     });
+    let stop_task = json!({
+        "type":"function", "name":"tend_stop_task",
+        "description":"Request stop for a Task in your own Issue tree, confirmed separately by its Runner.",
+        "inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},
+                       "required":["task_id"],"additionalProperties":false}
+    });
+    let issue_state = json!({
+        "type":"function", "name":"tend_set_issue_state",
+        "description":"Record your Issue as cancelled or explicitly reopen it. For cancellation, coordinate child work and request the affected Task stops.",
+        "inputSchema":{"type":"object","properties":{"state":{"type":"string","enum":["open","cancelled"]}, "reason":{"type":"string"}},
+                       "required":["state","reason"],"additionalProperties":false}
+    });
     let close = json!({
         "type": "function",
         "name": CLOSE,
@@ -171,6 +183,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 waitfor,
                 subscribe,
                 clear_waits,
+                stop_task,
+                issue_state,
             ],
         )
     } else {
@@ -197,6 +211,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 waitfor,
                 subscribe,
                 clear_waits,
+                stop_task,
+                issue_state,
             ],
         )
     }
@@ -270,6 +286,29 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        "tend_stop_task" => {
+            let task_id = call.arguments["task_id"]
+                .as_str()
+                .filter(|id| protocol::valid_id(id))
+                .ok_or_else(|| anyhow::anyhow!("Use the exact Task ID"))?;
+            Ok(WorkAction::StopTask {
+                task_id: task_id.to_owned(),
+            })
+        }
+        "tend_set_issue_state" => {
+            let state = call.arguments["state"]
+                .as_str()
+                .filter(|state| matches!(*state, "open" | "cancelled"))
+                .ok_or_else(|| anyhow::anyhow!("Use open or cancelled"))?;
+            let reason = call.arguments["reason"]
+                .as_str()
+                .filter(|reason| !reason.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Provide the reason for this change"))?;
+            Ok(WorkAction::SetIssueState {
+                state: state.to_owned(),
+                reason: reason.to_owned(),
+            })
+        }
         "tend_waitfor" | "tend_subscribe" => {
             let mut condition: protocol::ExternalCondition =
                 serde_json::from_value(call.arguments.clone())?;

@@ -21,12 +21,15 @@ pub struct LocalRun {
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 2,
+        version <= 3,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
         if version == 1 {
             migrate_waits(db)?;
+        }
+        if version < 3 {
+            super::control::migrate(db)?;
         }
         return Ok(());
     }
@@ -83,6 +86,7 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     )?;
     coordination::create_tables(db)?;
     migrate_waits(db)?;
+    super::control::migrate(db)?;
     Ok(())
 }
 
@@ -228,6 +232,7 @@ impl Store {
         error: Option<String>,
         recovered_turn: Option<&str>,
         branches: &[protocol::WorkBranch],
+        native_items: &[serde_json::Value],
     ) -> Result<()> {
         let tx = self
             .0
@@ -252,14 +257,26 @@ impl Store {
             "cannot settle the original Run"
         );
         let assignment_id = &run.assignment.placement.assignment_id;
-        let waiting_for_external = coordination::waiting_for_external(&tx, assignment_id)?;
-        let waiting_for_attention = coordination::waiting_for_attention(&tx, assignment_id)?;
+        let (cancelled, commands) =
+            super::control::stopped(&tx, assignment_id, &run.id, native_items)?;
+        let outcome = if cancelled {
+            RunOutcome::Cancelled
+        } else {
+            outcome
+        };
+        let waiting_for_external =
+            !cancelled && coordination::waiting_for_external(&tx, assignment_id)?;
+        let waiting_for_attention =
+            !cancelled && coordination::waiting_for_attention(&tx, assignment_id)?;
         let has_unread = coordination::has_unread_input(&tx, assignment_id)?;
         let queued_input = outcome == RunOutcome::Completed && has_unread;
-        let waiting_for_children = !waiting_for_attention
+        let waiting_for_children = !cancelled
+            && !waiting_for_attention
             && !queued_input
             && coordination::has_followup(&tx, assignment_id)?;
-        let next_state = if queued_input
+        let next_state = if cancelled {
+            "cancelled"
+        } else if queued_input
             || (waiting_for_attention || waiting_for_children || waiting_for_external) && has_unread
         {
             "queued"
@@ -287,6 +304,9 @@ impl Store {
             },
             branches,
         )?;
+        for (command, state) in commands {
+            super::control::finish(&tx, &command, state)?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -333,6 +353,8 @@ impl Store {
 pub(super) fn decode_record(payload: &str, kind: &str) -> Result<RunnerRecord> {
     if kind == "run" {
         Ok(RunnerRecord::Run(serde_json::from_str(payload)?))
+    } else if kind == "control" {
+        Ok(RunnerRecord::Control(serde_json::from_str(payload)?))
     } else {
         Ok(RunnerRecord::Operation(serde_json::from_str(payload)?))
     }

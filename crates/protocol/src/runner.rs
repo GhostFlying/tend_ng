@@ -113,6 +113,8 @@ pub struct RunnerSyncReply {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<IssueDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub controls: Vec<crate::RunnerControl>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uploads: Vec<String>,
 }
 
@@ -121,6 +123,7 @@ pub struct RunnerSyncReply {
 pub enum RunnerRecord {
     Run(RunObservation),
     Operation(WorkOperation),
+    Control(crate::ControlAck),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -141,6 +144,13 @@ pub enum WorkAction {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         isolated_workspace: bool,
         work: DispatchIssue,
+    },
+    StopTask {
+        task_id: String,
+    },
+    SetIssueState {
+        state: String,
+        reason: String,
     },
     CloseIssue {
         summary: String,
@@ -240,6 +250,9 @@ pub enum IssueInputCause {
         category: String,
         required_capabilities: Vec<String>,
     },
+    TaskCancelled {
+        control_id: String,
+    },
     TaskStopped {
         run_id: String,
         outcome: RunOutcome,
@@ -292,6 +305,7 @@ pub enum RunPhase {
 pub enum RunOutcome {
     Completed,
     Failed,
+    Cancelled,
 }
 
 pub fn runner_sync_path(runner_id: &str) -> String {

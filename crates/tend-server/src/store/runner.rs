@@ -147,6 +147,7 @@ impl Store {
         let records = request.records.iter().map(|record| match record {
             RunnerRecord::Run(run) => &run.assignment_id,
             RunnerRecord::Operation(op) => &op.assignment_id,
+            RunnerRecord::Control(ack) => &ack.assignment_id,
         });
         Ok(!registered.is_empty()
             && request
@@ -275,6 +276,7 @@ impl Store {
                 confirmed_runs: Vec::new(),
                 confirmed_operations: Vec::new(),
                 inputs: coordination::pending_inputs(&self.db, &profile.runner_id, task)?,
+                controls: super::control::pending(&self.db, &profile.runner_id, task)?,
                 uploads: super::artifacts::pending(&self.db, &profile.runner_id, task)?,
             }));
         }
@@ -304,7 +306,20 @@ impl Store {
             if state == "issued" {
                 let (state, status) = match receipt.decision {
                     ClaimDecision::Accepted => ("accepted", "accepted"),
-                    ClaimDecision::Rejected { .. } => ("rejected", "awaiting_assignment"),
+                    ClaimDecision::Rejected { .. } => {
+                        let cancelled = tx.query_row(
+                            "SELECT EXISTS(SELECT 1 FROM task_controls WHERE assignment_id = ?1 AND state = 'pending'
+                                  AND json_extract(action, '$.kind') = 'stop')",
+                            [&receipt.assignment_id], |row| row.get::<_, bool>(0))?;
+                        (
+                            "rejected",
+                            if cancelled {
+                                "cancelled"
+                            } else {
+                                "awaiting_assignment"
+                            },
+                        )
+                    }
                 };
                 tx.execute(
                     "UPDATE runner_assignments SET state = ?2, decision = ?3 WHERE id = ?1",
@@ -337,6 +352,12 @@ impl Store {
                     }
                     confirmed_runs.push(observation.event_id);
                 }
+                RunnerRecord::Control(ack) => {
+                    if !super::control::acknowledge(&tx, &profile.runner_id, &ack)? {
+                        return Ok(None);
+                    }
+                    confirmed_operations.push(ack.id);
+                }
                 RunnerRecord::Operation(operation) => {
                     if !coordination::apply(&tx, profile, &operation)? {
                         return Ok(None);
@@ -365,6 +386,7 @@ impl Store {
         }
         let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task)?;
         let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
+        let controls = super::control::pending(&tx, &profile.runner_id, task)?;
         tx.commit()?;
         Ok(Some(RunnerSyncReply {
             assignments,
@@ -372,6 +394,7 @@ impl Store {
             confirmed_runs,
             confirmed_operations,
             inputs,
+            controls,
             uploads,
         }))
     }

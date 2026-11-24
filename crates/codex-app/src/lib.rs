@@ -78,6 +78,15 @@ pub struct ToolOutput {
 }
 
 pub trait TurnHandler {
+    fn checks_controls(&self) -> bool {
+        false
+    }
+    fn controls(&mut self, _client: &mut Client, _thread: &str, _turn: &str) -> Result<()> {
+        Ok(())
+    }
+    fn observed_user_message(&mut self, _client_id: &str) -> Result<()> {
+        Ok(())
+    }
     fn started(&mut self, turn_id: &str) -> Result<()>;
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput>;
 }
@@ -250,6 +259,34 @@ impl Client {
         }
     }
 
+    pub fn steer(&mut self, thread: &str, turn: &str, operation: &str, text: &str) -> Result<bool> {
+        match self.call(
+            "turn/steer",
+            json!({
+                "threadId": thread, "expectedTurnId": turn, "clientUserMessageId": operation,
+                "input": [{"type": "text", "text": text, "text_elements": []}],
+            }),
+        ) {
+            Ok(response) => {
+                ensure!(
+                    response["turnId"] == turn,
+                    "steer receipt has a different turn"
+                );
+                Ok(true)
+            }
+            Err(error) if error.is::<RpcError>() => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn interrupt(&mut self, thread: &str, turn: &str) -> Result<()> {
+        self.call(
+            "turn/interrupt",
+            json!({"threadId": thread, "turnId": turn}),
+        )?;
+        Ok(())
+    }
+
     pub fn run_turn(
         &mut self,
         input: TurnInput<'_>,
@@ -278,9 +315,22 @@ impl Client {
         let mut turn_id: Option<String> = None;
         let mut before_start = VecDeque::new();
         let mut messages = Vec::new();
+        let mut next_control = Instant::now();
+        let mut history_due = Instant::now() + Duration::from_secs(10);
         loop {
+            if let Some(turn) = &turn_id
+                && handler.checks_controls()
+                && Instant::now() >= next_control
+            {
+                handler.controls(self, thread_id, turn)?;
+                next_control = Instant::now() + Duration::from_millis(250);
+            }
             let wait = if turn_id.is_some() {
-                Duration::from_secs(10)
+                if handler.checks_controls() {
+                    Duration::from_millis(250)
+                } else {
+                    Duration::from_secs(10)
+                }
             } else {
                 startup_deadline.saturating_duration_since(Instant::now())
             };
@@ -293,6 +343,10 @@ impl Client {
                 None => match self.events.recv_timeout(wait) {
                     Ok(event) => event?,
                     Err(RecvTimeoutError::Timeout) if turn_id.is_some() => {
+                        if Instant::now() < history_due {
+                            continue;
+                        }
+                        history_due = Instant::now() + Duration::from_secs(10);
                         if let Ok(Some(turn)) =
                             self.find_turn(thread_id, turn_id.as_deref(), client_id)
                             && turn.status != TurnStatus::InProgress
@@ -336,6 +390,7 @@ impl Client {
                 } else {
                     handler.started(&started)?;
                     turn_id = Some(started);
+                    history_due = Instant::now() + Duration::from_secs(10);
                     before_start.append(&mut self.notifications);
                     self.notifications = std::mem::take(&mut before_start);
                 }
@@ -374,6 +429,13 @@ impl Client {
                 }
                 continue;
             };
+            if matches!(method, Some("item/started" | "item/completed"))
+                && params["turnId"] == *turn_id
+                && params["item"]["type"] == "userMessage"
+                && let Some(client_id) = params["item"]["clientId"].as_str()
+            {
+                handler.observed_user_message(client_id)?;
+            }
             match method {
                 Some("item/completed")
                     if params["turnId"] == *turn_id && params["item"]["type"] == "agentMessage" =>
