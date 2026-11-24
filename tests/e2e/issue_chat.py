@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-from chat import server, wait_for
+from chat import lose_first_response, server, wait_for
 
 TESTS = Path(__file__).resolve().parents[1]
 WEB = TESTS.parent / "web"
@@ -110,8 +110,13 @@ def main():
                     messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
                                         lambda messages: len(messages) == 2)
                     [parent] = messages[0]["issue_ids"]
+                    [parent_number] = messages[0]["issue_numbers"]
                     first = wait_message(parent, FIRST)
                     child = first["issue_id"]
+                    child_number = first["short_number"]
+                    assert 0 < parent_number < child_number
+                    assert cli("issue", "messages", str(parent_number))["short_number"] == parent_number
+                    assert cli("issue", "read", f"#{child_number}")["issue_id"] == child
                     assert child != parent and first["author"] == "worker"
                     assert first == wait_message(child, FIRST)
                     assert len([row for row in rows(parent) if row["id"] == first["id"]]) == 1
@@ -119,9 +124,9 @@ def main():
                     assert cli("issue", "read", child)["status"] == "running"
                     assert not (root / "inspection.jsonl").exists()
 
-                    command = ("issue", "message", parent, REPLY, "issue-chat-reply", "--reply-to", first["id"])
+                    command = ("issue", "message", f"#{parent_number}", REPLY, "issue-chat-reply", "--reply-to", first["id"])
                     reply = cli(*command)["message_id"]
-                    assert cli(*command)["message_id"] == reply
+                    assert cli("issue", "message", parent, *command[3:])["message_id"] == reply
                     cli("issue", "message", parent, "other text", "issue-chat-reply", error="HTTP 409")
                     cli("issue", "message", child, "unrelated quote", "--reply-to", rows(parent)[0]["id"],
                         error="HTTP 404")
@@ -129,6 +134,10 @@ def main():
                                                  "WHERE json_extract(payload, '$.message.id') = ?", reply),
                                      bool)
                     assert local == [(None,)], local
+                    assert sql(
+                        "server", "SELECT json_type(payload, '$.message.short_number') FROM issue_inputs "
+                        "WHERE json_extract(payload, '$.message.id') = ?", reply,
+                    ) == [(None,)]
                     assert wait_message(child, REPLY)["reply_to"] == first["id"]
                     (root / "finish-first").touch()
                     answer = wait_message(parent, ANSWER)
@@ -141,6 +150,7 @@ def main():
 
                     notices = cli("notification", "list", "main")["activities"]
                     child_activity = [item for item in notices if item["issue_id"] == child]
+                    assert {item["short_number"] for item in child_activity} == {child_number}
                     edges = {(item["previous"], item["current"]) for item in child_activity}
                     assert {("running", "waiting"), ("waiting", "running"),
                             ("running", "completed"), ("open", "closed")} <= edges, edges
@@ -152,7 +162,9 @@ def main():
                     assert cli("notification", "list", "main", str(int(cursor) + 1))["activities"] == notices
                     if args.web:
                         subprocess.run(["node", WEB / "tests/issue-chat.mjs"], check=True, timeout=45,
-                                       env={**env, "TEND_CHILD_ISSUE": child})
+                                       env={**env, "TEND_CHILD_ISSUE_NUMBER": str(child_number),
+                                            "TEND_PARENT_ISSUE_ID": parent,
+                                            "TEND_PARENT_ISSUE_NUMBER": str(parent_number)})
                     else:
                         rollout = cli("run", "rollout", first["run_id"])
                         assert rollout["runner_id"] == "demo-runner"
@@ -167,6 +179,10 @@ def main():
                     relayed = cli("chat", "send", "main", RELAY, "--reply-to", messages[1]["id"])["message_id"]
                     relay = wait_message(parent, RELAY)
                     assert relay["source_message_id"] == relayed and relay["kind"] == "relay"
+                    assert relay["issue_id"] == parent and relay["short_number"] == parent_number
+                    cli("chat", "send", "other", f"Verify cross-chat Issue access #{parent_number}")
+                    wait_for(lambda: cli("chat", "read", "other")["messages"],
+                             lambda rows: rows[-1]["text"] == "The Issue is outside this Chat.")
                     forwarded = wait_message(child, RELAY)
                     assert forwarded["source_message_id"] == relayed
                     assert forwarded["forwarded_from"] == relay["id"]
@@ -202,6 +218,22 @@ def main():
                     runner.wait(timeout=8)
             cli("run", "rollout", first["run_id"], error="HTTP 503")
             assert wait_message(parent, FIRST) == first
+            delegation = json.loads((root / "delegation.json").read_text())
+            assert delegation["action"]["issue_id"] == child
+            [(parent_task,)] = sql("server", "SELECT task_id FROM task_runs WHERE id = ?", delegation["run_id"])
+            mapping = sql("server", "SELECT number, issue_id FROM issue_short_numbers ORDER BY number")
+            with lose_first_response(address, drop_when=lambda _: False) as (proxy, posted):
+                subprocess.run([
+                    args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
+                    "--reconcile", parent_task,
+                ], check=True, timeout=12, env={**env, "TEND_URL": f"http://{proxy}"})
+            assert any(
+                status == 200 and {"kind": "operation", "data": delegation} in request.get("records", [])
+                and delegation["operation_id"] in reply.get("confirmed_operations", [])
+                for request, status, reply in posted
+            ), posted
+            assert cli("issue", "read", f"#{child_number}")["issue_id"] == child
+            assert sql("server", "SELECT number, issue_id FROM issue_short_numbers ORDER BY number") == mapping
     print("PASS Issue discussion with queued and late replies, Router relay, and opt-in original Runner history")
 
 

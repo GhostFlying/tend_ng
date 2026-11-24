@@ -7,10 +7,12 @@ const {
   TEND_URL: url,
   TEND_TOKEN: token,
   TEND_SCREENSHOTS: screenshots,
-  TEND_CHILD_ISSUE: child,
+  TEND_CHILD_ISSUE_NUMBER: child,
+  TEND_PARENT_ISSUE_NUMBER: parent,
+  TEND_PARENT_ISSUE_ID: parentId,
   TEND_NOTIFICATION_SCREENSHOTS: notificationScreenshots,
 } = process.env;
-assert(url && token && child);
+assert(url && token && child && parent && parentId);
 
 const first = "初稿已整理，接下来核对首次运行步骤。";
 const answer = "验证命令已补进指南。";
@@ -32,9 +34,14 @@ async function open(width, height) {
   await page.goto(url);
   await page.getByLabel("访问令牌").fill(token);
   await page.getByRole("button", { name: "连接", exact: true }).click();
-  await page.getByRole("link", { name: "查看 Issue", exact: true }).click();
+  const entry = page.getByRole("link", {
+    name: `查看 Issue #${parent}`,
+    exact: true,
+  });
+  assert.equal(await entry.getAttribute("href"), `/issues/${parent}`);
+  await entry.click();
   await page
-    .getByRole("heading", { name: "示例仓库上手指南", exact: true })
+    .getByRole("heading", { name: `#${parent} 示例仓库上手指南`, exact: true })
     .waitFor();
   await page.getByRole("paragraph").filter({ hasText: first }).waitFor();
   return page;
@@ -47,20 +54,42 @@ try {
     .filter({ has: desktop.getByRole("paragraph").filter({ hasText: first }) });
   assert.equal(
     await entry
-      .getByRole("link", { name: "整理快速上手指南" })
+      .getByRole("link", { name: `#${child} 整理快速上手指南`, exact: true })
       .getAttribute("href"),
     `/issues/${child}`,
   );
   assert.equal(await desktop.getByText(detail, { exact: true }).count(), 0);
   assert.deepEqual(reads, []);
-  await desktop
+  const answerRow = desktop
     .locator(".message")
-    .filter({ has: desktop.getByText(answer, { exact: true }) })
-    .getByRole("button", { name: "回复", exact: true })
-    .click();
+    .filter({ has: desktop.getByText(answer, { exact: true }) });
+  await answerRow.getByRole("button", { name: "回复", exact: true }).click();
   const input = desktop.getByLabel("发消息给 Issue Owner");
   const followup = "谢谢，命令适用于 macOS 吗？";
-  await input.fill(followup);
+  await desktop.getByText("回复：" + answer, { exact: true }).waitFor();
+
+  // Model a committed send whose response never cleared the UUID-keyed retry.
+  const pending = {
+    operation_id: "issue-chat-browser-pending",
+    text: followup,
+    reply_to: (await answerRow.getAttribute("id")).replace(/^message-/, ""),
+  };
+  const original = await desktop.request.post(
+    `${url}/api/v1/issues/${parentId}/messages`,
+    { headers: { Authorization: `Bearer ${token}` }, data: pending },
+  );
+  assert(original.ok());
+  await desktop.evaluate(
+    ({ id, message }) =>
+      sessionStorage.setItem(
+        `tend.pending-issue-message.v1:${id}`,
+        JSON.stringify(message),
+      ),
+    { id: parentId, message: pending },
+  );
+  await desktop.reload();
+  await input.waitFor();
+  assert.equal(await input.inputValue(), followup);
   await desktop.getByText("回复：" + answer, { exact: true }).waitFor();
   if (screenshots) {
     await mkdir(screenshots, { recursive: true });
@@ -68,7 +97,16 @@ try {
       path: join(screenshots, "issue-chat-desktop.png"),
     });
   }
-  await input.press("Enter");
+  const [retried] = await Promise.all([
+    desktop.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        response.url().endsWith("/messages"),
+    ),
+    input.press("Enter"),
+  ]);
+  assert(retried.ok());
+  assert.deepEqual(await retried.json(), await original.json());
   await desktop
     .getByText("适用于 macOS，使用终端执行即可。", { exact: true })
     .waitFor();
@@ -98,7 +136,7 @@ try {
   assert.equal(await mobile.getByText(detail, { exact: true }).count(), 0);
   await desktop.goto(url);
   await desktop
-    .getByRole("link", { name: "查看 Issue", exact: true })
+    .getByRole("link", { name: `查看 Issue #${parent}`, exact: true })
     .waitFor();
   const draft = desktop.getByLabel("发消息给 Tend");
   await draft.fill("下一步，请看下示例仓库的发布说明。");
@@ -116,7 +154,7 @@ try {
   await panel.getByText("已接续", { exact: true }).first().waitFor();
   assert.equal(
     await panel
-      .getByRole("link", { name: "整理快速上手指南" })
+      .getByRole("link", { name: `#${child} 整理快速上手指南`, exact: true })
       .first()
       .getAttribute("href"),
     `/issues/${child}`,

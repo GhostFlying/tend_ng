@@ -3,6 +3,7 @@ import {
   chatLink,
   issueOverviewLink,
   issueStageLabels,
+  issueTitle,
   pullLinkLabel,
   readIssueBoard,
 } from "./api";
@@ -89,8 +90,11 @@ function Card({ issue }: { issue: BoardIssue }) {
   return (
     <li className="board-card">
       {repositories && <div className="board-card-repos">{repositories}</div>}
-      <a className="board-card-title" href={issueOverviewLink(issue.id)}>
-        {issue.title}
+      <a
+        className="board-card-title"
+        href={issueOverviewLink(issue.id, issue.short_number)}
+      >
+        {issueTitle(issue.title, issue.short_number)}
       </a>
       {(detail || issue.attention) && (
         <div className="board-card-state">

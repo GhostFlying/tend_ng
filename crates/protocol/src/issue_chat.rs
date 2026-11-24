@@ -14,6 +14,8 @@ pub enum IssueMessageKind {
 pub struct IssueMessage {
     pub id: String,
     pub issue_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub issue_title: String,
     pub kind: IssueMessageKind,
     pub author: String,
@@ -28,6 +30,10 @@ pub struct IssueMessage {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IssueMessagePage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub title: String,
     #[serde(default)]
     pub chat_id: String,

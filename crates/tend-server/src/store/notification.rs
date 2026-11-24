@@ -36,8 +36,9 @@ pub fn migrate(db: &Connection) -> Result<()> {
 impl Store {
     pub fn notifications(&self, chat: &str, before: i64) -> Result<NotificationPage> {
         let mut query = self.db.prepare(
-            "SELECT a.seq, a.issue_id, i.title, a.task_id, a.previous, a.current, a.changed_at
+            "SELECT a.seq, a.issue_id, i.title, a.task_id, a.previous, a.current, a.changed_at, n.number
              FROM issue_activity a JOIN issues i ON i.id = a.issue_id
+             JOIN issue_short_numbers n ON n.issue_id = i.id
              WHERE a.chat_id = ?1 AND a.seq < ?2 ORDER BY a.seq DESC LIMIT ?3",
         )?;
         let mut activities = query
@@ -50,6 +51,7 @@ impl Store {
                     previous: row.get(4)?,
                     current: row.get(5)?,
                     changed_at: row.get(6)?,
+                    short_number: row.get(7)?,
                 })
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;

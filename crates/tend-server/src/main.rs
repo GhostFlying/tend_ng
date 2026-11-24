@@ -209,6 +209,26 @@ fn authenticated(request: &Request, auth: &str) -> bool {
 
 fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
+    let normalized;
+    let path = if let Some(rest) = path.strip_prefix("/api/v1/issues/") {
+        let reference = rest.split('/').next().unwrap_or_default();
+        // A number with a literal '#' is a URL fragment in clients.
+        let decoded = reference
+            .strip_prefix("%23")
+            .map(|digits| format!("#{digits}"));
+        let lookup = decoded.as_deref().unwrap_or(reference);
+        if protocol::parse_issue_number(lookup).is_some() {
+            let Some(id) = store.resolve_issue(lookup)? else {
+                return Ok(api_error(404, "Issue not found"));
+            };
+            normalized = format!("/api/v1/issues/{id}{}", &rest[reference.len()..]);
+            normalized.as_str()
+        } else {
+            path
+        }
+    } else {
+        path
+    };
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
     }

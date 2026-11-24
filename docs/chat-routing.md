@@ -58,6 +58,8 @@ Router 空闲时按这个顺序选取已到达的输入。一轮可处理多条�
 
 同一目标的细化或后续要求优先沿原 Issue 推进。Issue Agent 保留原输入，把影响实现的补充送给已有工作子 Issue，技术步骤由 Work Agent 自主安排。复用依据可以是明确引用、实际回复关系或能核实的工作上下文。一次路由结果保存原消息、实际派发内容和目标 Issue，重复请求沿原关联恢复。
 
+用户入口和 CLI 支持用 `#N` 或 `N` 查询和操作 Issue。Router 在当前 Chat 内可用编号或 UUID 读取、开始已记录的 Issue，或向其 Owner 转达消息。Server 在入口解析到原 UUID，保存原消息及 Issue 关联。
+
 例如，用户说“调查 A 的崩溃，再整理 B 的发布说明”，Router 可以分别派给两个顶层 Issue。用户在主 Chat 引用 A 的结果补一句“顺便补上这个测试”，Router 带着原话和引用转给 A 的 Issue Agent。用户进入 A 的 Issue Chat 写同一句补充时，可以直接交给 A 的 Owner。
 
 归属未定的待投递 PR / CI 事实进入 Router 的输入队列。Router 可以根据原事实和已有工作确定 Issue 关联，并决定后续行动。 [PR 和 CI 事实的采集与投递](design.md#pr-和-ci-事实的采集与投递)

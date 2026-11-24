@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { mergeMessages } from "./api";
+import { issueLink, issueOverviewLink, issueTitle, mergeMessages } from "./api";
 import type { Message } from "./api";
 
 function message(id: string): Message {
@@ -29,5 +29,21 @@ describe("chat pages", () => {
     expect(
       mergeMessages([latest], [message("first"), message("second")], true),
     ).toEqual([message("first"), latest]);
+  });
+});
+
+describe("Issue references", () => {
+  it("prefers the permanent short number for links and labels", () => {
+    expect(issueLink("original-id", 42)).toBe("/issues/42");
+    expect(issueOverviewLink("original-id", 42)).toBe("/issues/42/overview");
+    expect(issueTitle("Example", 42)).toBe("#42 Example");
+  });
+
+  it("uses the original link and title when an older response has no number", () => {
+    expect(issueLink("original-id")).toBe("/issues/original-id");
+    expect(issueOverviewLink("original-id")).toBe(
+      "/issues/original-id/overview",
+    );
+    expect(issueTitle("Example")).toBe("Example");
   });
 });

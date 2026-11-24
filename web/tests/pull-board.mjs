@@ -8,8 +8,12 @@ const {
   TEND_TOKEN: token,
   TEND_BOARD_SCREENSHOTS: screenshots,
   TEND_BOARD_SOURCE: source,
+  TEND_BOARD_PARENT: parentId,
+  TEND_BOARD_PARENT_NUMBER: parentNumber,
+  TEND_BOARD_CHILD_NUMBER: childNumber,
+  TEND_ISSUE_NUMBER_SCREENSHOTS: numberScreenshots,
 } = process.env;
-assert(url && token && source);
+assert(url && token && source && parentId && parentNumber && childNumber);
 const issueMessage = "board-issue-history-54";
 const browser = await chromium.launch({ args: ["--no-proxy-server"] });
 
@@ -25,13 +29,16 @@ async function waitForVisibleMessage(page, id) {
 
 try {
   for (const [width, height] of [
-    [1440, 960],
+    [1440, 1000],
     [390, 844],
   ]) {
     const page = await browser.newPage({ viewport: { width, height } });
     const errors = [];
     const reads = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
     page.on("request", (request) => {
       const target = new URL(request.url());
       if (target.pathname.endsWith("/messages")) reads.push(target);
@@ -41,7 +48,7 @@ try {
     await page.getByRole("button", { name: "连接", exact: true }).click();
     await page.getByRole("link", { name: "看板", exact: true }).click();
     await page.getByRole("heading", { name: "Issue 看板" }).waitFor();
-    const parent = "示例仓库上手指南";
+    const parent = `#${parentNumber} 示例仓库上手指南`;
     if (width === 390) {
       await page.getByRole("button", { name: /^已完成/ }).click();
     } else {
@@ -90,17 +97,45 @@ try {
         path: join(screenshots, `issue-board-${width}.png`),
       });
     }
-    await card.getByRole("link", { name: parent, exact: true }).click();
+    const cardLink = card.getByRole("link", { name: parent, exact: true });
+    assert.equal(
+      await cardLink.getAttribute("href"),
+      `/issues/${parentNumber}/overview`,
+    );
+    await cardLink.click();
     await page.getByRole("heading", { name: parent, exact: true }).waitFor();
     const overview = page.getByRole("main");
     await overview.getByText("已完成 · example", { exact: true }).waitFor();
-    await overview.getByRole("link", { name: "核对安装步骤" }).waitFor();
+    const child = overview.getByRole("link", {
+      name: `#${childNumber} 核对安装步骤`,
+      exact: true,
+    });
+    await child.waitFor();
+    assert.equal(
+      await child.getAttribute("href"),
+      `/issues/${childNumber}/overview`,
+    );
+    assert.equal(await page.title(), "Tend");
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+      width,
+    );
+    if (numberScreenshots) {
+      await mkdir(numberScreenshots, { recursive: true });
+      const filename =
+        width === 390
+          ? "issue-short-number-mobile-390.png"
+          : "issue-short-number-desktop-1440.png";
+      await page.evaluate(() => document.fonts.ready);
+      await page.screenshot({ path: join(numberScreenshots, filename) });
+    }
     assert.equal(
       await overview.getByRole("link", { name: "example/guide #73" }).count(),
       1,
     );
     const chat = overview.getByRole("link", { name: "进入 Issue 对话" });
     const ownerPath = await chat.getAttribute("href");
+    assert.equal(ownerPath, `/issues/${parentNumber}`);
     assert.equal(new URL(page.url()).pathname, ownerPath + "/overview");
     assert.equal(await page.getByLabel("发消息给 Issue Owner").count(), 0);
     await overview.getByRole("link", { name: "查看原消息" }).click();
@@ -114,7 +149,24 @@ try {
 
     await page.goBack();
     await chat.click();
-    await page.getByText("Issue history 159", { exact: true }).waitFor();
+    const discussionHeading = page.getByRole("heading", {
+      name: parent,
+      exact: true,
+    });
+    const lastMessage = page.getByText("Issue history 159", { exact: true });
+    await discussionHeading.waitFor();
+    await lastMessage.waitFor();
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+      width,
+    );
+    assert.equal(
+      await lastMessage
+        .locator("..")
+        .getByRole("link", { name: parent, exact: true })
+        .count(),
+      0,
+    );
     const ownerApi = `/api/v1${ownerPath}/messages`;
     assert.equal(olderReads(ownerApi).length, 0);
     assert.equal(await page.locator(`#message-${issueMessage}`).count(), 0);
@@ -130,7 +182,20 @@ try {
     await page.getByRole("button", { name: "读取更早的消息" }).click();
     await page.getByText("Issue history 0", { exact: true }).waitFor();
     assert.equal(olderReads(ownerApi).length, 3);
-    await page.getByRole("link", { name: "Issue 概览", exact: true }).click();
+    await page.goto(`${url}/issues/${parentId}#message-${issueMessage}`);
+    await discussionHeading.waitFor();
+    await waitForVisibleMessage(page, issueMessage);
+    const overviewLink = page.getByRole("link", {
+      name: "Issue 概览",
+      exact: true,
+    });
+    assert.equal(
+      await overviewLink.getAttribute("href"),
+      `${ownerPath}/overview`,
+    );
+    await page.goto(`${url}/issues/${parentId}/overview`);
+    await discussionHeading.waitFor();
+    assert.equal(await chat.getAttribute("href"), ownerPath);
     await page.getByRole("link", { name: "返回看板" }).click();
     if (width === 390) {
       await page.getByRole("button", { name: /^已取消/ }).click();

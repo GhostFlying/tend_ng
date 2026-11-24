@@ -16,8 +16,9 @@ const TREE: &str =
 
 const CARD_FIELDS: &str = "i.rowid, i.id, i.parent_issue_id, i.title, i.state,
     COALESCE(t.status, 'backlog'),
-    COALESCE(t.repo_ids, json_extract(d.request, '$.repo_ids'), '[]')";
+    COALESCE(t.repo_ids, json_extract(d.request, '$.repo_ids'), '[]'), n.number";
 const CARD_JOINS: &str = "FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
+    JOIN issue_short_numbers n ON n.issue_id = i.id
     LEFT JOIN tasks t ON t.rowid = (
         SELECT rowid FROM tasks WHERE issue_id = i.id ORDER BY rowid DESC LIMIT 1
     )
@@ -69,7 +70,7 @@ impl Store {
                      {CARD_JOINS} WHERE i.id = ?1"
                 ),
                 [id],
-                |row| Ok((read_card(row)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+                |row| Ok((read_card(row)?, row.get(8)?, row.get(9)?, row.get(10)?)),
             )
             .optional()?
         else {
@@ -79,13 +80,15 @@ impl Store {
         enrich_cards(&tx, &roots, std::slice::from_mut(&mut card), true)?;
         let children = {
             let mut query = tx.prepare(
-                "SELECT id, title FROM issues WHERE parent_issue_id = ?1 ORDER BY rowid",
+                "SELECT i.id, i.title, n.number FROM issues i JOIN issue_short_numbers n ON n.issue_id = i.id
+                 WHERE i.parent_issue_id = ?1 ORDER BY i.rowid",
             )?;
             query
                 .query_map([id], |row| {
                     Ok(IssueOverviewChild {
                         id: row.get(0)?,
                         title: row.get(1)?,
+                        short_number: row.get(2)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?
@@ -111,6 +114,7 @@ impl Store {
         let (_, card) = card;
         Ok(Some(IssueOverview {
             id: card.id,
+            short_number: card.short_number,
             title: card.title,
             stage: card.stage,
             objective,
@@ -176,6 +180,7 @@ fn read_card(row: &Row<'_>) -> rusqlite::Result<(i64, IssueCard)> {
             issue_state: row.get(4)?,
             task_state: row.get(5)?,
             repo_ids: read_list(row, 6)?,
+            short_number: row.get(7)?,
             stage: BoardStage::default(),
             running: 0,
             waiting_for: None,

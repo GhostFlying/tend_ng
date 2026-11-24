@@ -3,6 +3,8 @@ import type { FormEvent, RefObject } from "react";
 import {
   chatLink,
   download,
+  issueLink,
+  issueTitle,
   mergeMessages,
   readMessages,
   readRollout,
@@ -119,7 +121,7 @@ function MessageRow({
   source,
   showReference,
   sourceChat,
-  issue,
+  descendant,
   token,
   onReply,
 }: {
@@ -127,7 +129,7 @@ function MessageRow({
   source?: Message;
   showReference: boolean;
   sourceChat: string;
-  issue?: string;
+  descendant: boolean;
   token: string;
   onReply: (message: Message) => void;
 }) {
@@ -135,7 +137,6 @@ function MessageRow({
   const [downloading, setDownloading] = useState<string | null>(null);
   const user = message.author === "user";
   const detail = message.issue;
-  const descendant = detail && detail.issue_id !== issue;
   const pending =
     message.router_state === "queued" ||
     message.router_state === "awaiting_turn";
@@ -161,9 +162,12 @@ function MessageRow({
         <span className="author">
           {user ? "你" : (detail?.author ?? "Tend")}
         </span>
-        {descendant && (
-          <a className="issue-link" href={`/issues/${detail.issue_id}`}>
-            {detail.issue_title}
+        {descendant && detail && (
+          <a
+            className="issue-link"
+            href={issueLink(detail.issue_id, detail.short_number)}
+          >
+            {issueTitle(detail.issue_title, detail.short_number)}
           </a>
         )}
         {detail?.kind === "dispatch" && (
@@ -181,11 +185,19 @@ function MessageRow({
         </a>
       )}
       <p>{message.text}</p>
-      {message.issue_ids?.map((id, index, ids) => (
-        <a className="issue-link" key={id} href={`/issues/${id}`}>
-          查看 Issue{ids.length > 1 ? ` ${index + 1}` : ""}
-        </a>
-      ))}
+      {message.issue_ids?.map((id, index, ids) => {
+        const number = message.issue_numbers?.[index];
+        return (
+          <a className="issue-link" key={id} href={issueLink(id, number)}>
+            查看 Issue
+            {number !== undefined
+              ? ` #${number}`
+              : ids.length > 1
+                ? ` ${index + 1}`
+                : ""}
+          </a>
+        );
+      })}
       {detail?.source_message_id && (
         <a
           className="issue-link"
@@ -376,16 +388,19 @@ export function Chat({
   issue,
   chatId,
   onReachable,
-  onTitle,
+  onIssueHeader,
 }: {
   token: string;
   issue?: string;
   chatId: string;
   onReachable: (online: boolean) => void;
-  onTitle: (title: string) => void;
+  onIssueHeader: (header: { title: string; number?: number }) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [sourceChat, setSourceChat] = useState(chatId);
+  const [canonicalIssue, setCanonicalIssue] = useState<string>();
+  const issueLoaded = useRef(false);
+  const numericRoute = issue !== undefined && /^[1-9][0-9]*$/.test(issue);
   const [awaitingStart, setAwaitingStart] = useState(false);
   const [before, setBefore] = useState<number | null | undefined>(undefined);
   const [loadingHistory, setLoadingHistory] = useState(false);
@@ -483,7 +498,17 @@ export function Chat({
           cursor === undefined ? page.next_before : cursor,
         );
         setError("");
-        if (page.title) onTitle(page.title);
+        if (page.title)
+          onIssueHeader({ title: page.title, number: page.short_number });
+        if (issue && !issueLoaded.current) {
+          issueLoaded.current = true;
+          const id = page.issue_id ?? issue;
+          setCanonicalIssue(id);
+          if (id !== issue) {
+            const savedReply = savedMessage(chatId, id)?.reply_to ?? null;
+            setReplyId((current) => current ?? savedReply);
+          }
+        }
         setSourceChat(page.chat_id || chatId);
         setAwaitingStart(page.awaiting_start === true);
         onReachable(true);
@@ -502,7 +527,7 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, issue, chatId, refresh, onReachable, onTitle]);
+  }, [token, issue, chatId, refresh, onReachable, onIssueHeader]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
@@ -554,6 +579,8 @@ export function Chat({
   let lastUser: string | null = null;
   const rows = messages.map((message) => {
     const detail = message.issue;
+    const descendant =
+      !!detail && detail.issue_id !== (canonicalIssue ?? issue);
     if (detail?.kind === "run" && detail.run_id) {
       return (
         <RunRow
@@ -562,7 +589,11 @@ export function Chat({
           token={token}
           run={detail.run_id}
           author={detail.author}
-          issue={detail.issue_id === issue ? undefined : detail.issue_title}
+          issue={
+            descendant
+              ? issueTitle(detail.issue_title, detail.short_number)
+              : undefined
+          }
         />
       );
     }
@@ -576,7 +607,7 @@ export function Chat({
         source={source}
         showReference={showReference}
         sourceChat={sourceChat}
-        issue={issue}
+        descendant={descendant}
         token={token}
         onReply={(question) => {
           setReplyId(question.id);
@@ -625,10 +656,10 @@ export function Chat({
             中安排工作。
           </p>
         </footer>
-      ) : (
+      ) : !numericRoute || canonicalIssue ? (
         <Composer
           token={token}
-          issue={issue}
+          issue={canonicalIssue ?? issue}
           chatId={chatId}
           replyId={replyId}
           replyText={replyId ? byId.get(replyId)?.text : undefined}
@@ -639,7 +670,7 @@ export function Chat({
             setRefresh((number) => number + 1);
           }}
         />
-      )}
+      ) : null}
     </>
   );
 }

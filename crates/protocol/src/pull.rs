@@ -109,6 +109,8 @@ pub struct BoardAttention {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssueCard {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub parent_issue_id: Option<String>,
     pub title: String,
     pub issue_state: String,
@@ -135,6 +137,8 @@ pub struct IssueBoard {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssueOverview {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub title: String,
     pub stage: BoardStage,
     pub objective: String,
@@ -149,6 +153,8 @@ pub struct IssueOverview {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssueOverviewChild {
     pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub title: String,
 }
 

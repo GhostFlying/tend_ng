@@ -242,9 +242,13 @@ def main():
                 )
                 issue_id = dispatched[-1]["text"].split()[1]
                 issues = dispatched[-2]["issue_ids"]
+                numbers = dispatched[-2]["issue_numbers"]
+                assert len(issues) == len(numbers)
                 assert issues[0] == issue_id, dispatched[-2]
                 readback = cli(address, "read", issue_id, namespace="issue")
                 assert readback["source_message_id"] == receipt["message_id"], readback
+                assert readback["short_number"] == numbers[0]
+                assert cli(address, "read", f"#{numbers[0]}", namespace="issue") == readback
                 assert readback["status"] == "awaiting_assignment"
                 assert readback["category"] == "issue-router"
                 assert readback["repo_ids"] == ["example"]
@@ -254,6 +258,7 @@ def main():
                     remaining = cli(address, "read", issues[1], namespace="issue")
                     assert remaining["source_message_id"] == receipt["message_id"]
                     assert remaining["title"] == "Prepare release notes"
+                    assert remaining["short_number"] == numbers[1] == numbers[0] + 1
                 else:
                     assert issues == [issue_id], issues
 
@@ -279,7 +284,7 @@ def main():
             ).fetchall()
             assert [attempt[0] for attempt in attempts] == [1, 2], attempts
             assert attempts[0][1:] != attempts[1][1:], attempts
-            for table in ("issues", "tasks", "router_dispatches"):
+            for table in ("issues", "tasks", "router_dispatches", "issue_short_numbers"):
                 assert database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 3
     print("PASS durable Chat receipts, bounded retries, and idempotent Router dispatch")
 

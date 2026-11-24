@@ -1,7 +1,7 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { issueOverviewLink, readMessages } from "./api";
+import { issueOverviewLink, issueTitle, readMessages } from "./api";
 import { IssueBoard } from "./IssueBoard";
 import { IssueOverview } from "./IssueOverview";
 import { Chat } from "./Chat";
@@ -82,7 +82,10 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem(tokenKey));
   const [reachable, setReachable] = useState<boolean | null>(null);
-  const [title, setTitle] = useState("");
+  const [issueHeader, setIssueHeader] = useState<{
+    title: string;
+    number?: number;
+  }>();
 
   function connect(value: string) {
     sessionStorage.setItem(tokenKey, value);
@@ -94,6 +97,7 @@ function App() {
     sessionStorage.removeItem(tokenKey);
     setReachable(null);
     setToken(null);
+    setIssueHeader(undefined);
   }
 
   return (
@@ -166,11 +170,18 @@ function App() {
             </a>
           ) : token && issue ? (
             <div className="issue-heading">
-              <a href={issueOverviewLink(issue)} className="text-button">
+              <a
+                href={issueOverviewLink(issue, issueHeader?.number)}
+                className="text-button"
+              >
                 Issue 概览
               </a>
               <span aria-hidden="true">/</span>
-              <h1>{title || "Issue 对话"}</h1>
+              <h1>
+                {issueHeader
+                  ? issueTitle(issueHeader.title, issueHeader.number)
+                  : "Issue 对话"}
+              </h1>
             </div>
           ) : (
             <h1>
@@ -211,7 +222,7 @@ function App() {
               issue={issue}
               chatId={chatId}
               onReachable={setReachable}
-              onTitle={setTitle}
+              onIssueHeader={setIssueHeader}
             />
           )
         ) : (

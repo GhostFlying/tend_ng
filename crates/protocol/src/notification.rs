@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 pub struct IssueActivity {
     pub seq: i64,
     pub issue_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub issue_title: String,
     pub task_id: Option<String>,
     pub previous: String,

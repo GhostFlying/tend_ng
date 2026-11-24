@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { readNotifications } from "./api";
+import { issueLink, issueTitle, readNotifications } from "./api";
 import type { Activity, NotificationPage } from "./api";
 
 const labels: Record<string, string> = {
@@ -75,8 +75,8 @@ function ActivityList({ token }: { token: string }) {
             const timestamp = new Date(activity.changed_at * 1000);
             return (
               <li key={activity.seq} className="activity">
-                <a href={`/issues/${activity.issue_id}`}>
-                  {activity.issue_title}
+                <a href={issueLink(activity.issue_id, activity.short_number)}>
+                  {issueTitle(activity.issue_title, activity.short_number)}
                 </a>
                 <span>{change(activity)}</span>
                 <time dateTime={timestamp.toISOString()}>

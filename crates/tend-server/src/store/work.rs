@@ -15,9 +15,10 @@ pub(super) const DISPATCH_QUERY: &str =
             i.state,
             (SELECT run.observation FROM task_runs run
               WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1),
-            i.parent_issue_id, t.base_refs, t.requested_agent
+            i.parent_issue_id, t.base_refs, t.requested_agent, n.number
        FROM tasks t
        JOIN issues i ON i.id = t.issue_id
+       JOIN issue_short_numbers n ON n.issue_id = i.id
        LEFT JOIN router_dispatches d ON i.id = d.issue_id
        JOIN chat_messages m ON m.seq = i.source_seq
        LEFT JOIN runner_assignments a ON a.id = t.current_assignment";
@@ -75,8 +76,10 @@ pub fn migrate_backlog(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-const RECORD_QUERY: &str = "SELECT i.id, d.operation_id, m.id, m.chat_id, i.state, d.request
+const RECORD_QUERY: &str =
+    "SELECT i.id, d.operation_id, m.id, m.chat_id, i.state, d.request, n.number
        FROM router_dispatches d JOIN issues i ON i.id = d.issue_id
+       JOIN issue_short_numbers n ON n.issue_id = i.id
        JOIN chat_messages m ON m.seq = i.source_seq";
 
 impl Store {
@@ -321,6 +324,7 @@ fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedIssue> {
     })?;
     Ok(RecordedIssue {
         issue_id: row.get(0)?,
+        short_number: row.get(6)?,
         operation_id: row.get(1)?,
         source_message_id: row.get(2)?,
         chat_id: row.get(3)?,
@@ -355,6 +359,7 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
         })?;
     Ok(IssueDispatch {
         issue_id: row.get(0)?,
+        short_number: row.get(18)?,
         task_id: row.get(1)?,
         operation_id: row.get(2)?,
         source_message_id: row.get(3)?,

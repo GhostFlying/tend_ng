@@ -2,8 +2,10 @@ import { useEffect, useState } from "react";
 import {
   chatLink,
   download,
+  issueLink,
   issueOverviewLink,
   issueStageLabels,
+  issueTitle,
   pullLinkLabel,
   readIssueOverview,
 } from "./api";
@@ -132,12 +134,12 @@ export function IssueOverview({
         {!data && !error && <p role="status">正在读取 Issue 概览…</p>}
         {data && (
           <>
-            <h1>{data.title}</h1>
+            <h1>{issueTitle(data.title, data.short_number)}</h1>
             <p className="issue-overview-meta">
               {[issueStageLabels[data.stage], ...data.repo_ids].join(" · ")}
             </p>
             <nav className="issue-overview-links" aria-label="Issue 入口">
-              <a href={`/issues/${encodeURIComponent(issue)}`}>
+              <a href={issueLink(data.id, data.short_number)}>
                 进入 Issue 对话
               </a>
               <a href={chatLink(data.chat_id, data.source_message_id)}>
@@ -156,7 +158,9 @@ export function IssueOverview({
                 <ul>
                   {data.children.map((child) => (
                     <li key={child.id}>
-                      <a href={issueOverviewLink(child.id)}>{child.title}</a>
+                      <a href={issueOverviewLink(child.id, child.short_number)}>
+                        {issueTitle(child.title, child.short_number)}
+                      </a>
                     </li>
                   ))}
                 </ul>

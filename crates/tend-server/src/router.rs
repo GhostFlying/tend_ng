@@ -13,12 +13,12 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 11;
+const TOOL_REVISION: i64 = 12;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
     "When the user wants to record work for later, use tend_record_issue to save it without scheduling execution. ",
-    "When the user asks to start that scope, use tend_start_issue with its original Issue ID. ",
+    "When the user asks to start that scope, use tend_start_issue with its Issue ID or displayed short number. ",
     "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
     "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
     "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
@@ -80,7 +80,7 @@ fn relay_tool() -> Value {
     json!({
         "type": "function",
         "name": "tend_relay_issue_message",
-        "description": "Queue the current user message, with its original text and source identity, for the Owner of an existing Issue from this Chat.",
+        "description": "Queue the current user message, with its original text and source identity, for the Owner of an existing Issue from this Chat. Supply the Issue UUID or displayed short number (#N or N).",
         "inputSchema": {
             "type": "object",
             "properties": {"issue_id": {"type": "string"}},
@@ -193,7 +193,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         ),
         json!({
             "type": "function", "name": "tend_start_issue",
-            "description": "Start a recorded Issue from this Chat using its saved scope and original Issue ID.",
+            "description": "Start a recorded Issue from this Chat using its saved scope. Supply the Issue UUID or displayed short number (#N or N).",
             "inputSchema": {"type":"object","properties":{"issue_id":{"type":"string"}},
                            "required":["issue_id"],"additionalProperties":false}
         }),
@@ -202,12 +202,12 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         subscribe_tool(),
         json!({
             "type":"function", "name":"tend_list_issues",
-            "description":"List the latest Issue and PR statuses associated with this Chat.",
+            "description":"List the latest Issue and PR statuses, including each Issue short number, for this Chat.",
             "inputSchema":{"type":"object","properties":{},"additionalProperties":false}
         }),
         json!({
             "type":"function", "name":"tend_read_issue",
-            "description":"Read an Issue from this Chat, including its latest Task, actual execution, and published delivery files.",
+            "description":"Read an Issue from this Chat, including its latest Task, actual execution, and published delivery files. Supply the Issue UUID or displayed short number (#N or N).",
             "inputSchema":{"type":"object","properties":{"issue_id":{"type":"string"}},
                            "required":["issue_id"],"additionalProperties":false}
         }),
@@ -366,19 +366,21 @@ impl TurnHandler for DispatchHandler<'_> {
                         body: serde_json::to_value(page)?,
                     });
                 }
-                let Some(id) = call.arguments["issue_id"]
-                    .as_str()
-                    .filter(|id| protocol::valid_id(id))
-                else {
-                    return Ok(tool_error("Provide the original Issue ID"));
+                let reference = call.arguments["issue_id"].as_str().unwrap_or_default();
+                let Some(id) = self.store.resolve_issue(reference)? else {
+                    return Ok(tool_error(if call.tool == "tend_start_issue" {
+                        "No startable recorded Issue with that ID belongs to this Chat"
+                    } else {
+                        "That Issue is not in this Chat"
+                    }));
                 };
                 if call.tool == "tend_start_issue" {
                     return tool_receipt(
-                        self.store.start_recorded_issue(id, Some(&chat))?,
+                        self.store.start_recorded_issue(&id, Some(&chat))?,
                         "No startable recorded Issue with that ID belongs to this Chat",
                     );
                 }
-                match self.store.issue(id)? {
+                match self.store.issue(&id)? {
                     Some(issue) if issue.chat_id() == chat => Ok(ToolOutput {
                         success: true,
                         body: serde_json::to_value(issue)?,
@@ -423,14 +425,14 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_relay_issue_message" => {
-                let Some(issue) = call.arguments["issue_id"]
-                    .as_str()
-                    .filter(|id| protocol::valid_id(id))
-                else {
-                    return Ok(tool_error("A valid Issue ID is required"));
+                let reference = call.arguments["issue_id"].as_str().unwrap_or_default();
+                let Some(issue) = self.store.resolve_issue(reference)? else {
+                    return Ok(tool_error(
+                        "This user message cannot be relayed to that Issue",
+                    ));
                 };
                 Ok(
-                    match self.store.relay_to_issue(self.attempt_id, &call, issue)? {
+                    match self.store.relay_to_issue(self.attempt_id, &call, &issue)? {
                         Some(receipt) => ToolOutput {
                             success: true,
                             body: serde_json::to_value(receipt)?,

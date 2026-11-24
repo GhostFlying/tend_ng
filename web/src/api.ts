@@ -67,6 +67,7 @@ export const issueStageLabels: Record<BoardStage, string> = {
 
 export type BoardIssue = {
   id: string;
+  short_number?: number;
   parent_issue_id: string | null;
   title: string;
   issue_state: string;
@@ -83,13 +84,14 @@ export type BoardPage = { issues: BoardIssue[]; next_before: number | null };
 
 export type IssueOverviewData = {
   id: string;
+  short_number?: number;
   title: string;
   stage: BoardStage;
   objective: string;
   repo_ids: string[];
   chat_id: string;
   source_message_id: string;
-  children: { id: string; title: string }[];
+  children: { id: string; short_number?: number; title: string }[];
   pulls: PullLink[];
   artifacts: (Artifact & { issue_title?: string })[];
 };
@@ -97,6 +99,7 @@ export type IssueOverviewData = {
 export type Activity = {
   seq: number;
   issue_id: string;
+  short_number?: number;
   issue_title: string;
   previous: string;
   current: string;
@@ -117,6 +120,7 @@ export type Message = {
   router_error: string | null;
   artifacts?: Artifact[];
   issue_ids?: string[];
+  issue_numbers?: number[];
   issue?: IssueMessage;
   attention?: {
     id: string;
@@ -127,6 +131,7 @@ export type Message = {
 type IssueMessage = {
   id: string;
   issue_id: string;
+  short_number?: number;
   issue_title: string;
   kind: "user" | "agent" | "dispatch" | "relay" | "run";
   author: string;
@@ -141,6 +146,8 @@ export type Page = {
   messages: Message[];
   next_before: number | null;
   title?: string;
+  issue_id?: string;
+  short_number?: number;
   chat_id?: string;
   awaiting_start?: boolean;
 };
@@ -150,8 +157,16 @@ export function chatLink(chat: string, message?: string) {
   return message ? `${path}#message-${encodeURIComponent(message)}` : path;
 }
 
-export function issueOverviewLink(id: string) {
-  return `/issues/${encodeURIComponent(id)}/overview`;
+export function issueLink(id: string, number?: number) {
+  return `/issues/${encodeURIComponent(number ?? id)}`;
+}
+
+export function issueOverviewLink(id: string, number?: number) {
+  return `${issueLink(id, number)}/overview`;
+}
+
+export function issueTitle(title: string, number?: number) {
+  return number === undefined ? title : `#${number} ${title}`;
 }
 
 export function pullLinkLabel(pull: PullLink) {
@@ -201,6 +216,8 @@ export async function readMessages(
   if (!issue) return response.json() as Promise<Page>;
   const page: {
     title: string;
+    issue_id?: string;
+    short_number?: number;
     chat_id?: string;
     awaiting_start?: boolean;
     next_before: number | null;
@@ -208,6 +225,8 @@ export async function readMessages(
   } = await response.json();
   return {
     title: page.title,
+    issue_id: page.issue_id,
+    short_number: page.short_number,
     chat_id: page.chat_id,
     awaiting_start: page.awaiting_start,
     next_before: page.next_before,

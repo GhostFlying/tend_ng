@@ -74,7 +74,8 @@ def main():
                 assert latest["facts"]["ci"] == "success"
                 assert json.loads((root / "pull-link.json").read_text())["action"]["url"] == PULL
 
-                attached = cli("pr", "link", parent, PULL, "pr-link")
+                [parent_number] = messages[0]["issue_numbers"]
+                attached = cli("pr", "link", f"#{parent_number}", PULL, "pr-link")
                 assert attached == {"issue_id": parent, "url": PULL}
                 assert cli("pr", "link", parent, PULL + "/", "pr-link") == attached
                 cli("pr", "link", parent, DENIED, "pr-link", error="HTTP 409")
@@ -119,7 +120,8 @@ def main():
                 cli("chat", "send", "record-chat", "先记下稍后整理发布说明。")
                 [record] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"], bool)
                 assert record["stage"] == "backlog"
-                assert "task_id" not in cli("issue", "read", record["id"])
+                recorded = cli("issue", "read", f"#{record['short_number']}")
+                assert "task_id" not in recorded and recorded["issue_id"] == record["id"]
                 assert cli("issue", "messages", record["id"])["awaiting_start"]
                 assert {item["id"] for item in cli("issue", "list", "--scope=roots")["issues"]} == {
                     parent, other["id"], record["id"],
@@ -138,14 +140,20 @@ def main():
                             "VALUES (?, ?, 'agent', 'fixture', ?)",
                             ((f"board-issue-history-{i}", parent, f"Issue history {i}") for i in range(160)),
                         )
-                    browser_env = {**env, "TEND_BOARD_SOURCE": original}
+                    browser_env = {**env, "TEND_BOARD_SOURCE": original,
+                                   "TEND_BOARD_PARENT": parent,
+                                   "TEND_BOARD_PARENT_NUMBER": str(next(card["short_number"] for card in cards
+                                                                        if card["id"] == parent)),
+                                   "TEND_BOARD_CHILD_NUMBER": str(next(card["short_number"] for card in cards
+                                                                       if card["id"] == child))}
                     subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=45, env=browser_env)
                 cli("chat", "send", "record-chat", "开始刚才记下的发布说明。")
                 [started] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"],
                                      lambda rows: len(rows) == 1 and rows[0]["stage"] == "todo")
                 assert started["id"] == record["id"]
                 receipt = cli("issue", "read", record["id"])
-                assert cli("issue", "start", record["id"])["task_id"] == receipt["task_id"]
+                assert cli("issue", "start", f"#{record['short_number']}") == receipt
+                assert receipt["short_number"] == record["short_number"]
                 assert not cli("issue", "messages", record["id"])["awaiting_start"]
                 with sqlite3.connect(root / "server.sqlite") as database:
                     assert database.execute("SELECT count(*) FROM tasks WHERE issue_id = ?", [record["id"]]).fetchone() == (1,)

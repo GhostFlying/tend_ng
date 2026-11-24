@@ -12,7 +12,7 @@ const TREE: &str = "WITH RECURSIVE tree(id) AS (
     UNION ALL SELECT i.id FROM issues i JOIN tree p ON i.parent_issue_id = p.id
 )";
 const MESSAGE_COLUMNS: &str = "m.id, m.issue_id, i.title, m.kind, m.author, m.text, m.reply_to,
-     m.run_id, m.source_message_id, m.created_at, m.forwarded_from";
+     m.run_id, m.source_message_id, m.created_at, m.forwarded_from, n.number";
 
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -75,13 +75,18 @@ fn read_message(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<Issu
         source_message_id: row.get(offset + 8)?,
         created_at: row.get(offset + 9)?,
         forwarded_from: row.get(offset + 10)?,
+        short_number: row.get(offset + 11)?,
     })
 }
 
 fn message(db: &Connection, id: &str) -> Result<IssueMessage> {
     Ok(db.query_row(
-        &format!("SELECT {MESSAGE_COLUMNS} FROM issue_messages m JOIN issues i ON i.id = m.issue_id WHERE m.id = ?1"),
-        [id], |row| read_message(row, 0),
+        &format!(
+            "SELECT {MESSAGE_COLUMNS} FROM issue_messages m JOIN issues i ON i.id = m.issue_id
+                  JOIN issue_short_numbers n ON n.issue_id = i.id WHERE m.id = ?1"
+        ),
+        [id],
+        |row| read_message(row, 0),
     )?)
 }
 
@@ -184,7 +189,11 @@ fn enqueue(db: &Connection, target: &str, source_task: &str, message: &IssueMess
             child_task_id: source_task.to_owned(),
             summary: message.text.clone(),
             cause: IssueInputCause::IssueMessage {
-                message: message.clone(),
+                // Runner replay compares the persisted delivery payload for equality.
+                message: IssueMessage {
+                    short_number: None,
+                    ..message.clone()
+                },
             },
         },
     )
@@ -192,23 +201,25 @@ fn enqueue(db: &Connection, target: &str, source_task: &str, message: &IssueMess
 
 impl Store {
     pub fn issue_messages(&self, issue: &str, before: i64) -> Result<Option<IssueMessagePage>> {
-        let header: Option<(String, String, bool)> = self
+        let header = self
             .db
             .query_row(
                 "SELECT i.title, source.chat_id,
-                        EXISTS (SELECT 1 FROM router_dispatches d WHERE d.issue_id = i.id AND d.task_id IS NULL)
-                 FROM issues i JOIN chat_messages source ON source.seq = i.source_seq WHERE i.id = ?1",
+                        EXISTS (SELECT 1 FROM router_dispatches d WHERE d.issue_id = i.id AND d.task_id IS NULL), n.number
+                 FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
+                 JOIN issue_short_numbers n ON n.issue_id = i.id WHERE i.id = ?1",
                 [issue],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((title, chat_id, awaiting_start)) = header else {
+        let Some((title, chat_id, awaiting_start, short_number)) = header else {
             return Ok(None);
         };
         let mut statement = self.db.prepare(&format!(
             "{TREE}
             SELECT m.seq, {MESSAGE_COLUMNS} FROM issue_messages m
             JOIN tree ON tree.id = m.issue_id JOIN issues i ON i.id = m.issue_id
+            JOIN issue_short_numbers n ON n.issue_id = i.id
             WHERE m.seq < ?2 ORDER BY m.seq DESC LIMIT ?3"
         ))?;
         let mut page = statement
@@ -223,6 +234,8 @@ impl Store {
             None
         };
         Ok(Some(IssueMessagePage {
+            issue_id: Some(issue.to_owned()),
+            short_number,
             title,
             chat_id,
             awaiting_start,

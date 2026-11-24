@@ -65,6 +65,8 @@ pub struct Message {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub issue_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issue_numbers: Vec<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<AttentionStatus>,
@@ -99,6 +101,8 @@ pub struct DispatchIssue {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IssueDispatch {
     pub issue_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub task_id: String,
     pub operation_id: String,
     pub source_message_id: String,
@@ -122,6 +126,8 @@ pub struct IssueDispatch {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RecordedIssue {
     pub issue_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub short_number: Option<i64>,
     pub operation_id: String,
     pub source_message_id: String,
     pub chat_id: String,
@@ -166,6 +172,14 @@ pub fn artifact_upload_path(runner: &str, id: &str) -> String {
     format!("/api/v1/runners/{runner}/artifacts/{id}")
 }
 
+pub fn parse_issue_number(reference: &str) -> Option<i64> {
+    let digits = reference.strip_prefix('#').unwrap_or(reference);
+    if digits.is_empty() || digits.starts_with('0') || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse().ok()
+}
+
 pub fn valid_id(id: &str) -> bool {
     !id.is_empty()
         && id.len() <= 128
@@ -176,4 +190,36 @@ pub fn valid_id(id: &str) -> bool {
 
 pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_issue_number;
+
+    #[test]
+    fn parses_canonical_positive_issue_numbers() {
+        for reference in ["1", "#1"] {
+            assert_eq!(parse_issue_number(reference), Some(1));
+        }
+        assert_eq!(parse_issue_number("#9223372036854775807"), Some(i64::MAX));
+        for reference in [
+            "",
+            "#",
+            "0",
+            "#0",
+            "01",
+            "#01",
+            "-1",
+            "#-1",
+            "+1",
+            " 1",
+            "1 ",
+            "##1",
+            "#1a",
+            "１",
+            "9223372036854775808",
+        ] {
+            assert_eq!(parse_issue_number(reference), None, "{reference}");
+        }
+    }
 }

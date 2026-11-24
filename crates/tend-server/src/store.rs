@@ -15,6 +15,7 @@ mod reports;
 mod review;
 mod run;
 mod runner;
+mod short_numbers;
 mod timing;
 mod work;
 
@@ -64,7 +65,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 23,
+            version <= 24,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -199,7 +200,10 @@ impl Store {
         }
         if version < 23 {
             work::migrate_backlog(&tx)?;
-            tx.pragma_update(None, "user_version", 23)?;
+        }
+        if version < 24 {
+            short_numbers::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 24)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
@@ -310,6 +314,7 @@ impl Store {
                     router_state,
                     router_error: row.get(7)?,
                     issue_ids: Vec::new(),
+                    issue_numbers: Vec::new(),
                     artifacts: Vec::new(),
                     attention: None,
                 },
@@ -324,24 +329,25 @@ impl Store {
         };
         if let Some((oldest, _)) = page.last() {
             let mut statement = self.db.prepare(
-                "SELECT m.seq, i.id FROM chat_messages m
+                "SELECT m.seq, i.id, n.number FROM chat_messages m
                  JOIN issues i ON i.source_seq = m.seq
+                 JOIN issue_short_numbers n ON n.issue_id = i.id
                  WHERE m.chat_id = ?1 AND m.seq >= ?2 AND m.seq < ?3
                    AND i.parent_issue_id IS NULL
                  ORDER BY m.seq, i.rowid",
             )?;
-            let mut issues: HashMap<i64, Vec<String>> = HashMap::new();
+            let mut issues: HashMap<i64, Vec<(String, i64)>> = HashMap::new();
             for row in statement.query_map(params![chat_id, oldest, before], |row| {
-                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                Ok((row.get::<_, i64>(0)?, (row.get(1)?, row.get(2)?)))
             })? {
-                let (seq, id) = row?;
-                issues.entry(seq).or_default().push(id);
+                let (seq, issue) = row?;
+                issues.entry(seq).or_default().push(issue);
             }
             let mut files = reports::chat_artifacts(&self.db, chat_id, *oldest, before)?;
             let mut attentions = attention::on_page(&self.db, chat_id, *oldest, before)?;
             for (seq, message) in &mut page {
-                if let Some(ids) = issues.remove(seq) {
-                    message.issue_ids = ids;
+                if let Some(related) = issues.remove(seq) {
+                    (message.issue_ids, message.issue_numbers) = related.into_iter().unzip();
                 }
                 if let Some(artifacts) = files.remove(seq) {
                     message.artifacts = artifacts;
@@ -449,13 +455,18 @@ impl Store {
                     "WITH RECURSIVE thread(seq, reply_to) AS (
                          SELECT seq, reply_to FROM chat_messages WHERE id = ?1
                          UNION ALL SELECT m.seq, m.reply_to FROM chat_messages m JOIN thread t ON m.id = t.reply_to
-                     ) SELECT i.id FROM thread t JOIN issues i ON i.source_seq = t.seq
+                     ) SELECT i.id, n.number FROM thread t JOIN issues i ON i.source_seq = t.seq
+                       JOIN issue_short_numbers n ON n.issue_id = i.id
                        WHERE i.parent_issue_id IS NULL ORDER BY i.rowid",
                 )?;
-                let issues = query
-                    .query_map([&reply_to], |row| row.get::<_, String>(0))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?;
-                let payload = json!({"message_id": reply_to, "text": text, "issue_ids": issues});
+                let (issues, numbers): (Vec<_>, Vec<_>) = query
+                    .query_map([&reply_to], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<rusqlite::Result<Vec<(String, i64)>>>()?
+                    .into_iter()
+                    .unzip();
+                let payload = json!({
+                    "message_id": reply_to, "text": text, "issue_ids": issues, "issue_numbers": numbers,
+                });
                 format!("The following user message replies to this saved Chat message.\n{payload}")
             };
             input.reply_context = Some(context);

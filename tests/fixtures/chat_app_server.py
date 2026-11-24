@@ -11,6 +11,7 @@ ATTENTION_REQUEST = "请为示例仓库整理使用说明。需要我决定时�
 ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
 ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
+CROSS_CHAT_LOOKUP = "Verify cross-chat Issue access "
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
 ROUTER_SUBSCRIBE = "Subscribe to demo CI."
 cases[ROUTER_SUBSCRIBE] = {"answer": "I will follow demo CI."}
@@ -108,9 +109,8 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     replay = json.loads(sys.stdin.readline())
     assert replay["id"] == "replay-call" and replay["result"]["success"], replay
     repeated = json.loads(replay["result"]["contentItems"][0]["text"])
-    assert [repeated[key] for key in ("issue_id", "task_id", "operation_id")] == [
-        receipt[key] for key in ("issue_id", "task_id", "operation_id")
-    ], repeated
+    for key in ("issue_id", "task_id", "operation_id", "short_number"):
+        assert repeated.get(key) == receipt.get(key), repeated
     return receipt
 
 
@@ -131,7 +131,7 @@ def read_dispatch(thread_id, turn_id, token, operation_id):
     return json.loads(result["result"]["contentItems"][0]["text"])
 
 
-def decision_tool(name, args, thread, turn, token):
+def decision_tool(name, args, thread, turn, token, *, success=True):
     notify("item/started", threadId=thread, turnId=turn,
            item={"type": "userMessage", "clientId": token})
     print(json.dumps({
@@ -142,7 +142,7 @@ def decision_tool(name, args, thread, turn, token):
         },
     }), flush=True)
     result = json.loads(sys.stdin.readline())
-    assert result["id"] == name and result["result"]["success"], result
+    assert result["id"] == name and result["result"]["success"] == success, result
     return json.loads(result["result"]["contentItems"][0]["text"])
 
 
@@ -198,6 +198,8 @@ for line in sys.stdin:
                             "drop_before_start": 1}
             elif text.startswith("Storage measurement "):
                 case = {"answer": "Accepted."}
+            elif text.startswith(CROSS_CHAT_LOOKUP):
+                case = {"answer": "The Issue is outside this Chat."}
             else:
                 case = cases[text]
             with database:
@@ -275,15 +277,31 @@ for line in sys.stdin:
                 )
                 assert receipt["user_message_id"] and receipt["question_message_id"] == fact["question_message_id"]
                 answer = case["answer"]
+            elif text.startswith(CROSS_CHAT_LOOKUP):
+                reference = text.removeprefix(CROSS_CHAT_LOOKUP)
+                for tool in ("tend_read_issue", "tend_relay_issue_message"):
+                    decision_tool(tool, {"issue_id": reference}, thread_id, turn_id,
+                                  params["clientUserMessageId"], success=False)
+                answer = case["answer"]
             elif text == ISSUE_CHAT_RELAY:
                 quoted = json.loads(context.split("replies to this saved Chat message.\n", 1)[1].splitlines()[0])
                 [issue] = quoted["issue_ids"]
-                relay = {"issue_id": issue}
+                [number] = quoted["issue_numbers"]
+                board = decision_tool("tend_list_issues", {}, thread_id, turn_id,
+                                      params["clientUserMessageId"])
+                [card] = [row for row in board["issues"] if row["id"] == issue]
+                assert card["short_number"] == number
+                for reference in (f"#{number}", str(number), issue):
+                    detail = decision_tool("tend_read_issue", {"issue_id": reference}, thread_id, turn_id,
+                                           params["clientUserMessageId"])
+                    assert detail["issue_id"] == issue and detail["short_number"] == number
+                relay = {"issue_id": f"#{number}"}
                 receipt = decision_tool("tend_relay_issue_message", relay, thread_id, turn_id,
                                         params["clientUserMessageId"])
                 assert receipt == decision_tool("tend_relay_issue_message", relay, thread_id, turn_id,
                                                 params["clientUserMessageId"])
                 assert receipt["issue_id"] == issue and receipt["text"] == text
+                assert receipt["short_number"] == number
                 answer = case["answer"]
             elif case.get("dispatch"):
                 if starts == 1:
