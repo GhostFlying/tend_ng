@@ -21,3 +21,11 @@
 - Issue 业务取消与重开使用 Issue 状态及明确原因。Owner 能为指定子 Task 提交停止，旧控制沿旧 Task 结算。用固定回合验证活跃 Steer、旧 Run 未送达、停止和回执重放。
 
 CLI 可用 `tend task stop <task-id>`、`tend run steer <run-id> <text>`、`tend control read <operation-id>` 与 `tend control queue <operation-id>`。直接发出的 `tend issue cancel` 为当前树内已知 Task 登记停止控制；Owner 也可按需提交具体 Task 停止，并独立标记 Issue 业务状态。
+
+## 同机接替与升级
+
+- 前驱和后继登记相同的 Host 及同一个绝对 workspace 根。后继可配置为待命。Server 确认替换关系后，前驱禁止从本地领取新的 Run，后继可以接新 Issue。
+- 前驱继续实际已启动的 Run。某棵 Issue 树上所有活跃 Run 停妥，并且该树的原领取和回传获得确认后，前驱将该树中可接续的 Task 冻结并同步交接。Old Run 仍由原 Runner 保管。后继按原 Task、等待、委派和目录接续。
+- Server 按永久 Runner 记录保存其协议代数。升级前 CLI 提供只读预检。前驱回传收尾后报告已排空，并从 Runner 进程退出。现场验收实际退出，同时确认后继仍能同步和执行。
+
+在两个 Runner 配置相同的 `workspace_root` 和 `host_id`。后继配置 `standby: true`，并使用独立的数据库和 `runner_id`。先用 `tend runner list` 核对两个实例，再运行 `tend runner replace <predecessor-id> <successor-id>`。确认前驱进程已退出后执行 `tend runner retire <predecessor-id>`。升级 Server 前用 `tend server upgrade-check <target-protocol>` 检查仍需兼容的 Runner。

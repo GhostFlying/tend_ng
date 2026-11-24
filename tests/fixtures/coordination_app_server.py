@@ -228,7 +228,12 @@ elif role == "other-work":
     tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-other", "close-other")
 elif role == "external-resumed":
     saved = json.loads((root / "wait-registration.json").read_text())
-    assert assignment["placement"]["assignment_id"] == saved["assignment_id"]
+    if (root / "handoff-happened").exists():
+        assert assignment["placement"]["runner_id"] == "next-runner"
+        assert assignment["placement"]["assignment_id"] != saved["assignment_id"]
+        assert assignment["handoff"]["phase"] == "waiting_external"
+    else:
+        assert assignment["placement"]["assignment_id"] == saved["assignment_id"]
     assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
     inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
     assert {fact["mode"] for fact in inputs} == {"wait", "required", "optional"}, inputs

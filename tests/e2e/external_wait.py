@@ -17,12 +17,15 @@ PULL = "https://github.com/example/guide/pull/82"
 def main():
     server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:4])
     cancelling = "--cancel" in sys.argv[4:]
+    handoff = "--handoff" in sys.argv[4:]
     with tempfile.TemporaryDirectory(prefix="tend-wait-") as directory:
         root = Path(directory)
         addr = free_port()
         prepare(root, free_port(), "A fixed repository.\n")
         config = json.loads((root / "runner.json").read_text())
         config["agents"][0]["reasoning_effort"] = "low"
+        if handoff:
+            config["workspace_root"] = str(root / "runner.runs")
         (root / "runner.json").write_text(json.dumps(config))
         mode = root / "wait-mode"
         mode.write_text("pending")
@@ -52,6 +55,7 @@ def main():
                 "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py",
                 root, "external-wait",
             ], env=env)
+            successor = None
             try:
                 cli("chat", "send", "main", "Dispatch from Chat.")
                 wait_for(lambda: (root / "wait-registration.json").exists(), bool)
@@ -79,6 +83,35 @@ def main():
                 reschedule("matching")
                 assert sql("server", "SELECT count(*) FROM external_deliveries") == [(3,)]
                 assert not (root / "resumed-wait.json").exists()
+                active_db = "runner"
+                if handoff:
+                    next_config = {**config, "runner_id": "next-runner", "standby": True}
+                    next_config.pop("inspect", None)
+                    (root / "next.json").write_text(json.dumps(next_config))
+                    successor = subprocess.Popen([
+                        runner_bin, "--config", root / "next.json", "--db", root / "next.sqlite",
+                        "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py",
+                        root, "external-wait",
+                    ], env=env)
+                    visible = wait_for(lambda: cli("runner", "list"), lambda records: len(records) == 2)
+                    assert {record["profile"]["host_id"] for record in visible} == {"demo-host"}
+                    assert cli("server", "upgrade-check", "2")["allowed"]
+                    assert len(cli("server", "upgrade-check", "3")["blockers"]) == 2
+                    cli("runner", "replace", "demo-runner", "next-runner")
+                    moved = wait_for(lambda: cli("issue", "read", issue),
+                                     lambda view: view["status"] == "waiting" and
+                                     view.get("placement", {}).get("runner_id") == "next-runner")
+                    assert moved["task_id"] == task
+                    assert runner.wait(timeout=10) == 0
+                    assert cli("runner", "retire", "demo-runner")["state"] == "retired"
+                    assert [entry["runner_id"] for entry in cli("server", "upgrade-check", "3")["blockers"]] == ["next-runner"]
+                    assert sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?", task) == [("handed_off",)]
+                    assert sql("next", "SELECT execution_state, retains_workspace FROM received_assignments WHERE task_id = ?", task) == [
+                        ("waiting_external", 1)]
+                    assert not (root / "shared-ran").exists()
+                    active_db = "next"
+                    (root / "handoff-happened").touch()
+
                 if cancelling:
                     (root / "cancelled-wait").touch()
                     cli("task", "stop", task, "stop-wait")
@@ -97,13 +130,22 @@ def main():
                 wait_for(lambda: (root / "resumed-wait.json").exists(), bool)
                 ended = wait_for(lambda: cli("issue", "read", issue), lambda result: result["status"] == "completed")
                 assert ended["task_id"] == task and ended["run"]["run_id"] != waiting["run"]["run_id"]
-                assert sql("runner", "SELECT retains_workspace FROM received_assignments WHERE task_id = ?", task) == [(0,)]
+                assert sql(active_db, "SELECT retains_workspace FROM received_assignments WHERE task_id = ?", task) == [(0,)]
                 assert sql("server", "SELECT count(DISTINCT run_id) FROM issue_inputs WHERE task_id = ?", task) == [(1,)]
                 assert sql("server", "SELECT count(*) FROM issue_inputs WHERE task_id = ?", task) == [(3,)]
                 wait_for(lambda: (root / "shared-ran").exists(), bool)
+                if handoff:
+                    assert ended["placement"]["runner_id"] == "next-runner"
+                    prior_runner = sql("server", "SELECT a.runner_id FROM task_runs r JOIN runner_assignments a "
+                                       "ON a.id = r.assignment_id WHERE r.id = ?", waiting["run"]["run_id"])
+                    assert prior_runner == [("demo-runner",)]
             finally:
-                runner.terminate()
-                runner.wait(timeout=7)
+                if runner.poll() is None:
+                    runner.terminate()
+                    runner.wait(timeout=7)
+                if successor is not None:
+                    successor.terminate()
+                    successor.wait(timeout=7)
     print("PASS GitHub waits, old-head rejection, durable coalescing, and original Task resume")
 
 

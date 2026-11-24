@@ -24,7 +24,9 @@ pub fn accept(db: &Connection, control: &RunnerControl) -> Result<()> {
             |row| row.get(0),
         )
         .optional()?;
-    let Some(status) = status else { return Ok(()) };
+    let Some(status) = status.filter(|state| state != "handed_off") else {
+        return Ok(());
+    };
     if db.execute(
         "INSERT INTO local_controls(id, assignment_id, command) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
         params![control.id, control.assignment_id, serde_json::to_string(control)?],

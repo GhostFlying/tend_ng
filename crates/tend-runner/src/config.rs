@@ -17,6 +17,9 @@ pub struct Config {
     pub repos: Vec<Repo>,
     pub agents: Vec<AgentProfile>,
     pub inspect: Option<Inspection>,
+    pub workspace_root: Option<PathBuf>,
+    #[serde(default)]
+    pub standby: bool,
 }
 
 #[derive(Deserialize)]
@@ -41,6 +44,11 @@ impl Config {
         let root = path
             .parent()
             .context("Runner configuration has no directory")?;
+        if let Some(workspace) = &mut config.workspace_root {
+            let path = root.join(&*workspace);
+            std::fs::create_dir_all(&path)?;
+            *workspace = path.canonicalize()?;
+        }
         let mut repos = HashSet::new();
         for repo in &mut config.repos {
             ensure!(
@@ -83,6 +91,12 @@ impl Config {
             running_slots: 0,
             available_for_assignment: self.slot_limit.saturating_sub(unfinished),
             inspect_url: self.inspect.as_ref().map(|inspect| inspect.url.clone()),
+            workspace_root: self
+                .workspace_root
+                .as_ref()
+                .and_then(|path| path.to_str())
+                .map(str::to_owned),
+            standby: self.standby,
         }
     }
 

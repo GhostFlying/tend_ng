@@ -97,7 +97,10 @@ fn main() -> Result<()> {
         Arc::clone(&server),
     );
     let runtime = execution::Runtime {
-        root: db_path.with_extension("runs"),
+        root: config
+            .workspace_root
+            .clone()
+            .unwrap_or_else(|| db_path.with_extension("runs")),
         artifacts: db_path.with_extension("artifacts"),
         program,
         args: app_args,
@@ -119,8 +122,13 @@ fn main() -> Result<()> {
 
     let mut reconnecting = true;
     loop {
+        let was_drained = store.drain_finished()?;
         match sync(&config, &mut store, &server) {
             Ok(files) => {
+                if files.is_empty() && was_drained && store.drain_finished()? {
+                    eprintln!("Runner {} drained and acknowledged", config.runner_id);
+                    return Ok(());
+                }
                 if reconnecting && reconciliation.try_send(()).is_ok() {
                     reconnecting = false;
                 }
@@ -144,6 +152,7 @@ fn main() -> Result<()> {
 }
 
 fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<Vec<String>> {
+    store.prepare_handoffs()?;
     server.exchange(
         config,
         store,
@@ -178,6 +187,7 @@ impl Server {
             .min(profile.slot_limit.saturating_sub(running));
         let request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
+            drained: store.drain_finished()?,
             profile,
             receipts,
             runs: Vec::new(),

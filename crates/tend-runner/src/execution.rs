@@ -46,7 +46,12 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
                     }
                 }
             }
-            for _ in active.len()..config.slot_limit as usize {
+            let limit = if store.is_draining()? {
+                0
+            } else {
+                config.slot_limit as usize
+            };
+            for _ in active.len()..limit {
                 let Some(run) = store.next_queued_run()? else {
                     break;
                 };

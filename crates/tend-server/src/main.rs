@@ -177,6 +177,58 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
     }
+    if path == "/api/v1/runners" && request.method() == &Method::Get {
+        return Ok((200, serde_json::to_value(store.runner_instances()?)?));
+    }
+    if let Some(version) = path
+        .strip_prefix("/api/v1/upgrade-check/")
+        .and_then(|version| version.parse::<u32>().ok())
+        .filter(|version| *version > 0)
+        && request.method() == &Method::Get
+    {
+        let blockers = store.upgrade_blockers(version)?;
+        return Ok((
+            200,
+            json!({"target_protocol":version,"allowed":blockers.is_empty(),"blockers":blockers}),
+        ));
+    }
+    if let Some((runner, operation)) = path
+        .strip_prefix("/api/v1/runners/")
+        .and_then(|path| path.split_once('/'))
+        .filter(|(id, operation)| {
+            protocol::valid_id(id) && matches!(*operation, "replace" | "retire")
+        })
+    {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let runner = runner.to_owned();
+        if operation == "retire" {
+            return Ok(if store.retire_runner(&runner)? {
+                (200, json!({"runner_id": runner, "state": "retired"}))
+            } else {
+                api_error(409, "Runner has no acknowledged drain")
+            });
+        }
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let Ok(replacement) = serde_json::from_slice::<protocol::ReplaceRunner>(&bytes) else {
+            return Ok(api_error(400, "expected successor Runner ID"));
+        };
+        if !protocol::valid_id(&replacement.successor) {
+            return Ok(api_error(400, "valid successor Runner ID required"));
+        }
+        return Ok(
+            match store.replace_runner(&runner, &replacement.successor)? {
+                Some(receipt) => (200, receipt),
+                None => api_error(
+                    409,
+                    "replacement requires two live Runners on the same Host with the same workspace root",
+                ),
+            },
+        );
+    }
     if let Some(rest) = path.strip_prefix("/api/v1/controls/") {
         if let Some(id) = rest
             .strip_suffix("/queue")
@@ -546,7 +598,10 @@ fn handle_runner_sync(
     let Ok(sync) = serde_json::from_slice::<RunnerSync>(&bytes) else {
         return Ok(api_error(400, "invalid Runner sync"));
     };
-    if sync.protocol != RUNNER_PROTOCOL {
+    if sync.protocol == 0
+        || sync.protocol > RUNNER_PROTOCOL
+        || sync.protocol < RUNNER_PROTOCOL.saturating_sub(1)
+    {
         return Ok(api_error(426, "unsupported Runner protocol"));
     }
     if sync.profile.runner_id != runner_id

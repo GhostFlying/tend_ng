@@ -49,6 +49,9 @@ fn available_runners(db: &Connection) -> Result<Vec<AvailableRunner>> {
     let mut statement = db.prepare(
         "SELECT r.profile, r.last_seen FROM runners r
          WHERE r.last_seen > unixepoch() - ?1
+           AND NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
+           AND (coalesce(json_extract(r.profile, '$.standby'), 0) = 0 OR
+                EXISTS(SELECT 1 FROM runner_replacements p WHERE p.successor = r.id))
            AND json_extract(r.profile, '$.available_for_assignment') > (
                 SELECT COUNT(*) FROM runner_assignments a
                 WHERE a.runner_id = r.id AND a.state IN ('reserved', 'issued')
@@ -72,17 +75,36 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
-    let (pinned, named, previous, workspace_key): (Option<String>, Option<String>, Option<String>, Option<String>) = db
-        .query_row(
-            "SELECT pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key FROM tasks WHERE id = ?1",
-            [&dispatch.task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
+    let (pinned, named, previous, workspace_key, continuation) = db.query_row(
+        "SELECT coalesce(h.runner_id, t.pinned_runner_id), t.pinned_agent_id, t.previous_task_id, t.workspace_key, t.handoff
+         FROM tasks t JOIN issues i ON i.id = t.issue_id
+         LEFT JOIN handoff_roots h ON h.root_id = coalesce(i.parent_issue_id, i.id)
+         WHERE t.id = ?1",
+        [&dispatch.task_id],
+        |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
+                  row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)),
+    )?;
     for available in available_runners(db)? {
         let profile = available.profile;
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
         }
+        if db.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM tasks candidate JOIN issues c ON c.id = candidate.issue_id
+               JOIN handoff_roots h ON h.root_id = coalesce(c.parent_issue_id, c.id)
+               JOIN issues i ON i.parent_issue_id = c.parent_issue_id
+               JOIN tasks holder ON holder.issue_id = i.id AND holder.id != candidate.id
+               LEFT JOIN runner_assignments a ON a.id = holder.current_assignment
+               WHERE candidate.id = ?1
+                 AND coalesce(holder.workspace_key, i.parent_issue_id) = coalesce(candidate.workspace_key, c.parent_issue_id)
+                 AND holder.status NOT IN ('completed','failed','cancelled')
+                 AND (a.runner_id IS NULL OR a.runner_id != ?2 OR a.state != 'accepted')
+                 AND (SELECT json_extract(r.observation, '$.phase.waiting_for_external')
+                      FROM task_runs r WHERE r.task_id = holder.id ORDER BY r.rowid DESC LIMIT 1) = 1
+            )",
+            params![dispatch.task_id, profile.runner_id], |row| row.get::<_, bool>(0),
+        )? { continue; }
         let Some(agent) = protocol::matching_task_agent(
             &profile,
             &dispatch.category,
@@ -106,6 +128,10 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
             chat_id: dispatch.chat_id,
             parent_issue_id: dispatch.parent_issue_id,
             workspace_key,
+            handoff: continuation
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             followup: previous.map(|previous_task_id| CoordinationFollowup {
                 previous_task_id,
                 issue_state: dispatch.issue_state,
@@ -129,6 +155,10 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
             "UPDATE tasks SET current_assignment = ?1, status = 'reserved' WHERE id = ?2",
             params![assignment.placement.assignment_id, assignment.task_id],
         )?;
+        db.execute(
+            "UPDATE task_controls SET assignment_id = ?2 WHERE task_id = ?1 AND state = 'pending' AND run_id IS NULL",
+            params![assignment.task_id, assignment.placement.assignment_id],
+        )?;
         break;
     }
     Ok(())
@@ -148,6 +178,7 @@ impl Store {
             RunnerRecord::Run(run) => &run.assignment_id,
             RunnerRecord::Operation(op) => &op.assignment_id,
             RunnerRecord::Control(ack) => &ack.assignment_id,
+            RunnerRecord::Handoff(proof) => &proof.assignment_id,
         });
         Ok(!registered.is_empty()
             && request
@@ -180,9 +211,10 @@ impl Store {
         }
         let pending = {
             let mut statement = self.db.prepare(
-                "SELECT rowid, id, pinned_runner_id, pinned_agent_id
-                 FROM tasks WHERE status = 'awaiting_assignment' AND rowid > ?1
-                 ORDER BY rowid LIMIT ?2",
+                "SELECT t.rowid, t.id, coalesce(h.runner_id, t.pinned_runner_id), t.pinned_agent_id
+                 FROM tasks t JOIN issues i ON i.id = t.issue_id LEFT JOIN handoff_roots h ON h.root_id = coalesce(i.parent_issue_id, i.id)
+                 WHERE t.status = 'awaiting_assignment' AND t.rowid > ?1
+                 ORDER BY t.rowid LIMIT ?2",
             )?;
             statement
                 .query_map(params![*after, PAGE_SIZE], |row| {
@@ -265,6 +297,7 @@ impl Store {
             && request.receipts.is_empty()
             && request.runs.is_empty()
             && request.records.is_empty()
+            && !request.drained
         {
             return Ok(Some(RunnerSyncReply {
                 assignments: if task.is_none() {
@@ -277,6 +310,7 @@ impl Store {
                 confirmed_operations: Vec::new(),
                 inputs: coordination::pending_inputs(&self.db, &profile.runner_id, task)?,
                 controls: super::control::pending(&self.db, &profile.runner_id, task)?,
+                drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
                 uploads: super::artifacts::pending(&self.db, &profile.runner_id, task)?,
             }));
         }
@@ -286,10 +320,10 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if refresh {
             tx.execute(
-                "INSERT INTO runners (id, host_id, profile, last_seen)
-                 VALUES (?1, ?2, ?3, unixepoch()) ON CONFLICT(id) DO UPDATE SET
-                   profile = excluded.profile, last_seen = excluded.last_seen",
-                params![profile.runner_id, profile.host_id, profile_json],
+                "INSERT INTO runners (id, host_id, profile, last_seen, protocol)
+                 VALUES (?1, ?2, ?3, unixepoch(), ?4) ON CONFLICT(id) DO UPDATE SET
+                   profile = excluded.profile, last_seen = excluded.last_seen, protocol = excluded.protocol",
+                params![profile.runner_id, profile.host_id, profile_json, request.protocol],
             )?;
         }
         let mut confirmed_receipts = Vec::new();
@@ -305,7 +339,12 @@ impl Store {
             let decision = serde_json::to_string(&receipt.decision)?;
             if state == "issued" {
                 let (state, status) = match receipt.decision {
-                    ClaimDecision::Accepted => ("accepted", "accepted"),
+                    ClaimDecision::Accepted => {
+                        let waiting = tx.query_row(
+                            "SELECT coalesce(json_extract(contract, '$.handoff.phase') IN ('waiting','waiting_external'), 0)
+                             FROM runner_assignments WHERE id = ?1", [&receipt.assignment_id], |row| row.get::<_, bool>(0))?;
+                        ("accepted", if waiting { "waiting" } else { "accepted" })
+                    }
                     ClaimDecision::Rejected { .. } => {
                         let cancelled = tx.query_row(
                             "SELECT EXISTS(SELECT 1 FROM task_controls WHERE assignment_id = ?1 AND state = 'pending'
@@ -327,7 +366,7 @@ impl Store {
                 )?;
                 ensure!(tx.execute(
                     "UPDATE tasks SET status = ?2,
-                            current_assignment = CASE WHEN ?2 = 'accepted' THEN current_assignment END
+                            current_assignment = CASE WHEN ?2 IN ('accepted','waiting') THEN current_assignment END
                      WHERE id = ?1 AND current_assignment = ?3",
                     params![task, status, receipt.assignment_id],
                 )? == 1, "delivered assignment changed before receipt");
@@ -351,6 +390,12 @@ impl Store {
                         return Ok(None);
                     }
                     confirmed_runs.push(observation.event_id);
+                }
+                RunnerRecord::Handoff(proof) => {
+                    if !super::handoff::apply(&tx, &profile.runner_id, &proof)? {
+                        return Ok(None);
+                    }
+                    confirmed_operations.push(proof.id);
                 }
                 RunnerRecord::Control(ack) => {
                     if !super::control::acknowledge(&tx, &profile.runner_id, &ack)? {
@@ -387,6 +432,10 @@ impl Store {
         let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task)?;
         let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
         let controls = super::control::pending(&tx, &profile.runner_id, task)?;
+        let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;
+        if request.drained {
+            super::handoff::note_drained(&tx, &profile.runner_id)?;
+        }
         tx.commit()?;
         Ok(Some(RunnerSyncReply {
             assignments,
@@ -395,6 +444,7 @@ impl Store {
             confirmed_operations,
             inputs,
             controls,
+            drain_to,
             uploads,
         }))
     }

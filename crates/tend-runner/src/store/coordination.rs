@@ -36,7 +36,7 @@ impl Store {
             return Ok(None);
         }
         let mut statement = self.0.prepare(
-            "SELECT operation FROM local_work_operations
+            "SELECT operation FROM local_task_intents
              WHERE (assignment_id = ?1 OR assignment_id IN (
                 SELECT id FROM received_assignments WHERE task_id = ?2
              )) AND json_extract(operation, '$.action.kind') = 'delegate'
@@ -129,7 +129,7 @@ impl Store {
                      AND json_extract(i.payload, '$.message.kind') IN ('user', 'relay')
                      AND json_extract(a.contract, '$.issue_id') = ?3
                 ) AND EXISTS(
-                   SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                   SELECT 1 FROM local_task_intents o JOIN received_assignments a ON a.id = o.assignment_id
                    WHERE json_extract(o.operation, '$.action.kind') = 'delegate'
                      AND json_extract(o.operation, '$.action.issue_id') = ?2
                      AND json_extract(a.contract, '$.issue_id') = ?3
@@ -152,7 +152,7 @@ impl Store {
                    SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
                    WHERE json_extract(i.payload, '$.message.id') = ?1 AND json_extract(a.contract, '$.issue_id') = ?2
                    UNION ALL
-                   SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                   SELECT 1 FROM local_task_intents o JOIN received_assignments a ON a.id = o.assignment_id
                    WHERE o.id = ?1 AND json_extract(o.operation, '$.action.kind') = 'post_issue_message'
                      AND json_extract(a.contract, '$.issue_id') = ?2
                 )", params![reply, run.assignment.issue_id], |row| row.get(0),
@@ -280,7 +280,7 @@ pub(super) fn has_unread_input(db: &Connection, assignment: &str) -> Result<bool
 
 pub(super) fn waiting_for_attention(db: &Connection, assignment: &str) -> Result<bool> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM local_work_operations o
+        "SELECT EXISTS(SELECT 1 FROM local_task_intents o
          WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'ask_attention'
            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i
                 WHERE i.assignment_id = o.assignment_id AND i.run_id IS NOT NULL
@@ -302,7 +302,7 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
         return Ok(false);
     }
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM local_work_operations o
+        "SELECT EXISTS(SELECT 1 FROM local_task_intents o
          WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'delegate'
            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = o.assignment_id
                AND i.child_issue_id = json_extract(o.operation, '$.action.issue_id')
@@ -314,11 +314,11 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
 
 pub(super) fn waiting_for_external(db: &Connection, assignment: &str) -> Result<bool> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM local_work_operations o
+        "SELECT EXISTS(SELECT 1 FROM local_task_intents o
           WHERE o.assignment_id = ?1 AND o.rowid > coalesce((
-             SELECT MAX(c.rowid) FROM local_work_operations c WHERE c.assignment_id = ?1
+             SELECT MAX(c.rowid) FROM local_task_intents c WHERE c.assignment_id = ?1
                AND json_extract(c.operation, '$.action.kind') IN ('clear_external_waits','close_issue')
-          ), 0) AND json_extract(o.operation, '$.action.kind') = 'watch_external'
+          ), -2000000000) AND json_extract(o.operation, '$.action.kind') = 'watch_external'
             AND json_extract(o.operation, '$.action.mode') = 'wait'
             AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
                 AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'external_fact'

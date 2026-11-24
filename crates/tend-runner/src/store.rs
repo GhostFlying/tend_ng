@@ -1,5 +1,6 @@
 mod control;
 mod coordination;
+mod handoff;
 mod reconcile;
 pub mod run;
 
@@ -97,6 +98,7 @@ impl Store {
             && reply.confirmed_operations.is_empty()
             && reply.inputs.is_empty()
             && reply.controls.is_empty()
+            && reply.drain_to.is_none()
         {
             return Ok(());
         }
@@ -104,6 +106,9 @@ impl Store {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(target) = &reply.drain_to {
+            handoff::accept_drain(&tx, target)?;
+        }
         for acknowledged in reply.confirmed_receipts {
             tx.execute(
                 "UPDATE received_assignments SET acknowledged = 1 WHERE id = ?1",
@@ -145,19 +150,24 @@ impl Store {
 
             let decision = config.decide(&assignment, &profile);
             let (repositories, state) = if decision == ClaimDecision::Accepted {
-                (config.repositories_for(&assignment)?, "queued")
+                let state = match assignment.handoff.as_ref().map(|context| &context.phase) {
+                    Some(protocol::HandoffPhase::Waiting) => "waiting",
+                    Some(protocol::HandoffPhase::WaitingExternal) => "waiting_external",
+                    _ => "queued",
+                };
+                (config.repositories_for(&assignment)?, state)
             } else {
                 ("[]".to_owned(), "rejected")
             };
             tx.execute(
-                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision, execution_state)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO received_assignments (id, task_id, contract, repositories, decision, execution_state, retains_workspace)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     id,
                     assignment.task_id,
                     contract,
                     repositories,
-                    serde_json::to_string(&decision)?, state
+                    serde_json::to_string(&decision)?, state, state == "waiting_external"
                 ],
             )?;
         }

@@ -6,10 +6,13 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
-    let args: Vec<_> = env::args().skip(1).collect();
+    let mut args: Vec<_> = env::args().skip(1).collect();
+    if args == ["runner", "list"] {
+        args.push("all".to_owned());
+    }
     if args.is_empty() || args == ["--help"] {
         println!("{USAGE}");
         return Ok(());
@@ -28,6 +31,9 @@ fn main() -> Result<()> {
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
+        ("runner", "list") => "/api/v1/runners".to_owned(),
+        ("runner", "replace" | "retire") => format!("/api/v1/runners/{id}/{command}"),
+        ("server", "upgrade-check") => format!("/api/v1/upgrade-check/{id}"),
         ("task", "stop") => format!("/api/v1/tasks/{id}/stop"),
         ("run", "steer") => format!("/api/v1/runs/{id}/steer"),
         ("control", "read") => format!("/api/v1/controls/{id}"),
@@ -89,6 +95,24 @@ fn main() -> Result<()> {
                 _ => serde_json::to_string(&response.into_json::<MessagePage>()?)?,
             };
             println!("{page}");
+        }
+        ("runner", "list", []) | ("server", "upgrade-check", []) => {
+            let response = checked(http.get(&path).set("Authorization", &auth).call())?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
+        }
+        ("runner", "replace", [successor]) => {
+            ensure!(protocol::valid_id(successor), "invalid successor Runner ID");
+            let response = send(
+                &http,
+                &path,
+                &auth,
+                &serde_json::json!({"successor":successor}),
+            )?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
+        }
+        ("runner", "retire", []) => {
+            let response = send(&http, &path, &auth, &serde_json::Value::Null)?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }
         ("task", "stop", [] | [_]) => {
             let id = rest.first().cloned().unwrap_or_else(protocol::new_id);

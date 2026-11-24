@@ -32,6 +32,10 @@ pub struct RunnerProfile {
     pub available_for_assignment: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inspect_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_root: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub standby: bool,
 }
 
 impl RunnerProfile {
@@ -68,6 +72,8 @@ pub struct TaskAssignment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<crate::HandoffContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup: Option<CoordinationFollowup>,
     pub work: DispatchIssue,
 }
@@ -94,6 +100,8 @@ pub struct ClaimReceipt {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSync {
     pub protocol: u32,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub drained: bool,
     pub profile: RunnerProfile,
     pub receipts: Vec<ClaimReceipt>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -114,6 +122,8 @@ pub struct RunnerSyncReply {
     pub inputs: Vec<IssueDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub controls: Vec<crate::RunnerControl>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_to: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uploads: Vec<String>,
 }
@@ -124,6 +134,7 @@ pub enum RunnerRecord {
     Run(RunObservation),
     Operation(WorkOperation),
     Control(crate::ControlAck),
+    Handoff(crate::HandoffProof),
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]

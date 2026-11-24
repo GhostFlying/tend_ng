@@ -21,7 +21,7 @@ pub struct LocalRun {
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 3,
+        version <= 4,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -30,6 +30,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 3 {
             super::control::migrate(db)?;
+        }
+        if version < 4 {
+            super::handoff::migrate(db)?;
         }
         return Ok(());
     }
@@ -87,6 +90,7 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     coordination::create_tables(db)?;
     migrate_waits(db)?;
     super::control::migrate(db)?;
+    super::handoff::migrate(db)?;
     Ok(())
 }
 
@@ -140,7 +144,8 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let acquired = tx.execute(
             "UPDATE received_assignments SET execution_state = 'active'
-              WHERE id = ?1 AND execution_state = 'queued'",
+              WHERE id = ?1 AND execution_state = 'queued'
+                AND NOT EXISTS(SELECT 1 FROM local_drain)",
             [&assignment_id],
         )?;
         if acquired == 0 {
@@ -353,6 +358,8 @@ impl Store {
 pub(super) fn decode_record(payload: &str, kind: &str) -> Result<RunnerRecord> {
     if kind == "run" {
         Ok(RunnerRecord::Run(serde_json::from_str(payload)?))
+    } else if kind == "handoff" {
+        Ok(RunnerRecord::Handoff(serde_json::from_str(payload)?))
     } else if kind == "control" {
         Ok(RunnerRecord::Control(serde_json::from_str(payload)?))
     } else {
