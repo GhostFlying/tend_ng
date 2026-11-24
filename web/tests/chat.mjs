@@ -89,9 +89,22 @@ try {
       await page.reload();
       const attachment = page.getByRole("button", { name: "下载 guide.txt" });
       await attachment.waitFor();
+      assert.equal(await attachment.count(), 1);
       const reference = page.getByRole("link", { name: request });
-      assert.equal(await reference.count(), 1);
-      assert.match((await reference.getAttribute("href")) ?? "", /^#message-/);
+      assert.equal(await reference.count(), mode === "read-repeat" ? 2 : 1);
+      for (const link of await reference.all()) {
+        assert.match((await link.getAttribute("href")) ?? "", /^#message-/);
+      }
+      if (mode === "read-repeat") {
+        assert.equal(
+          await page
+            .getByText("I also verified the repository command.", {
+              exact: true,
+            })
+            .count(),
+          1,
+        );
+      }
       assert.equal(await page.getByText(answer, { exact: true }).count(), 1);
       assert.equal(
         await page.evaluate(() => document.documentElement.scrollWidth),

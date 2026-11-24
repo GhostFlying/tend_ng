@@ -221,7 +221,7 @@ def main():
                          lambda rows: not rows)
             assert cli("artifact", "download", file_id).stdout == CONTENTS
             if args.web:
-                print(browser("read").strip())
+                print(browser("read-repeat" if args.repeat_report else "read").strip())
         with server(args.server, recovered, env, listen=address):
             assert read("issue", "read", child)["status"] == "running"
 
