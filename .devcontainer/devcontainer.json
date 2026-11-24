@@ -1,0 +1,4 @@
+{
+  "name": "Tend NG",
+  "build": { "dockerfile": "Dockerfile" }
+}

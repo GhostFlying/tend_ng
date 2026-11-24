@@ -1,0 +1,7 @@
+{
+  "Hello, Tend.": {"answer": "Hello from the Router."},
+  "Recover this reply.": {"answer": "This is the original reply.", "drop_start_response": true},
+  "Hold this turn.": {"answer": "The held turn finished.", "wait": true},
+  "Another chat.": {"answer": "The other chat can continue."},
+  "Next input.": {"answer": "The next input was consumed."}
+}
