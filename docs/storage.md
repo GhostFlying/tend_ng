@@ -1,0 +1,59 @@
+# 数据库存储与访问边界
+
+**已确认。** Server 数据库直接保存 Chat 与 Issue 讨论的完整消息，包括 Agent 留言，以及 Issue 当前状态。交付文件的完整原件同步到 Server 的文件存储。Codex rollout 等原生执行原件留在执行实例，Router 原件从 Server 本机读取，工作 Run 原件从原 Runner 读取。Issue 及其关联记录是工作事实来源。一次业务变化与可查的原操作结果和必需待投递记录在所属实例的同一短事务提交。
+
+数据归属遵循任务、工作区和回执契约。具体表结构随各模块实现确定。
+
+## 旧 Tend 的实际故障
+
+- **写入排队。** #393 的负责人事件已处理，ACK 等 SQLite 写连接 5.011 秒，事务还未开始。该 ACK 曾影响活跃执行和事件重放。另一组慢写样本中，245 次至少一秒的操作合计耗时 339.04 秒，315.40 秒在等待共享写连接。合计包含并发重叠。旧 Tend 已有独立原件目录，业务回执和其他写入仍在争用同一写连接。 [原事件 ACK 修复](https://github.com/GhostFlying/tend/pull/393) · [短断线复盘](https://github.com/GhostFlying/tend/pull/399) · [共享写连接样本](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/shared-writer-contention.md#L1-L21)
+- **读取历史放大。** #257 的用量 GET 先扫描历史请求、解码和重算，再应用查询窗口。一次隔离快照对照从约 2,576 条 SQL、441 毫秒降到约 10 条、105 毫秒。看板上的 handoff 查询也曾将同一工作的历史自连接，再用 `DISTINCT` 去重。两个案例分别涉及计算放在读取路径和历史关联规模。 [用量读路径修复](https://github.com/GhostFlying/tend/pull/257) · [看板历史自连接](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/manager-delivery-query-latency.md#L5-L15)
+- **原件故障传播。** #306 之前，rollout 路径别名被拒绝会挡住负责人工具和完成事件。#306 将事件持久化与归档分开，#307 从真实业务入口验证故障隔离。 [归档与事件隔离](https://github.com/GhostFlying/tend/pull/306) · [主链回归](https://github.com/GhostFlying/tend/pull/307)
+
+## 建议保存范围
+
+| 位置 | 保存内容 | 用途 |
+| --- | --- | --- |
+| **Server DB** | Chat 和 Issue 讨论的完整消息及引用，Router 的待处理输入与原生回合引用，交付文件引用和可用状态，原生记录的执行归属与引用，Host 与 Runner 登记和对应关系，Issue 当前责任和状态、顶层 Issue 的 Runner 归属、重要流转与用户决定，Attention，任务派发、输入和控制待投递记录，PR / CI 事实及证据引用、Issue 关联、外部订阅与命中记录，业务操作和同步回执。 | 读取工作现状，恢复原消息和派发，查明原操作结果。看板和通知直接读取相关当前字段和流转记录。 |
+| **Runner DB** | 已领取任务和续作所需的输入快照，workspace 归属及独占该目录的 Task，执行和实际停妥证据，待处理输入，原生工具调用的本地操作及结果，交付原件引用，待同步记录和确认位置。 | 独立开工、重启恢复和全量对账。清理已确认的待传记录后，仍能从保存的原事实对账。 |
+| **Server 文件存储** | 已从 Runner 同步的交付文件原件。 | 通过文件引用下载，Runner 离线时仍可读。 |
+| **Server 本机原生存储** | Router 的 Codex session、rollout 和其他原生记录。 | 本机执行与恢复，执行详情按需读取。 |
+| **Runner 交付文件存储** | 提交时固定并保存在托管 workspace 之外的交付文件原件。首期同步完成后继续保留。 | 全量对账按原文件身份补回 Server 缺失的原件。 |
+| **Runner 文件及原生存储** | Codex session 和 rollout、原生工具记录、长命令输出、诊断原件和 workspace 文件。 | 本地推进与恢复。详情按原 Runner 和 Run 实时读取原件。 |
+| **内存或运行日志** | 页面刷新信号、无变化的轮询、连接细节、SQL 计时与其他临时信号。 | 支持刷新和诊断。需要长期查询的联系信息可以合并保存最近一次观察。 |
+
+首期普通读写围绕关系表中的当前状态和必要历史。Chat 与 Issue 可以分别引用同一条消息或结果。通知从持久的状态变化读取。原生记录支撑执行查证，Agent 借助保存在 Issue 上的交接信息继续工作。
+
+## 写入与故障边界
+
+一次业务变化所更新的当前状态、原操作结果和必需的后续待投递记录写入所属实例的同一个短事务。
+
+| 入口 | 一次本地提交 | 提交后的回执 |
+| --- | --- | --- |
+| **Server 收到主 Chat** | 完整消息及 Router 的待处理输入。 | Chat 显示已收到，Router 随后读取待处理输入。 |
+| **Runner 受理 Agent 工具调用** | 原生调用与原操作的关联、原操作与其待同步记录。 | 工具返回操作 ID，Runner 继续当前工作。 |
+| **Server 应用本机 Router 派发** | 原消息与目标 Issue 的关联、目标 Issue 的待领取任务、原操作结果。 | 工具可以按原操作 ID 读取已提交结果。 |
+
+Runner 本地受理与 Server 应用分别提交。持久收到事实与实际应用操作的状态各有回执。网络回执从已经提交的记录生成。若派发事务已提交而响应丢失，重传同一操作可以读回原 Issue 和任务，始终对应一次实际派发。 [旧 Tend 独立 ACK 写入复盘](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/manager-run-timeout-recovery.md#L1-L8)
+
+批量回传有界提交，单次写事务只处理本次受影响的记录。访问模型或外部服务、复制原件、计算历史汇总以及等待原进程均在事务之外。附加统计按需单独计算，涉及写时汇总时按受影响的范围更新。
+
+Server 可先在短事务里保存 Task 结算、停妥证明、完整留言及交付引用，引用记录当时的文件同步状态。原件通过独立的文件传输完整持久保存后，用短事务更新可用状态并记录本次交付所需的上级输入。首次交付输入沿原交付身份去重，补回历史原件时更新原引用的可用状态。下载读取已可用的原件。 [交付副本与全量补回](server-runner.md#交付副本与全量补回)
+
+## 读取边界
+
+- **Chat 和 Issue 讨论。** 主 Chat 按会话在数据库取一页完整消息。父 Issue Chat 按父 Issue 与下属子 Issue 的合并时间线在数据库取一页原留言，保留每条消息的身份与归属。再按本页 ID 批量查引用、附件信息和处理状态。执行引用用于显示折叠入口，点击后再读取对应原件。日常刷新读取新增消息和已展示消息所需的状态，历史可继续按页查阅。 [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示) · [旧 Tend 消息页读取放大](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/web-messaging-read-amplification.md#L3-L10)
+- **看板。** 按可查询的当前字段分页读 Issue 当前状态，并从 Server 数据库批量读取本页的 PR 关联和已保存的状态摘要。卡片直接展示链接及状态。详情按所选 Issue 分页读取执行和历史，原件按引用打开。
+- **交付文件与 rollout。** 已同步的交付文件从 Server 的文件存储读取。打开或刷新 rollout 详情时，Web 通过共用 API 读取实际执行实例上当前可用的原件。 [按需读取 rollout](server-runner.md#按需读取-rollout)
+
+Runner 按自身身份读取已分配的待投递任务。建议空查询只读返回，实际分配和接收按各自的持久记录确认。心跳可合并保存最新观察。Runner 持久保存本机 Repo 登记，Server 保存可用于派发的 repo 标识与 Runner 对应关系。 [分配与投递](server-runner.md#分配与投递) · [Repo 注册](server-runner.md#repo-注册) · [旧 Tend 空领取对照](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/findings/issue-lifecycle-efficiency-performance.md#L27-L43)
+
+归属、状态、排序和幂等身份使用可建索引的列。SQL 索引以以上具体访问路径为依据。定向 fixture 保持当前页和结果相同，只增加无关历史，核对分页内容、SQL 次数和查询计划。用 SQLite 的 `EXPLAIN QUERY PLAN` 检查查找和扫描范围。 [SQLite 查询计划](https://sqlite.org/eqp.html)
+
+## 选型和验收
+
+**已确认。** 一期由单个活动 Server 和每个 Runner 各自持有本地 SQLite WAL 库。WAL 支持读写并行，每个库同时只有一个写者，长读也会限制 checkpoint 的推进。旧 Tend 已使用 WAL 和单写连接，慢写样本主要耗在取写连接。新版通过有界补传和短事务缩小后台同步占用写连接的时间。 [SQLite WAL 并发与 checkpoint](https://sqlite.org/wal.html#concurrency) · [旧写连接配置](https://github.com/GhostFlying/tend/blob/83bc15ae/internal/store/store.go#L62-L81) · [旧慢写样本](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/shared-writer-contention.md#L1-L5)
+
+用同一组 fixture 在 devcontainer 对照日常通信与多 Runner 重连补传。补传期间读取看板、提交 Chat 和 Attention 答复，并上传交付原件。再增加历史量核对本页读取的查询次数和扫描范围。分别观察用户请求延迟、写连接排队、事务执行与提交时间，同时核对原结果、工作区可释放证据及重复回执。性能验证使用预期部署的持久化配置。若持久回执承诺在断电后仍可读回，SQLite WAL 的测试基线使用 `synchronous=FULL`。 [SQLite 提交持久性](https://sqlite.org/pragma.html#pragma_synchronous)
+
+如果批次有界、读查询有索引且事务已经足够短，预期负载下仍反复发生跨 Issue 写入排队并拖慢用户的 Chat 或 Attention 写操作，再用同一负载评估 Server 切换 PostgreSQL。PostgreSQL 可以并发更新互不冲突的行，Runner 的本地存储独立选型。 [PostgreSQL 行锁](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS)
