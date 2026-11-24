@@ -6,7 +6,7 @@ use protocol::{
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend issue reviews <issue-id>\n  tend issue cancel <issue-id> <reason> [operation-id]\n  tend issue reopen <issue-id> <reason> [operation-id]\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr watches <issue-id>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
         ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
+        ("agent", "candidates") => "/api/v1/agent-candidates".to_owned(),
         ("runner", "list") => "/api/v1/runners".to_owned(),
         ("runner", "replace" | "retire") => format!("/api/v1/runners/{id}/{command}"),
         ("server", "upgrade-check") => format!("/api/v1/upgrade-check/{id}"),
@@ -202,6 +203,20 @@ fn main() -> Result<()> {
             };
             let mut response =
                 send(&http, &path, &auth, &serde_json::to_value(&request)?)?.into_reader();
+            io::copy(&mut response, &mut io::stdout().lock())?;
+        }
+        ("agent", "candidates", [] | [_]) => {
+            let mut requirements = rest
+                .first()
+                .map(|value| serde_json::from_str::<serde_json::Value>(value))
+                .transpose()?
+                .unwrap_or_else(|| serde_json::json!({}));
+            ensure!(
+                requirements.is_object(),
+                "requirements must be a JSON object"
+            );
+            requirements["category"] = serde_json::json!(id);
+            let mut response = send(&http, &path, &auth, &requirements)?.into_reader();
             io::copy(&mut response, &mut io::stdout().lock())?;
         }
         ("pr", "watches", []) | ("issue", "reviews", []) => {

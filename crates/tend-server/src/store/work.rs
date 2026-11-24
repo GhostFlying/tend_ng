@@ -13,7 +13,7 @@ pub(super) const DISPATCH_QUERY: &str =
             i.state,
             (SELECT run.observation FROM task_runs run
               WHERE run.task_id = t.id ORDER BY run.rowid DESC LIMIT 1),
-            i.parent_issue_id, t.base_refs
+            i.parent_issue_id, t.base_refs, t.requested_agent
        FROM tasks t
        JOIN issues i ON i.id = t.issue_id
        LEFT JOIN router_dispatches d ON i.id = d.issue_id
@@ -94,14 +94,18 @@ impl Store {
             params![issue_id, source, work.title, work.objective],
         )?;
         tx.execute(
-            "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, base_refs)
-                VALUES (?1, ?2, 'issue-router', 'awaiting_assignment', ?3, ?4, ?5)",
+            "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, base_refs,
+                                requested_agent, pinned_runner_id, pinned_agent_id)
+                VALUES (?1, ?2, 'issue-router', 'awaiting_assignment', ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
                 task_id,
                 issue_id,
                 serde_json::to_string(&work.repo_ids)?,
                 serde_json::to_string(&work.required_capabilities)?,
-                serde_json::to_string(&work.base_refs)?
+                serde_json::to_string(&work.base_refs)?,
+                work.agent.as_ref().map(serde_json::to_string).transpose()?,
+                work.agent.as_ref().and_then(|agent| agent.runner_id.as_deref()),
+                work.agent.as_ref().map(|agent| &agent.id),
             ],
         )?;
         tx.execute(
@@ -231,6 +235,17 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
             objective: row.get(8)?,
             repo_ids: read_list(row, 9)?,
             required_capabilities: read_list(row, 10)?,
+            agent: row
+                .get::<_, Option<String>>(17)?
+                .map(|value| serde_json::from_str(&value))
+                .transpose()
+                .map_err(|error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        17,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                })?,
             base_refs: serde_json::from_str(row.get_ref(16)?.as_str()?).map_err(|error| {
                 rusqlite::Error::FromSqlConversionFailure(
                     16,

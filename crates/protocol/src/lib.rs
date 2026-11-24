@@ -92,6 +92,8 @@ pub struct DispatchIssue {
     pub required_capabilities: Vec<String>,
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub base_refs: std::collections::BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<AgentPin>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

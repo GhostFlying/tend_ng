@@ -23,7 +23,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-effort <effort>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -33,6 +33,7 @@ fn main() -> Result<()> {
     let mut cwd = env::current_dir()?;
     let mut web_dir = None;
     let mut router_effort = None;
+    let mut router_model = None;
     let mut program = OsString::from("codex");
     let mut github_cli = OsString::from("gh");
     let mut app_args = ["app-server", "--listen", "stdio://"]
@@ -59,6 +60,15 @@ fn main() -> Result<()> {
                     .map_err(|_| anyhow!("invalid Router effort"))?;
                 ensure!(!effort.trim().is_empty(), "Router effort must not be empty");
                 router_effort = Some(effort);
+            }
+            Some("--router-model") => {
+                let model = args
+                    .next()
+                    .context("--router-model needs a value")?
+                    .into_string()
+                    .map_err(|_| anyhow!("invalid Router model"))?;
+                ensure!(!model.trim().is_empty(), "Router model must not be empty");
+                router_model = Some(model);
             }
             Some("--web-dir") => {
                 let directory = PathBuf::from(args.next().context("--web-dir needs a directory")?);
@@ -105,6 +115,7 @@ fn main() -> Result<()> {
         program,
         args: app_args,
         effort: router_effort,
+        model: router_model,
     });
     eprintln!("Tend Server listening on {}", server.server_addr());
 
@@ -190,6 +201,21 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
+    }
+    if path == "/api/v1/agent-candidates" {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "candidate query too large"));
+        };
+        let Ok(query) = serde_json::from_slice::<protocol::AgentQuery>(&bytes) else {
+            return Ok(api_error(400, "invalid candidate query"));
+        };
+        if !query.valid() {
+            return Ok(api_error(400, "invalid category or task requirements"));
+        }
+        return Ok((200, json!({"candidates": store.agent_candidates(&query)?})));
     }
     if let Some(message) = path
         .strip_prefix("/api/v1/messages/")

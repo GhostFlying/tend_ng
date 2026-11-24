@@ -47,3 +47,9 @@ CLI 为已结束的顶层 Issue 登记回收。Server 暂停该树的新准入�
 - 保留普通 PR 观测、明确订阅和直接等待。通过 CLI 的原 Chat 消息登记必送条件；Router 可在本地登记主动订阅。两条入口复用 PR / CI 条件和 Server 的只读观测。
 - 匹配事实时，从同一 Chat 中已关联的 Issue 树查找唯一的顶层归属。已确定的事实沿顶层 Owner 的队列投递，保留具体关联 Issue。归属未定的事实按 Chat 合成一个后台 Router 输入，优先级低于已排队的用户消息。多个订阅或等待分别保留来源。
 - 固定 fixture 核对重复登记、无隐式唤醒、两个收件路径、一次固定窗口内合并，以及 Router 回复沿原消息关联。
+
+## 具名 Agent 的候选与指名
+
+- 默认继续按仓库、category、capability 和可用度分配。查询入口复用分配的资格规则，返回符合的具名配置及其 Runner。Router 使用 Server 的登记和当前可用度，Issue Agent 读取当前 Runner 本地的配置与仓库。
+- 顶层派发可显式指定 Agent 及其 Runner。子 Issue 只能在树已归属的 Runner 指名。记录原选择，实际领取仍核对当前配置与版本。缺少合格配置仍保留派发及原因。
+- 固定 fixture 以默认排在前面的配置及显式指名的后续配置验证真实分配。Router 模型和 reasoning effort 由 Server 进程选择。

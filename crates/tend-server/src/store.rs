@@ -62,7 +62,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 20,
+            version <= 21,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -181,7 +181,13 @@ impl Store {
         }
         if version < 20 {
             external_routing::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 20)?;
+        }
+        if version < 21 {
+            tx.execute_batch(
+                "ALTER TABLE tasks ADD COLUMN requested_agent TEXT;
+                              ALTER TABLE router_threads ADD COLUMN model TEXT;",
+            )?;
+            tx.pragma_update(None, "user_version", 21)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;
@@ -439,23 +445,34 @@ impl Store {
         Ok(Some(input))
     }
 
-    pub fn thread_id(&self, chat_id: &str, revision: i64) -> Result<Option<String>> {
+    pub fn thread_id(
+        &self,
+        chat_id: &str,
+        revision: i64,
+        model: Option<&str>,
+    ) -> Result<Option<String>> {
         Ok(self
             .db
             .query_row(
-                "SELECT thread_id FROM router_threads WHERE chat_id = ?1 AND tool_revision = ?2",
-                params![chat_id, revision],
+                "SELECT thread_id FROM router_threads WHERE chat_id = ?1 AND tool_revision = ?2 AND model IS ?3",
+                params![chat_id, revision, model],
                 |row| row.get(0),
             )
             .optional()?)
     }
 
-    pub fn save_thread(&self, chat_id: &str, thread_id: &str, revision: i64) -> Result<()> {
+    pub fn save_thread(
+        &self,
+        chat_id: &str,
+        thread_id: &str,
+        revision: i64,
+        model: Option<&str>,
+    ) -> Result<()> {
         self.db.execute(
-            "INSERT INTO router_threads (chat_id, thread_id, tool_revision) VALUES (?1, ?2, ?3)
+            "INSERT INTO router_threads (chat_id, thread_id, tool_revision, model) VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(chat_id) DO UPDATE
-               SET thread_id = excluded.thread_id, tool_revision = excluded.tool_revision",
-            params![chat_id, thread_id, revision],
+               SET thread_id = excluded.thread_id, tool_revision = excluded.tool_revision, model = excluded.model",
+            params![chat_id, thread_id, revision, model],
         )?;
         Ok(())
     }

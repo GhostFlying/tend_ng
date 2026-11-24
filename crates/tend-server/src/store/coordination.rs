@@ -89,9 +89,15 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
     };
     if let WorkAction::Delegate {
         category: requested,
+        work,
         ..
     } = &operation.action
-        && (category != "issue-router" || !WORK_CATEGORIES.contains(&requested.as_str()))
+        && (category != "issue-router"
+            || !WORK_CATEGORIES.contains(&requested.as_str())
+            || work
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.valid() || agent.runner_id.is_some()))
     {
         return Ok(false);
     }
@@ -120,10 +126,13 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 ],
             )?;
             db.execute(
-                "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, pinned_runner_id, workspace_key, base_refs)
-                 VALUES (?1, ?2, ?3, 'awaiting_assignment', ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
+                                    pinned_runner_id, workspace_key, base_refs, requested_agent, pinned_agent_id)
+                 VALUES (?1, ?2, ?3, 'awaiting_assignment', ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![task_id, issue_id, requested, serde_json::to_string(&work.repo_ids)?,
-                        serde_json::to_string(&work.required_capabilities)?, runner_id, isolated_workspace.then_some(issue_id), serde_json::to_string(&work.base_refs)?],
+                        serde_json::to_string(&work.required_capabilities)?, runner_id, isolated_workspace.then_some(issue_id),
+                        serde_json::to_string(&work.base_refs)?, work.agent.as_ref().map(serde_json::to_string).transpose()?,
+                        work.agent.as_ref().map(|agent| &agent.id)],
             )?;
             db.execute(
                 "INSERT INTO child_dispatches (task_id, operation_id) VALUES (?1, ?2)",
@@ -141,7 +150,14 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 &work.objective,
                 None,
             )?;
-            if matching_task_agent(runner, requested, work, None).is_none() {
+            if matching_task_agent(
+                runner,
+                requested,
+                work,
+                work.agent.as_ref().map(|agent| agent.id.as_str()),
+            )
+            .is_none()
+            {
                 let missing_repo_ids = work
                     .repo_ids
                     .iter()
@@ -159,6 +175,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                             missing_repo_ids,
                             category: requested.clone(),
                             required_capabilities: work.required_capabilities.clone(),
+                            agent_id: work.agent.as_ref().map(|agent| agent.id.clone()),
                         },
                         summary: format!(
                             "Runner {runner_id} currently has no matching configuration. The original dispatch remains pending."
@@ -427,9 +444,9 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let task = protocol::new_id();
     db.execute(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
-                            pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key, base_refs)
+                            pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key, base_refs, requested_agent)
          SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids,
-                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id, workspace_key, base_refs
+                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id, workspace_key, base_refs, requested_agent
          FROM tasks WHERE id = ?2",
         params![
             task,

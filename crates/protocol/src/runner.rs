@@ -19,6 +19,48 @@ pub struct AgentProfile {
     pub reasoning_effort: Option<String>,
     #[serde(default)]
     pub capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct AgentPin {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runner_id: Option<String>,
+}
+
+impl AgentPin {
+    pub fn valid(&self) -> bool {
+        crate::valid_id(&self.id) && self.runner_id.as_deref().is_none_or(crate::valid_id)
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentQuery {
+    pub category: String,
+    #[serde(default)]
+    pub repo_ids: Vec<String>,
+    #[serde(default)]
+    pub required_capabilities: Vec<String>,
+}
+
+impl AgentQuery {
+    pub fn valid(&self) -> bool {
+        (self.category == "issue-router" || WORK_CATEGORIES.contains(&self.category.as_str()))
+            && self
+                .repo_ids
+                .iter()
+                .chain(&self.required_capabilities)
+                .all(|id| !id.trim().is_empty())
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct AgentCandidate {
+    pub runner_id: String,
+    pub available: bool,
+    pub agent: AgentProfile,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -272,6 +314,8 @@ pub enum IssueInputCause {
         missing_repo_ids: Vec<String>,
         category: String,
         required_capabilities: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent_id: Option<String>,
     },
     TaskCancelled {
         control_id: String,
@@ -345,33 +389,34 @@ pub fn matching_task_agent<'a>(
     work: &DispatchIssue,
     named: Option<&str>,
 ) -> Option<&'a AgentProfile> {
-    if !work
-        .repo_ids
-        .iter()
-        .all(|repo| profile.repos.contains(repo))
-    {
-        return None;
-    }
-    let satisfies = |agent: &AgentProfile| {
-        work.required_capabilities
+    matching_agents(
+        profile,
+        category,
+        &work.repo_ids,
+        &work.required_capabilities,
+    )
+    .find(|agent| named.is_none_or(|id| agent.id == id))
+}
+
+pub fn matching_agents<'profile, 'filters>(
+    profile: &'profile RunnerProfile,
+    category: &'filters str,
+    repos: &[String],
+    capabilities: &'filters [String],
+) -> impl Iterator<Item = &'profile AgentProfile> + use<'profile, 'filters> {
+    let satisfies = move |agent: &AgentProfile| {
+        capabilities
             .iter()
             .all(|cap| agent.capabilities.contains(cap))
     };
-    if category != "issue-router" {
-        return profile.agents.iter().find(|agent| {
-            agent.category == category && named.is_none_or(|id| agent.id == id) && satisfies(agent)
-        });
-    }
-    if !work.required_capabilities.is_empty()
-        && !profile
-            .agents
-            .iter()
-            .any(|agent| WORK_CATEGORIES.contains(&agent.category.as_str()) && satisfies(agent))
-    {
-        return None;
-    }
-    profile
-        .agents
-        .iter()
-        .find(|agent| agent.category == "issue-router" && named.is_none_or(|id| agent.id == id))
+    let coordinator = category == "issue-router";
+    let eligible = repos.iter().all(|repo| profile.repos.contains(repo))
+        && (!coordinator
+            || capabilities.is_empty()
+            || profile.agents.iter().any(|agent| {
+                WORK_CATEGORIES.contains(&agent.category.as_str()) && satisfies(agent)
+            }));
+    profile.agents.iter().filter(move |agent| {
+        eligible && agent.category == category && (coordinator || satisfies(agent))
+    })
 }

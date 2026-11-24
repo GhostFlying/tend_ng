@@ -156,6 +156,12 @@ if role == "parent":
             "category": "implementation", "required_capabilities": ["image_gen"]}
     if scenario == "pull-board":
         args.update(title="核对安装步骤", objective="准备可用的安装说明。")
+    if scenario == "native-review":
+        found = tool("tend_agent_candidates", {"category": "implementation", "required_capabilities": ["image_gen"]},
+                     "work-candidates", "work-candidates")
+        assert found["runner_id"] == "demo-runner"
+        assert [candidate["id"] for candidate in found["candidates"]] == ["worker", "selected-worker"]
+        args["agent_id"] = "selected-worker"
     if scenario == "no-candidate":
         args["required_capabilities"] = ["missing-capability"]
     delegated = tool("tend_delegate_work", args, "delegate", "original-delegate")
@@ -171,7 +177,8 @@ if role == "parent":
         tool("tend_close_issue", {"summary": "The main objective is settled."}, "early-close", "early-close")
 elif role == "child":
     assert {"tend_close_issue", "tend_submit_artifact"} <= tools
-    assert assignment["placement"]["agent"]["id"] == "worker"
+    expected_worker = "selected-worker" if scenario == "native-review" else "worker"
+    assert assignment["placement"]["agent"]["id"] == expected_worker
     assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"

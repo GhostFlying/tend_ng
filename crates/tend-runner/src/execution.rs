@@ -60,10 +60,11 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
             for run in candidates {
                 let local = Store::open(&db, &config)?;
                 let runtime = runtime.clone();
+                let config = config.clone();
                 workers.insert(
                     run.id.clone(),
                     thread::spawn(move || {
-                        if let Err(error) = advance(local, &runtime, &run) {
+                        if let Err(error) = advance(local, &runtime, &run, &config) {
                             eprintln!("Runner execution {}: {error:#}", run.id);
                         }
                     }),
@@ -78,7 +79,7 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
     }
 }
 
-fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
+fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let cwd = workspace::directory(&runtime.root, run);
     if run.process.is_none() && store.has_stop(&run.assignment.placement.assignment_id)? {
         return settle(
@@ -93,7 +94,7 @@ fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
         let result = recover(runtime, run, &cwd);
         settle(&mut store, run, &cwd, result, true)?;
     } else {
-        launch(&mut store, runtime, run)?;
+        launch(&mut store, runtime, run, config)?;
     }
     Ok(())
 }
@@ -121,7 +122,7 @@ fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
     Ok(turn)
 }
 
-fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
+fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
     let started = workspace::prepare(&runtime.root, run)
         .context("prepare Tend workspace")
@@ -153,6 +154,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
                 cwd: &cwd,
                 artifacts: &runtime.artifacts,
                 branches: &branches,
+                config,
             },
         )
     })();
@@ -214,6 +216,7 @@ struct Handler<'a> {
     cwd: &'a Path,
     artifacts: &'a Path,
     branches: &'a [protocol::WorkBranch],
+    config: &'a Config,
 }
 
 impl TurnHandler for Handler<'_> {
@@ -275,6 +278,38 @@ impl TurnHandler for Handler<'_> {
     }
 
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
+        if call.tool == "tend_agent_candidates"
+            && call.namespace.is_none()
+            && self.run.assignment.placement.agent.category == "issue-router"
+        {
+            let query = serde_json::from_value::<protocol::AgentQuery>(call.arguments.clone());
+            if let Ok(query) = query
+                && query.valid()
+                && query.category != "issue-router"
+            {
+                let repos = if call.arguments.get("repo_ids").is_some() {
+                    &query.repo_ids
+                } else {
+                    &self.run.assignment.work.repo_ids
+                };
+                let profile = self.config.profile(0);
+                let candidates: Vec<_> = protocol::matching_agents(
+                    &profile,
+                    &query.category,
+                    repos,
+                    &query.required_capabilities,
+                )
+                .collect();
+                return Ok(ToolOutput {
+                    success: true,
+                    body: json!({"runner_id": profile.runner_id, "candidates": candidates}),
+                });
+            }
+            return Ok(ToolOutput {
+                success: false,
+                body: json!({"error": "Provide a valid work category and task requirements"}),
+            });
+        }
         match self.store.accept_operation(self.run, &call, |id| {
             tools::action(self.run, &call, self.cwd, self.artifacts, id)
         }) {

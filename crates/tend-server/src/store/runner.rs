@@ -4,8 +4,8 @@ use super::{
 };
 use anyhow::{Result, ensure};
 use protocol::{
-    ClaimDecision, CoordinationFollowup, IssueDispatch, Placement, RunnerProfile, RunnerRecord,
-    RunnerSync, RunnerSyncReply, TaskAssignment,
+    AgentCandidate, AgentQuery, ClaimDecision, CoordinationFollowup, IssueDispatch, Placement,
+    RunnerProfile, RunnerRecord, RunnerSync, RunnerSyncReply, TaskAssignment, matching_agents,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -171,6 +171,36 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
 }
 
 impl Store {
+    pub fn agent_candidates(&self, query: &AgentQuery) -> Result<Vec<AgentCandidate>> {
+        let available: std::collections::HashSet<_> = available_runners(&self.db)?
+            .into_iter()
+            .map(|runner| runner.profile.runner_id)
+            .collect();
+        let mut statement = self.db.prepare(
+            "SELECT profile FROM runners
+             WHERE NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = runners.id)
+             ORDER BY id",
+        )?;
+        let mut candidates = Vec::new();
+        for row in statement.query_map([], |row| row.get::<_, String>(0))? {
+            let profile: RunnerProfile = serde_json::from_str(&row?)?;
+            candidates.extend(
+                matching_agents(
+                    &profile,
+                    &query.category,
+                    &query.repo_ids,
+                    &query.required_capabilities,
+                )
+                .map(|agent| AgentCandidate {
+                    runner_id: profile.runner_id.clone(),
+                    available: available.contains(&profile.runner_id),
+                    agent: agent.clone(),
+                }),
+            );
+        }
+        Ok(candidates)
+    }
+
     pub fn reconcile_scope(&self, task: &str, request: &RunnerSync) -> Result<bool> {
         let mut statement = self
             .db

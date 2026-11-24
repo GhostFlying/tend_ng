@@ -1,7 +1,7 @@
 use crate::store::{Attempt, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{DispatchIssue, ExternalCondition, IssueDispatch};
+use protocol::{AgentQuery, DispatchIssue, ExternalCondition, IssueDispatch};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -13,10 +13,11 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 7;
+const TOOL_REVISION: i64 = 8;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
+    "When a named configuration matters, use tend_agent_candidates before specifying the Agent and Runner. ",
     "Tend may supply a replay record before the request. It means the following text is the same original input. ",
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
     "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
@@ -44,6 +45,8 @@ fn dispatch_tool() -> Value {
                 "title": { "type": "string" },
                 "objective": { "type": "string" },
                 "repo_ids": { "type": "array", "items": { "type": "string" } },
+                "agent": {"type":"object","properties":{"id":{"type":"string"},"runner_id":{"type":"string"}},
+                          "required":["id","runner_id"],"additionalProperties":false},
                 "base_refs": { "type":"object", "additionalProperties": {"type":"string"} },
                 "required_capabilities": { "type": "array", "items": { "type": "string" } }
             },
@@ -124,6 +127,7 @@ pub struct Config {
     pub program: OsString,
     pub args: Vec<OsString>,
     pub effort: Option<String>,
+    pub model: Option<String>,
 }
 
 pub fn spawn(config: Config) {
@@ -177,6 +181,15 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         read_dispatch_tool(),
         relay_tool(),
         subscribe_tool(),
+        json!({
+            "type":"function", "name":"tend_agent_candidates",
+            "description":"Read qualifying Issue Agent configurations by repository and capability.",
+            "inputSchema":{"type":"object","properties":{
+                "category":{"type":"string","enum":["issue-router"]},
+                "repo_ids":{"type":"array","items":{"type":"string"}},
+                "required_capabilities":{"type":"array","items":{"type":"string"}}
+            },"required":["category"],"additionalProperties":false}
+        }),
     ];
     tools.extend(attention_tools());
     while let Some(input) = store.next_input(chat)? {
@@ -200,7 +213,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         };
 
         let previous_thread = if number == 1 {
-            store.thread_id(chat, TOOL_REVISION)?
+            store.thread_id(chat, TOOL_REVISION, config.model.as_deref())?
         } else {
             None
         };
@@ -209,8 +222,13 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 (id, input.reply_context.clone())
             }
             _ => {
-                let id = client.start_thread(&config.cwd, ROUTER_INSTRUCTIONS, &tools, None)?;
-                store.save_thread(chat, &id, TOOL_REVISION)?;
+                let id = client.start_thread(
+                    &config.cwd,
+                    ROUTER_INSTRUCTIONS,
+                    &tools,
+                    config.model.as_deref(),
+                )?;
+                store.save_thread(chat, &id, TOOL_REVISION, config.model.as_deref())?;
                 let context: Vec<_> = [
                     store.recent_context(
                         chat,
@@ -307,6 +325,20 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" => self.dispatch(&call),
+            "tend_agent_candidates" => {
+                let Ok(query) = serde_json::from_value::<AgentQuery>(call.arguments.clone()) else {
+                    return Ok(tool_error(
+                        "Provide category and any repository or capability requirements",
+                    ));
+                };
+                if query.category != "issue-router" || !query.valid() {
+                    return Ok(tool_error("Provide a valid issue-router query"));
+                }
+                Ok(ToolOutput {
+                    success: true,
+                    body: json!({"candidates": self.store.agent_candidates(&query)?}),
+                })
+            }
             "tend_subscribe" => {
                 let Ok(mut condition) =
                     serde_json::from_value::<ExternalCondition>(call.arguments.clone())
@@ -393,6 +425,10 @@ impl DispatchHandler<'_> {
         };
         if work.title.trim().is_empty()
             || work.objective.trim().is_empty()
+            || work
+                .agent
+                .as_ref()
+                .is_some_and(|agent| !agent.valid() || agent.runner_id.is_none())
             || work.base_refs.iter().any(|(repo, reference)| {
                 !work.repo_ids.contains(repo) || reference.trim().is_empty()
             })

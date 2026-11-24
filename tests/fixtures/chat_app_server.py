@@ -76,7 +76,13 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     if guide:
         params["arguments"].update(title="示例仓库上手指南", objective="整理示例仓库的快速上手指南。")
     if pinned:
-        params["arguments"]["base_refs"] = {"example": "pinned-demo"}
+        requirements = {"category": "issue-router", "repo_ids": ["example"],
+                        "required_capabilities": ["image_gen"]}
+        result = decision_tool("tend_agent_candidates", requirements, thread_id, turn_id, token)
+        [selected] = [row for row in result["candidates"] if row["agent"]["id"] == "selected-coordinator"]
+        assert selected["available"]
+        params["arguments"].update(base_refs={"example": "pinned-demo"},
+                                   agent={"id": selected["agent"]["id"], "runner_id": selected["runner_id"]})
     if pending:
         params["arguments"].update(title="整理发布记录", objective="准备另一个仓库的发布记录。",
                                    repo_ids=["release-notes"], required_capabilities=[])

@@ -123,6 +123,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                     "title": { "type": "string" },
                     "objective": { "type": "string" },
                     "category": { "type": "string", "enum": WORK_CATEGORIES },
+                    "agent_id": { "type": "string" },
                     "repo_ids": { "type": "array", "items": { "type": "string" } },
                     "required_capabilities": { "type": "array", "items": { "type": "string" } },
                     "isolated_workspace": { "type": "boolean" },
@@ -145,6 +146,15 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 "required": ["summary"],
                 "additionalProperties": false
             }
+        });
+        let candidates = json!({
+            "type":"function", "name":"tend_agent_candidates",
+            "description":"List matching work configurations on this Runner. Omitted repositories use the current Issue requirements.",
+            "inputSchema":{"type":"object","properties":{
+                "category":{"type":"string","enum":WORK_CATEGORIES},
+                "repo_ids":{"type":"array","items":{"type":"string"}},
+                "required_capabilities":{"type":"array","items":{"type":"string"}}
+            },"required":["category"],"additionalProperties":false}
         });
         let escalate = json!({
             "type": "function",
@@ -177,9 +187,10 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
         (
-            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request for a known GitHub PR and tend_find_pull_request for a recorded work branch. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
+            "Coordinate the Tend Issue through child Issues. Use tend_agent_candidates when you need to name a work configuration. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request for a known GitHub PR and tend_find_pull_request for a recorded work branch. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
             vec![
                 delegate,
+                candidates,
                 close,
                 report,
                 ask,
@@ -239,6 +250,7 @@ struct Delegation {
     title: String,
     objective: String,
     category: String,
+    agent_id: Option<String>,
     repo_ids: Option<Vec<String>>,
     #[serde(default)]
     required_capabilities: Vec<String>,
@@ -402,8 +414,10 @@ pub fn action(
                 "Unknown work category"
             );
             ensure!(
-                !args.title.trim().is_empty() && !args.objective.trim().is_empty(),
-                "Specify the title and work objective"
+                !args.title.trim().is_empty()
+                    && !args.objective.trim().is_empty()
+                    && args.agent_id.as_deref().is_none_or(protocol::valid_id),
+                "Specify the title and work objective, with a valid Agent ID when naming one"
             );
             let repo_ids = args
                 .repo_ids
@@ -428,6 +442,10 @@ pub fn action(
                     repo_ids,
                     base_refs,
                     required_capabilities: args.required_capabilities,
+                    agent: args.agent_id.map(|id| protocol::AgentPin {
+                        id,
+                        runner_id: None,
+                    }),
                 },
             })
         }

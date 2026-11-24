@@ -25,6 +25,10 @@ def main():
         pinned = subprocess.check_output(["git", "-C", source, "rev-parse", "pinned-demo"], text=True).strip()
         options = json.loads((root / "runner.json").read_text())
         options["agents"][0]["reasoning_effort"] = "low"
+        options["agents"] += [
+            {**options["agents"][0], "id": "selected-coordinator"},
+            {**options["agents"][1], "id": "selected-worker", "description": "Fixture alternative"}
+        ]
         (root / "runner.json").write_text(json.dumps(options))
         (root / "delegate-now").touch()
         env = {**os.environ, "TEND_TOKEN": "review-fixture", "TEND_URL": f"http://{address}"}
@@ -39,11 +43,25 @@ def main():
                 root, "native-review",
             ], env=env)
             try:
+                candidates = wait_for(
+                    lambda: cli("agent", "candidates", "issue-router", json.dumps({
+                        "repo_ids": ["example"], "required_capabilities": ["image_gen"]
+                    }))["candidates"],
+                    lambda rows: len(rows) == 2 and all(row["available"] for row in rows),
+                )
+                assert [row["agent"]["id"] for row in candidates] == ["coordinator", "selected-coordinator"]
+                assert cli("agent", "candidates", "review",
+                           '{"required_capabilities":["missing"]}') == {"candidates": []}
                 cli("chat", "send", "main", "Prepare a guide from the pinned demo branch.")
                 wait_for(lambda: (root / "review.json").exists(), bool)
                 child = json.loads((root / "delegation.json").read_text())["action"]["issue_id"]
                 issue = cli("issue", "read", child)
                 assert issue["base_refs"] == {"example": "pinned-demo"}
+                assert issue["agent"] == {"id": "selected-worker"}
+                assert issue["placement"]["agent"]["id"] == "selected-worker"
+                selected = cli("issue", "read", issue["parent_issue_id"])
+                assert selected["agent"] == {"id": "selected-coordinator", "runner_id": "demo-runner"}
+                assert selected["placement"]["agent"]["id"] == "selected-coordinator"
                 workspace = root / "runner.runs" / "workspaces" / issue["parent_issue_id"]
                 [mount] = json.loads((workspace / "mounts.json").read_text())
                 assert mount["base"] == pinned
@@ -72,7 +90,7 @@ def main():
             finally:
                 runner.terminate()
                 runner.wait(timeout=7)
-    print("PASS native review evidence, explicit workspace base, and explicit clean reclaim")
+    print("PASS named Agent selection, native review evidence, explicit workspace base, and clean reclaim")
 
 
 if __name__ == "__main__":
