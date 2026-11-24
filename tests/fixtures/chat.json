@@ -3,5 +3,9 @@
   "Recover this reply.": {"answer": "This is the original reply.", "drop_start_response": true},
   "Hold this turn.": {"answer": "The held turn finished.", "wait": true},
   "Another chat.": {"answer": "The other chat can continue."},
-  "Next input.": {"answer": "The next input was consumed."}
+  "Next input.": {"answer": "The next input was consumed."},
+  "Replay once.": {"answer": "The second attempt answered.", "drop_before_start": 1},
+  "Exhaust attempts.": {"drop_before_start": 2},
+  "Keep going.": {"answer": "The queue continued."},
+  "Hold across restart.": {"answer": "The original turn finished.", "wait": true}
 }

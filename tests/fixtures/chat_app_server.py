@@ -15,6 +15,12 @@ database.executescript("""
         turn TEXT NOT NULL,
         held INTEGER NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS start_requests (
+        client_id TEXT PRIMARY KEY,
+        thread_id TEXT NOT NULL,
+        input TEXT NOT NULL,
+        context TEXT
+    );
 """)
 release = Path(sys.argv[1]).with_suffix(".release")
 
@@ -25,6 +31,13 @@ def respond(request, payload):
 
 def notify(method, **params):
     print(json.dumps({"method": method, "params": params}), flush=True)
+
+def missing_thread(request):
+    thread_id = request["params"]["threadId"]
+    print(json.dumps({
+        "id": request["id"],
+        "error": {"code": -32600, "message": f"no rollout found for thread id {thread_id}"},
+    }), flush=True)
 
 
 for line in sys.stdin:
@@ -42,15 +55,28 @@ for line in sys.stdin:
                 database.execute("INSERT INTO threads VALUES (?)", (thread_id,))
             respond(request, {"thread": {"id": thread_id}})
         case "thread/resume":
-            assert database.execute(
-                "SELECT 1 FROM threads WHERE id = ?", (params["threadId"],)
-            ).fetchone()
-            respond(request, {"thread": {"id": params["threadId"]}})
+            if database.execute(
+                "SELECT 1 FROM turns WHERE thread_id = ?", (params["threadId"],)
+            ).fetchone():
+                respond(request, {"thread": {"id": params["threadId"]}})
+            else:
+                missing_thread(request)
         case "turn/start":
             thread_id = params["threadId"]
             turn_id = str(uuid.uuid4())
-            text = params["input"][0]["text"]
+            text = params["input"][-1]["text"]
+            context = params["input"][0]["text"] if len(params["input"]) > 1 else None
             case = cases[text]
+            with database:
+                database.execute(
+                    "INSERT INTO start_requests VALUES (?, ?, ?, ?)",
+                    (params["clientUserMessageId"], thread_id, text, context),
+                )
+            starts = database.execute(
+                "SELECT COUNT(*) FROM start_requests WHERE input = ?", (text,)
+            ).fetchone()[0]
+            if starts <= case.get("drop_before_start", 0):
+                sys.exit(0)
             turn = {
                 "id": turn_id,
                 "status": "completed",
@@ -87,7 +113,10 @@ for line in sys.stdin:
             rows = database.execute(
                 "SELECT turn, held FROM turns WHERE thread_id = ? ORDER BY seq DESC",
                 (params["threadId"],),
-            )
+            ).fetchall()
+            if not rows:
+                missing_thread(request)
+                continue
             turns = []
             for encoded, held in rows:
                 turn = json.loads(encoded)

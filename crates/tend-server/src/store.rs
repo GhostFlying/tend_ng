@@ -1,7 +1,8 @@
 use anyhow::{Result, ensure};
-use codex_app::Answer;
+use codex_app::{Answer, ProcessIdentity};
 use protocol::{Author, Message, MessagePage, Receipt, RouterState, SendMessage};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde_json::json;
 use std::{path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
@@ -18,8 +19,10 @@ pub struct Input {
 
 pub struct Attempt {
     pub id: String,
+    pub number: i64,
     pub thread_id: String,
     pub turn_id: Option<String>,
+    pub process: Option<ProcessIdentity>,
 }
 
 pub enum Accepted {
@@ -29,11 +32,16 @@ pub enum Accepted {
 
 impl Store {
     pub fn initialize(path: &Path) -> Result<Self> {
-        let store = Self::open(path)?;
+        let mut store = Self::open(path)?;
         store.db.pragma_update(None, "journal_mode", "WAL")?;
-        store.db.execute_batch(
-            "BEGIN;
-             CREATE TABLE IF NOT EXISTS chat_messages (
+        let tx = store.db.transaction()?;
+        let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        ensure!(
+            version <= 1,
+            "unsupported Server database version {version}"
+        );
+        tx.execute_batch(
+            "CREATE TABLE IF NOT EXISTS chat_messages (
                  seq INTEGER PRIMARY KEY,
                  id TEXT NOT NULL UNIQUE,
                  chat_id TEXT NOT NULL,
@@ -53,18 +61,44 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS pending_inputs
                  ON router_inputs(chat_id, seq) WHERE outcome IS NULL;
+             CREATE INDEX IF NOT EXISTS settled_inputs
+                 ON router_inputs(chat_id, seq) WHERE outcome IS NOT NULL;
              CREATE TABLE IF NOT EXISTS router_threads (
                  chat_id TEXT PRIMARY KEY,
                  thread_id TEXT NOT NULL UNIQUE
-             );
-             CREATE TABLE IF NOT EXISTS router_attempts (
-                 seq INTEGER PRIMARY KEY REFERENCES router_inputs(seq),
-                 id TEXT NOT NULL UNIQUE,
-                 thread_id TEXT NOT NULL,
-                 turn_id TEXT
-             );
-             COMMIT;",
+             );",
         )?;
+        if version == 0 {
+            let legacy: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'router_attempts')",
+                [],
+                |row| row.get(0),
+            )?;
+            if legacy {
+                tx.execute_batch("ALTER TABLE router_attempts RENAME TO old_router_attempts;")?;
+            }
+            tx.execute_batch(
+                "CREATE TABLE router_attempts (
+                     seq INTEGER NOT NULL REFERENCES router_inputs(seq),
+                     number INTEGER NOT NULL,
+                     id TEXT NOT NULL UNIQUE,
+                     thread_id TEXT NOT NULL,
+                     turn_id TEXT,
+                     process_pid INTEGER,
+                     process_start TEXT,
+                     PRIMARY KEY (seq, number)
+                 );",
+            )?;
+            if legacy {
+                tx.execute_batch(
+                    "INSERT INTO router_attempts (seq, number, id, thread_id, turn_id)
+                     SELECT seq, 1, id, thread_id, turn_id FROM old_router_attempts;
+                     DROP TABLE old_router_attempts;",
+                )?;
+            }
+            tx.pragma_update(None, "user_version", 1)?;
+        }
+        tx.commit()?;
         Ok(store)
     }
 
@@ -117,7 +151,7 @@ impl Store {
                     i.outcome, i.error, a.id
                FROM chat_messages m
                LEFT JOIN router_inputs i ON i.seq = m.seq
-               LEFT JOIN router_attempts a ON a.seq = m.seq
+               LEFT JOIN router_attempts a ON a.seq = m.seq AND a.number = 1
               WHERE m.chat_id = ?1 AND m.seq < ?2
               ORDER BY m.seq DESC LIMIT ?3",
         )?;
@@ -175,10 +209,13 @@ impl Store {
         Ok(self
             .db
             .query_row(
-                "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id
+                "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
+                        a.number, a.process_pid, a.process_start
                  FROM router_inputs i
                  JOIN chat_messages m ON m.seq = i.seq
-                 LEFT JOIN router_attempts a ON a.seq = i.seq
+                 LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
+                     SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
+                 )
                  WHERE i.chat_id = ?1 AND i.outcome IS NULL
                  ORDER BY i.seq LIMIT 1",
                 [chat_id],
@@ -188,6 +225,14 @@ impl Store {
                             id,
                             thread_id: row.get(3)?,
                             turn_id: row.get(4)?,
+                            number: row.get(5)?,
+                            process: match row.get::<_, Option<u32>>(6)? {
+                                Some(pid) => Some(ProcessIdentity {
+                                    pid,
+                                    started_at: row.get(7)?,
+                                }),
+                                None => None,
+                            },
                         }),
                         None => None,
                     };
@@ -214,23 +259,69 @@ impl Store {
 
     pub fn save_thread(&self, chat_id: &str, thread_id: &str) -> Result<()> {
         self.db.execute(
-            "INSERT INTO router_threads (chat_id, thread_id) VALUES (?1, ?2)",
+            "INSERT INTO router_threads (chat_id, thread_id) VALUES (?1, ?2)
+             ON CONFLICT(chat_id) DO UPDATE SET thread_id = excluded.thread_id",
             [chat_id, thread_id],
         )?;
         Ok(())
     }
 
-    pub fn start_attempt(&self, seq: i64, thread_id: &str) -> Result<Attempt> {
-        let attempt = Attempt {
-            id: protocol::new_id(),
-            thread_id: thread_id.to_owned(),
-            turn_id: None,
-        };
+    pub fn clear_thread(&self, chat_id: &str, thread_id: &str) -> Result<()> {
         self.db.execute(
-            "INSERT INTO router_attempts (seq, id, thread_id) VALUES (?1, ?2, ?3)",
-            params![seq, attempt.id, thread_id],
+            "DELETE FROM router_threads WHERE chat_id = ?1 AND thread_id = ?2",
+            [chat_id, thread_id],
         )?;
-        Ok(attempt)
+        Ok(())
+    }
+
+    pub fn start_attempt(
+        &self,
+        seq: i64,
+        number: i64,
+        thread_id: &str,
+        process: &ProcessIdentity,
+    ) -> Result<String> {
+        let id = protocol::new_id();
+        self.db.execute(
+            "INSERT INTO router_attempts (seq, number, id, thread_id, process_pid, process_start)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![seq, number, id, thread_id, process.pid, process.started_at],
+        )?;
+        Ok(id)
+    }
+
+    pub fn recent_context(&self, chat_id: &str, before: i64) -> Result<Option<String>> {
+        let mut statement = self.db.prepare(
+            "WITH recent AS (
+                SELECT seq, outcome FROM router_inputs
+                 WHERE chat_id = ?1 AND seq < ?2 AND outcome IS NOT NULL
+                 ORDER BY seq DESC LIMIT 6
+             )
+             SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome
+               FROM recent i JOIN chat_messages m ON m.seq = i.seq
+             UNION ALL
+             SELECT m.seq, 'assistant', substr(m.text, 1, 512), NULL
+               FROM recent i JOIN chat_messages source ON source.seq = i.seq
+               JOIN chat_messages m ON m.reply_to = source.id
+             ORDER BY 1 DESC LIMIT 12",
+        )?;
+        let mut messages = statement
+            .query_map(params![chat_id, before], |row| {
+                Ok(json!({
+                    "author": row.get::<_, String>(1)?,
+                    "text": row.get::<_, String>(2)?,
+                    "outcome": row.get::<_, Option<String>>(3)?,
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if messages.is_empty() {
+            return Ok(None);
+        }
+        messages.reverse();
+        Ok(Some(format!(
+            "Recent settled messages in this Tend conversation. Use them as context.\n{}\nThe current user request follows separately.",
+            serde_json::to_string(&messages)?
+        )))
     }
 
     pub fn save_turn_id(&self, attempt: &str, turn: &str) -> Result<()> {

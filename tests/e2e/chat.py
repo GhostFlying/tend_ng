@@ -37,10 +37,15 @@ def server(binary, root, env):
     finally:
         process.terminate()
         try:
-            _, stderr = process.communicate(timeout=5)
+            process.wait(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            _, stderr = process.communicate(timeout=5)
+            process.wait(timeout=5)
+        # A held App Server can outlive the Server under test.
+        os.set_blocking(process.stderr.fileno(), False)
+        raw = process.stderr.buffer.read()
+        process.stderr.close()
+        stderr = raw.decode(errors="replace") if raw else ""
         if stderr:
             print(stderr, file=sys.stderr, end="")
 
@@ -175,11 +180,76 @@ def main():
             assert finished[-1]["reply_to"] == following["message_id"]
             assert finished[-1]["text"] == "The next input was consumed."
 
+            replay = cli(address, "send", "main", "Replay once.", "replay-operation")
+            replied = wait_for(
+                lambda: messages(address, "main"),
+                lambda rows: rows[-1]["text"] == "The second attempt answered.",
+            )
+            check_answer(replied[-2:], replay, "Replay once.", "The second attempt answered.")
+            assert cli(address, "send", "main", "Replay once.", "replay-operation") == replay
+
+            lost = cli(address, "send", "main", "Exhaust attempts.")
+            after = cli(address, "send", "main", "Keep going.")
+            continued = wait_for(
+                lambda: messages(address, "main"),
+                lambda rows: rows[-1]["reply_to"] == after["message_id"],
+            )
+            check_answer(continued[-2:], after, "Keep going.", "The queue continued.")
+            lost_message = next(message for message in continued if message["id"] == lost["message_id"])
+            assert lost_message["text"] == "Exhaust attempts."
+            assert lost_message["router_state"] == "failed"
+            assert "two attempts" in lost_message["router_error"]
+
+            (root / "app.release").unlink()
+            in_flight = cli(address, "send", "main", "Hold across restart.")
+            wait_for(
+                lambda: messages(address, "main"),
+                lambda rows: rows[-1]["router_state"] == "awaiting_turn",
+            )
+            # Wait until the fixture persists the original, held native turn.
+            with sqlite3.connect(root / "app.sqlite") as database:
+                wait_for(
+                    lambda: database.execute(
+                        "SELECT count(*) FROM start_requests WHERE input = 'Hold across restart.'"
+                    ).fetchone()[0],
+                    lambda count: count == 1,
+                )
+
+        with server(args.server, root, env) as address:
+            time.sleep(0.5)
+            pending = messages(address, "main")[-1]
+            assert pending["id"] == in_flight["message_id"]
+            assert pending["router_state"] == "awaiting_turn"
+            (root / "app.release").touch()
+            restarted = wait_for(
+                lambda: messages(address, "main"),
+                lambda rows: rows[-1]["reply_to"] == in_flight["message_id"],
+            )
+            check_answer(
+                restarted[-2:], in_flight, "Hold across restart.", "The original turn finished."
+            )
+
         with sqlite3.connect(root / "app.sqlite") as database:
-            distinct_threads = database.execute("SELECT COUNT(*) FROM threads").fetchone()[0]
             turns = database.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
-            assert (distinct_threads, turns) == (3, 5), (distinct_threads, turns)
-    print("PASS durable Chat receipt, replay, restart, native history, and per-Chat ordering")
+            assert turns == 8, turns
+            replay_attempts = database.execute(
+                "SELECT thread_id, context FROM start_requests WHERE input = 'Replay once.' ORDER BY rowid"
+            ).fetchall()
+            assert len(replay_attempts) == 2
+            assert replay_attempts[0][0] != replay_attempts[1][0]
+            assert "The held turn finished." in replay_attempts[1][1]
+            assert database.execute(
+                "SELECT COUNT(*) FROM start_requests WHERE input = 'Hold across restart.'"
+            ).fetchone()[0] == 1
+        with sqlite3.connect(root / "server.sqlite") as database:
+            attempts = database.execute(
+                "SELECT a.number, a.id, a.thread_id FROM router_attempts a "
+                "JOIN chat_messages m ON m.seq = a.seq WHERE m.id = ? ORDER BY number",
+                (lost["message_id"],),
+            ).fetchall()
+            assert [attempt[0] for attempt in attempts] == [1, 2], attempts
+            assert attempts[0][1:] != attempts[1][1:], attempts
+    print("PASS durable Chat receipts, native recovery, bounded retries, and per-Chat ordering")
 
 
 if __name__ == "__main__":

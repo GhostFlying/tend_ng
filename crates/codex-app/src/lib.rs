@@ -1,8 +1,12 @@
-use anyhow::{Context, Result, bail, ensure};
+mod process;
+
+use anyhow::{Context, Result, ensure};
+pub use process::ProcessIdentity;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
     collections::VecDeque,
+    fmt,
     io::{BufRead, BufReader, Write},
     path::Path,
     process::{Child, ChildStdin, Command, Stdio},
@@ -47,6 +51,29 @@ pub struct TurnError {
 pub struct Answer<'a> {
     pub item_id: &'a str,
     pub text: &'a str,
+}
+
+#[derive(Debug)]
+struct RpcError {
+    method: String,
+    code: i64,
+    message: String,
+}
+
+impl fmt::Display for RpcError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "App Server {}: {}", self.method, self.message)
+    }
+}
+
+impl std::error::Error for RpcError {}
+
+fn missing_thread(error: &anyhow::Error, thread_id: &str) -> bool {
+    error.downcast_ref::<RpcError>().is_some_and(|error| {
+        error.code == -32600
+            && (error.message == format!("no rollout found for thread id {thread_id}")
+                || error.message == format!("thread not found: {thread_id}"))
+    })
 }
 
 impl Turn {
@@ -130,20 +157,38 @@ impl Client {
             .to_owned())
     }
 
-    pub fn resume_thread(&mut self, thread_id: &str) -> Result<()> {
-        self.call(
-            "thread/resume",
-            json!({ "threadId": thread_id, "excludeTurns": true }),
-        )?;
-        Ok(())
+    pub fn process_identity(&self) -> Result<ProcessIdentity> {
+        ProcessIdentity::observe(self.child.id())
     }
 
-    pub fn start_turn(&mut self, thread_id: &str, client_id: &str, text: &str) -> Result<String> {
+    pub fn resume_thread(&mut self, thread_id: &str) -> Result<bool> {
+        match self.call(
+            "thread/resume",
+            json!({ "threadId": thread_id, "excludeTurns": true }),
+        ) {
+            Ok(_) => Ok(true),
+            Err(error) if missing_thread(&error, thread_id) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub fn start_turn(
+        &mut self,
+        thread_id: &str,
+        client_id: &str,
+        text: &str,
+        context: Option<&str>,
+    ) -> Result<String> {
+        let mut input = Vec::new();
+        if let Some(context) = context {
+            input.push(json!({ "type": "text", "text": context, "text_elements": [] }));
+        }
+        input.push(json!({ "type": "text", "text": text, "text_elements": [] }));
         let response = self.call(
             "turn/start",
             json!({
                 "threadId": thread_id, "clientUserMessageId": client_id,
-                "input": [{ "type": "text", "text": text, "text_elements": [] }]
+                "input": input
             }),
         )?;
         Ok(response["turn"]["id"]
@@ -160,12 +205,16 @@ impl Client {
     ) -> Result<Option<Turn>> {
         let mut cursor = Value::Null;
         loop {
-            let response = self.call(
+            let response = match self.call(
                 "thread/turns/list",
                 json!({
                     "threadId": thread_id, "itemsView": "full", "limit": 16, "cursor": cursor
                 }),
-            )?;
+            ) {
+                Ok(response) => response,
+                Err(error) if missing_thread(&error, thread_id) => return Ok(None),
+                Err(error) => return Err(error),
+            };
             let page = response["data"]
                 .as_array()
                 .context("thread/turns/list missing turn history")?;
@@ -265,7 +314,14 @@ impl Client {
             }
             if event["id"] == id {
                 if let Some(error) = event.get("error") {
-                    bail!("App Server {method}: {}", error["message"]);
+                    return Err(RpcError {
+                        method: method.to_owned(),
+                        code: error["code"]
+                            .as_i64()
+                            .context("missing JSON-RPC error code")?,
+                        message: error["message"].as_str().unwrap_or_default().to_owned(),
+                    }
+                    .into());
                 }
                 return event
                     .get("result")
