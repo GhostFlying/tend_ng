@@ -13,10 +13,13 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 9;
+const TOOL_REVISION: i64 = 10;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
+    "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
+    "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
+    "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
     "When a named configuration matters, use tend_agent_candidates before specifying the Agent and Runner. ",
     "Tend may supply a replay record before the request. It means the following text is the same original input. ",
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
