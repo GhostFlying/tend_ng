@@ -38,6 +38,13 @@ async function connect(viewport) {
 try {
   const desktop = await connect({ width: 1440, height: 1000 });
   const page = desktop.page;
+  const originalQuestion = await page
+    .locator(".message:has(.attention-actions)")
+    .filter({ has: page.getByText(question, { exact: true }) })
+    .getAttribute("id");
+  await page.getByRole("link", { name: "看板", exact: true }).click();
+  await page.getByRole("link", { name: "待你决定", exact: true }).click();
+  assert.equal(new URL(page.url()).hash, "#" + originalQuestion);
   const post = page
     .locator(".message:has(.attention-actions)")
     .filter({ has: page.getByText(question, { exact: true }) });

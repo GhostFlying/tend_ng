@@ -9,6 +9,8 @@ import "./style.css";
 
 const board = window.location.pathname === "/issues";
 const tokenKey = "tend.token.v1";
+const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
+const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
 const issue = /^\/issues\/([a-zA-Z0-9_-]+)$/.exec(
   window.location.pathname,
 )?.[1];
@@ -176,6 +178,7 @@ function App() {
             <Chat
               token={token}
               issue={issue}
+              chatId={chatId}
               onReachable={setReachable}
               onTitle={setTitle}
             />

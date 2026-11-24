@@ -1,23 +1,39 @@
-import { useEffect, useState } from "react";
-import { readIssueBoard } from "./api";
-import type { BoardIssue, BoardPage, PullLink } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { chatLink, readIssueBoard } from "./api";
+import type { BoardIssue, BoardPage, BoardStage, PullLink } from "./api";
 
-const columns = [
-  { id: "queued", title: "待推进" },
-  { id: "active", title: "进行中" },
-  { id: "closed", title: "已结束" },
-] as const;
+const columns: { id: BoardStage; title: string }[] = [
+  { id: "backlog", title: "待安排" },
+  { id: "todo", title: "待推进" },
+  { id: "in_progress", title: "进行中" },
+  { id: "waiting", title: "等待中" },
+  { id: "done", title: "已完成" },
+  { id: "cancelled", title: "已取消" },
+];
 
-const taskLabels: Record<string, string> = {
+const queuedLabels: Record<string, string> = {
   awaiting_assignment: "待分配",
   awaiting_receipt: "待领取",
-  accepted: "已领取",
-  running: "运行中",
-  waiting: "等待接续",
-  completed: "执行完成",
-  failed: "执行失败",
-  cancelled: "已取消",
+  accepted: "待开始执行",
+  completed: "待负责人收尾",
+  failed: "待负责人处理执行失败",
 };
+
+const waitLabels = {
+  external: "等待外部条件",
+  reply: "等待回复",
+  children: "等待子项",
+  continuation: "等待接续",
+};
+
+const mobileOrder: BoardStage[] = [
+  "in_progress",
+  "todo",
+  "waiting",
+  "backlog",
+  "done",
+  "cancelled",
+];
 
 const pullLabels: Record<string, string> = {
   open: "开启",
@@ -31,11 +47,10 @@ const checkLabels: Record<string, string> = {
   failure: "CI 失败",
 };
 
-function column(issue: BoardIssue) {
-  if (issue.issue_state !== "open") return "closed";
-  if (["running", "waiting", "accepted", "failed"].includes(issue.task_state))
-    return "active";
-  return "queued";
+function progress(issue: BoardIssue) {
+  if (issue.running > 0) return `${issue.running} 项运行中`;
+  if (issue.waiting_for) return waitLabels[issue.waiting_for];
+  if (issue.stage === "todo") return queuedLabels[issue.task_state];
 }
 
 function Pull({ pull }: { pull: PullLink }) {
@@ -72,19 +87,30 @@ function Pull({ pull }: { pull: PullLink }) {
 }
 
 function Card({ issue }: { issue: BoardIssue }) {
+  const detail = progress(issue);
+  const repositories = issue.repo_ids?.join(" · ");
   return (
     <li className="board-card">
+      {repositories && <div className="board-card-repos">{repositories}</div>}
       <a className="board-card-title" href={`/issues/${issue.id}`}>
         {issue.title}
       </a>
-      <p className="board-card-state">
-        {issue.parent_issue_id && <span>子 Issue</span>}
-        <span>
-          {issue.issue_state === "closed"
-            ? "已结案"
-            : (taskLabels[issue.task_state] ?? issue.task_state)}
-        </span>
-      </p>
+      {(detail || issue.attention) && (
+        <div className="board-card-state">
+          {detail && <span>{detail}</span>}
+          {issue.attention && (
+            <a
+              className="board-attention"
+              href={chatLink(
+                issue.attention.chat_id,
+                issue.attention.question_message_id,
+              )}
+            >
+              待你决定
+            </a>
+          )}
+        </div>
+      )}
       {issue.pulls.length > 0 && (
         <ul className="board-pulls">
           {issue.pulls.map((pull) => (
@@ -106,7 +132,11 @@ export function IssueBoard({
   const [cursors, setCursors] = useState<number[]>([]);
   const [page, setPage] = useState<BoardPage | null>(null);
   const [error, setError] = useState("");
+  const [mobileStage, setMobileStage] = useState<BoardStage>();
+  const [cancelledExpanded, setCancelledExpanded] = useState(false);
+  const mobileTabs = useRef<HTMLDivElement>(null);
   const before = cursors.at(-1);
+  const loaded = page !== null;
 
   useEffect(() => {
     const controller = new AbortController();
@@ -116,6 +146,14 @@ export function IssueBoard({
         const result = await readIssueBoard(token, before, controller.signal);
         if (!controller.signal.aborted) {
           setPage(result);
+          setMobileStage(
+            (current) =>
+              current ??
+              mobileOrder.find((stage) =>
+                result.issues.some((issue) => issue.stage === stage),
+              ) ??
+              "in_progress",
+          );
           setError("");
           onReachable(true);
         }
@@ -135,12 +173,23 @@ export function IssueBoard({
     };
   }, [token, before, onReachable]);
 
+  useEffect(() => {
+    mobileTabs.current
+      ?.querySelector('button[aria-pressed="true"]')
+      ?.scrollIntoView({ block: "nearest", inline: "nearest" });
+  }, [loaded, mobileStage]);
+
   function turnPage(next?: number) {
     setPage(null);
     setCursors((saved) =>
       next === undefined ? saved.slice(0, -1) : [...saved, next],
     );
   }
+
+  const byStage = new Map<BoardStage, BoardIssue[]>(
+    columns.map(({ id }) => [id, []]),
+  );
+  for (const issue of page?.issues ?? []) byStage.get(issue.stage)?.push(issue);
 
   return (
     <main className="board">
@@ -152,30 +201,86 @@ export function IssueBoard({
       {!page && !error && <p role="status">正在读取看板…</p>}
       {page && (
         <>
-          {page.issues.length === 0 && <p>暂无 Issue</p>}
-          <div className="board-columns">
+          <div
+            ref={mobileTabs}
+            className="board-tabs"
+            role="group"
+            aria-label="选择 Issue 阶段"
+          >
             {columns.map(({ id, title }) => (
-              <section
+              <button
                 key={id}
-                aria-labelledby={`board-${id}`}
-                className="board-column"
+                type="button"
+                aria-pressed={mobileStage === id}
+                onClick={() => setMobileStage(id)}
               >
-                <h2 id={`board-${id}`}>
-                  <span aria-hidden="true" data-column={id} />
-                  {title}
-                </h2>
-                <ul className="board-cards">
-                  {page.issues
-                    .filter((issue) => column(issue) === id)
-                    .map((issue) => (
-                      <Card key={issue.id} issue={issue} />
-                    ))}
-                </ul>
-              </section>
+                <span
+                  className="board-dot"
+                  data-column={id}
+                  aria-hidden="true"
+                />
+                {title}
+                <small>{byStage.get(id)?.length ?? 0}</small>
+              </button>
             ))}
+          </div>
+          <div
+            className="board-columns"
+            data-cancelled-expanded={cancelledExpanded}
+          >
+            {columns.map(({ id, title }) => {
+              const cards = byStage.get(id) ?? [];
+              const collapsed = id === "cancelled" && !cancelledExpanded;
+              return (
+                <section
+                  key={id}
+                  aria-labelledby={`board-${id}`}
+                  className="board-column"
+                  data-mobile={mobileStage === id}
+                  data-collapsed={collapsed}
+                >
+                  <h2 id={`board-${id}`}>
+                    <span
+                      className="board-dot"
+                      aria-hidden="true"
+                      data-column={id}
+                    />
+                    <span className="board-column-title">{title}</span>
+                    <small>{cards.length}</small>
+                    {id === "cancelled" && (
+                      <button
+                        type="button"
+                        className="board-column-toggle"
+                        aria-label={
+                          cancelledExpanded ? "收起已取消" : "展开已取消"
+                        }
+                        aria-expanded={cancelledExpanded}
+                        onClick={() => setCancelledExpanded((value) => !value)}
+                      >
+                        <span aria-hidden="true">
+                          {cancelledExpanded ? "‹" : "›"}
+                        </span>
+                      </button>
+                    )}
+                  </h2>
+                  <div className="board-column-content">
+                    {cards.length ? (
+                      <ul className="board-cards">
+                        {cards.map((issue) => (
+                          <Card key={issue.id} issue={issue} />
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="board-empty">暂无 Issue</p>
+                    )}
+                  </div>
+                </section>
+              );
+            })}
           </div>
           {(cursors.length > 0 || page.next_before !== null) && (
             <nav className="board-pages" aria-label="看板分页">
+              <span>本页 {page.issues.length} 条</span>
               <button
                 className="text-button"
                 type="button"

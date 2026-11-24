@@ -192,13 +192,19 @@ fn enqueue(db: &Connection, target: &str, source_task: &str, message: &IssueMess
 
 impl Store {
     pub fn issue_messages(&self, issue: &str, before: i64) -> Result<Option<IssueMessagePage>> {
-        let title: Option<String> = self
+        let header: Option<(String, String, bool)> = self
             .db
-            .query_row("SELECT title FROM issues WHERE id = ?1", [issue], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT i.title, source.chat_id,
+                        EXISTS (SELECT 1 FROM router_dispatches d WHERE d.issue_id = i.id AND d.task_id IS NULL)
+                 FROM issues i JOIN chat_messages source ON source.seq = i.source_seq WHERE i.id = ?1",
+                [issue],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
             .optional()?;
-        let Some(title) = title else { return Ok(None) };
+        let Some((title, chat_id, awaiting_start)) = header else {
+            return Ok(None);
+        };
         let mut statement = self.db.prepare(&format!(
             "{TREE}
             SELECT m.seq, {MESSAGE_COLUMNS} FROM issue_messages m
@@ -218,6 +224,8 @@ impl Store {
         };
         Ok(Some(IssueMessagePage {
             title,
+            chat_id,
+            awaiting_start,
             messages: page.into_iter().rev().map(|(_, message)| message).collect(),
             next_before,
         }))

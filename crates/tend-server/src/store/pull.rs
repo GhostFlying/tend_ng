@@ -1,8 +1,6 @@
-use super::{PAGE_SIZE, Store};
+use super::Store;
 use anyhow::Result;
-use protocol::{
-    ExternalFact, GitHubPull, IssueBoard, IssueCard, LinkPull, PullFacts, PullLink, PullLinkReceipt,
-};
+use protocol::{ExternalFact, GitHubPull, LinkPull, PullFacts, PullLink, PullLinkReceipt};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub enum Linked {
@@ -111,58 +109,6 @@ impl Store {
         ))
     }
 
-    pub fn issue_board(&self, chat: Option<&str>, before: i64) -> Result<IssueBoard> {
-        let tx = self.db.unchecked_transaction()?;
-        let mut page = {
-            let mut query = tx.prepare(
-                "SELECT i.rowid, i.id, i.parent_issue_id, i.title, i.state, t.status
-                 FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
-                 JOIN tasks t ON t.rowid = (SELECT rowid FROM tasks WHERE issue_id = i.id ORDER BY rowid DESC LIMIT 1)
-                 WHERE (?1 IS NULL OR source.chat_id = ?1) AND i.rowid < ?2
-                 ORDER BY i.rowid DESC LIMIT ?3",
-            )?;
-            query
-                .query_map(params![chat, before, PAGE_SIZE + 1], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        IssueCard {
-                            id: row.get(1)?,
-                            parent_issue_id: row.get(2)?,
-                            title: row.get(3)?,
-                            issue_state: row.get(4)?,
-                            task_state: row.get(5)?,
-                            pulls: Vec::new(),
-                        },
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let next_before = if page.len() > PAGE_SIZE {
-            page.pop();
-            page.last().map(|(seq, _)| *seq)
-        } else {
-            None
-        };
-        let indices: std::collections::HashMap<_, _> = page
-            .iter()
-            .enumerate()
-            .map(|(index, (_, issue))| (issue.id.as_str(), index))
-            .collect();
-        let ids: Vec<_> = indices.keys().copied().collect();
-        let loaded = pulls(&tx, &ids)?
-            .into_iter()
-            .map(|(id, pull)| (indices[id.as_str()], pull))
-            .collect::<Vec<_>>();
-        for (index, pull) in loaded {
-            page[index].1.pulls.push(pull);
-        }
-        tx.commit()?;
-        Ok(IssueBoard {
-            issues: page.into_iter().map(|(_, card)| card).collect(),
-            next_before,
-        })
-    }
-
     pub fn due_pull(&self) -> Result<Option<GitHubPull>> {
         Ok(self
             .db
@@ -237,7 +183,7 @@ pub(super) fn issue_exists(db: &Connection, issue: &str) -> Result<bool> {
     )?)
 }
 
-fn pulls(db: &Connection, issues: &[&str]) -> Result<Vec<(String, PullLink)>> {
+pub(super) fn pulls(db: &Connection, issues: &[&str]) -> Result<Vec<(String, PullLink)>> {
     if issues.is_empty() {
         return Ok(Vec::new());
     }

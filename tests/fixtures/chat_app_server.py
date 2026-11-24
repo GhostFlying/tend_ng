@@ -20,6 +20,10 @@ PINNED_REVIEW = "Prepare a guide from the pinned demo branch."
 cases[PINNED_REVIEW] = {"dispatch": True}
 BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
 cases[BOARD_WAITING] = {"dispatch": True}
+RECORD_ISSUE = "先记下稍后整理发布说明。"
+START_ISSUE = "开始刚才记下的发布说明。"
+cases[RECORD_ISSUE] = {"answer": "已记下，稍后再做。"}
+cases[START_ISSUE] = {"answer": "已经安排原 Issue 开工。"}
 cases[ISSUE_CHAT_REQUEST] = {"dispatch": True}
 cases[ISSUE_CHAT_RELAY] = {"answer": "我已把补充要求交给负责指南的 Agent。"}
 cases[WEB_REQUEST] = {"dispatch": True}
@@ -224,6 +228,22 @@ for line in sys.stdin:
                     saved.write_text(receipt["question_message_id"])
                     sys.exit(0)
                 assert receipt["question_message_id"] == saved.read_text()
+                answer = case["answer"]
+            elif text == RECORD_ISSUE:
+                arguments = {"title": "稍后整理发布说明", "objective": text, "repo_ids": ["release-notes"]}
+                token = params["clientUserMessageId"]
+                receipt = decision_tool("tend_record_issue", arguments, thread_id, turn_id, token)
+                assert receipt == decision_tool("tend_record_issue", arguments, thread_id, turn_id, token)
+                assert "task_id" not in receipt
+                answer = case["answer"]
+            elif text == START_ISSUE:
+                token = params["clientUserMessageId"]
+                board = decision_tool("tend_list_issues", {}, thread_id, turn_id, token)
+                [record] = board["issues"]
+                recorded = decision_tool("tend_read_issue", {"issue_id": record["id"]}, thread_id, turn_id, token)
+                assert record["stage"] == "backlog" and "task_id" not in recorded
+                receipt = decision_tool("tend_start_issue", {"issue_id": record["id"]}, thread_id, turn_id, token)
+                assert receipt["issue_id"] == record["id"] and receipt["task_id"]
                 answer = case["answer"]
             elif text == CHECK_ISSUE:
                 token = params["clientUserMessageId"]

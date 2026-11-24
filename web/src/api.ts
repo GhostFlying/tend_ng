@@ -12,12 +12,20 @@ export type PullLink = {
   observation_error: string | null;
 };
 
+export type BoardStage =
+  "backlog" | "todo" | "in_progress" | "waiting" | "done" | "cancelled";
+
 export type BoardIssue = {
   id: string;
   parent_issue_id: string | null;
   title: string;
   issue_state: string;
   task_state: string;
+  stage: BoardStage;
+  running: number;
+  repo_ids?: string[];
+  waiting_for?: "external" | "reply" | "children" | "continuation";
+  attention?: { chat_id: string; question_message_id: string };
   pulls: PullLink[];
 };
 
@@ -70,12 +78,19 @@ export type Page = {
   messages: Message[];
   next_before: number | null;
   title?: string;
+  chat_id?: string;
+  awaiting_start?: boolean;
 };
 
-function messagePath(issue?: string) {
+export function chatLink(chat: string, message?: string) {
+  const path = chat === "main" ? "/" : `/?chat=${encodeURIComponent(chat)}`;
+  return message ? `${path}#message-${encodeURIComponent(message)}` : path;
+}
+
+function messagePath(issue?: string, chat = "main") {
   return issue
     ? `/api/v1/issues/${encodeURIComponent(issue)}/messages`
-    : "/api/v1/chats/main/messages";
+    : `/api/v1/chats/${encodeURIComponent(chat)}/messages`;
 }
 export type PendingMessage = {
   operation_id: string;
@@ -103,18 +118,23 @@ export async function readMessages(
   before?: number,
   signal?: AbortSignal,
   issue?: string,
+  chat?: string,
 ): Promise<Page> {
-  const messages = messagePath(issue);
+  const messages = messagePath(issue, chat);
   const path = before === undefined ? messages : `${messages}?before=${before}`;
   const response = await request(token, path, { signal });
   if (!issue) return response.json() as Promise<Page>;
   const page: {
     title: string;
+    chat_id?: string;
+    awaiting_start?: boolean;
     next_before: number | null;
     messages: IssueMessage[];
   } = await response.json();
   return {
     title: page.title,
+    chat_id: page.chat_id,
+    awaiting_start: page.awaiting_start,
     next_before: page.next_before,
     messages: page.messages.map((message) => ({
       id: message.id,
@@ -133,7 +153,7 @@ export async function readIssueBoard(
   before: number | undefined,
   signal: AbortSignal,
 ) {
-  const path = "/api/v1/issues";
+  const path = "/api/v1/issue-board";
   const url = before === undefined ? path : `${path}?before=${before}`;
   return (await request(token, url, { signal })).json() as Promise<BoardPage>;
 }
@@ -154,8 +174,9 @@ export async function sendMessage(
   token: string,
   message: PendingMessage,
   issue?: string,
+  chat?: string,
 ) {
-  await request(token, messagePath(issue), {
+  await request(token, messagePath(issue, chat), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(message),

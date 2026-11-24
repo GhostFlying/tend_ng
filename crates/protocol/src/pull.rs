@@ -79,12 +79,50 @@ pub struct PullLink {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[derive(Default, Clone, Copy)]
+pub enum BoardStage {
+    Backlog,
+    #[default]
+    Todo,
+    InProgress,
+    Waiting,
+    Done,
+    Cancelled,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardWait {
+    External,
+    Reply,
+    Children,
+    Continuation,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BoardAttention {
+    pub chat_id: String,
+    pub question_message_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct IssueCard {
     pub id: String,
     pub parent_issue_id: Option<String>,
     pub title: String,
     pub issue_state: String,
     pub task_state: String,
+    #[serde(default)]
+    pub stage: BoardStage,
+    #[serde(default)]
+    pub running: u32,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting_for: Option<BoardWait>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub attention: Option<BoardAttention>,
     pub pulls: Vec<PullLink>,
 }
 
@@ -99,6 +137,7 @@ pub fn issue_pulls_path(issue: &str) -> String {
 }
 
 pub const ISSUE_BOARD_PATH: &str = "/api/v1/issues";
+pub const TOP_LEVEL_BOARD_PATH: &str = "/api/v1/issue-board";
 
 pub fn issue_board_path(chat: &str) -> String {
     format!("/api/v1/chats/{chat}/issues")

@@ -29,6 +29,10 @@ pub struct IssueMessage {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IssueMessagePage {
     pub title: String,
+    #[serde(default)]
+    pub chat_id: String,
+    #[serde(default)]
+    pub awaiting_start: bool,
     pub messages: Vec<IssueMessage>,
     pub next_before: Option<i64>,
 }

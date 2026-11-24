@@ -21,6 +21,7 @@
 - 为责任 Agent 提供所需的工具、事实和权限。角色 Skill 和预置 prompt 指引计划、拆分、验证、审阅、重试和收尾，Agent 根据任务及仓库要求作决定。程序保障身份、授权、独占、执行事实、持久投递和副作用对账，按实际问题增补必要的限制。 [Empower Agent](docs/design.md#empower-agent)
 - 按可信单用户部署。故障处理和测试覆盖正常运维中可发生的断线、进程重启、响应丢失等场景。Issue 及其持久关联是工作事实来源，session 可从原输入、Issue 事实和原操作回执恢复。 [工作记录](docs/design.md#工作记录) · [Session 接续](docs/agent-tools.md#session-接续)
 - 主 Chat 由 Server 本机的 Router 代理。Issue Agent 通过子 Issue 委派，Owner 在 Runner 持久领取后生效，显式决定自己的 Issue 何时结案。交付与需用户决策的事项沿责任链回到 Router，再回到原 Chat。CLI 覆盖全部公开能力，与 Web 共用 API。 [产品与交互](docs/design.md#1-产品与交互) · [Agent 角色](docs/design.md#agent-角色)
+- 待安排 Issue 保存意图，尚未创建执行 Task。开始后进入待推进。看板以顶层 Issue 树的事实分列，有实际 Run 时显示进行中，有可安排工作或可处理输入时显示待推进，整棵树只等已登记的条件或回复时显示等待中。已完成与已取消沿业务终态展示。人工检查通过原 Chat 的 Attention 处理，卡片显示待你决定。 [看板阶段](docs/plans/issue-board-phases.md)
 - Server 和 Runner 各自运行和持久化。已领取任务可以离线推进，按原 Task、Run 和操作身份全量对账或增量同步。工具写操作先在执行实例持久受理。业务状态、操作结果与待投递记录在所属实例的同一短事务提交，响应丢失时沿原身份查证。 [同步 API](docs/server-runner.md#一期同步-api) · [写入与故障边界](docs/storage.md#写入与故障边界)
 - 按实际停妥证据归还 slot。原 Task 在 `waitfor` 期间继续独占 workspace。每一层的 `waitfor` 命中后，经负责原 Task 接续的 Runner 直接送给登记等待的 Agent。同 Host 接替时，前驱负责旧 Run 停妥，后继取得接续权后可在原 workspace 启动下一次 Run。 [等待与续跑](docs/task-lifecycle.md#命中事件与续跑) · [同机 Run 交接](docs/server-runner.md#同机接替时的-run-交接)
 

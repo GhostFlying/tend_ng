@@ -119,6 +119,33 @@ pub struct IssueDispatch {
     pub work: DispatchIssue,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+pub struct RecordedIssue {
+    pub issue_id: String,
+    pub operation_id: String,
+    pub source_message_id: String,
+    pub chat_id: String,
+    pub issue_state: String,
+    #[serde(flatten)]
+    pub work: DispatchIssue,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum IssueDetail {
+    Dispatched(Box<IssueDispatch>),
+    Recorded(RecordedIssue),
+}
+
+impl IssueDetail {
+    pub fn chat_id(&self) -> &str {
+        match self {
+            Self::Dispatched(issue) => &issue.chat_id,
+            Self::Recorded(issue) => &issue.chat_id,
+        }
+    }
+}
+
 fn open_issue() -> String {
     "open".to_owned()
 }

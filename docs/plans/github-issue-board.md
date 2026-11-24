@@ -11,7 +11,7 @@ Server 使用服务用户的只读 GitHub 权限。外部查询以关联或明�
 
 ## 全局看板与空状态
 
-看板显示所有对话中的 Issue，通过 `GET /api/v1/issues` 读取分页卡片和当页 PR 关联。CLI 用 `tend issue list` 打开同一列表，用 `tend issue list <chat-id>` 按对话查询。Router 在自己的对话范围内读取工作。看板在空库时仍显示三列和空状态。验证不同对话的卡片、既有按对话查询、分页，以及桌面和窄屏的空状态及卡片链接。
+看板通过 `GET /api/v1/issue-board` 分页读取各对话的顶层 Issue，卡片汇总其子 Issue 的 PR 关联。CLI 用 `tend issue list --scope=roots` 读取同一列表，默认列出全部 Issue，也可用 `tend issue list <chat-id>` 按对话查询。Router 在自己的对话范围内读取工作。空库显示各阶段和空状态。验证不同对话的卡片、按对话查询、分页，以及桌面和窄屏上的列与卡片入口。
 
 ## 启动与验证
 

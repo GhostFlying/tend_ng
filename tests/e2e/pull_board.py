@@ -116,8 +116,27 @@ def main():
                 with sqlite3.connect(root / "server.sqlite") as database:
                     before, = database.execute("SELECT rowid FROM issues WHERE id = ?", [other["id"]]).fetchone()
                 assert {item["id"] for item in cli("issue", "list", "--scope=all", str(before))["issues"]} == {parent, child}
+                cli("chat", "send", "record-chat", "先记下稍后整理发布说明。")
+                [record] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"], bool)
+                assert record["stage"] == "backlog"
+                assert "task_id" not in cli("issue", "read", record["id"])
+                assert cli("issue", "messages", record["id"])["awaiting_start"]
+                assert {item["id"] for item in cli("issue", "list", "--scope=roots")["issues"]} == {
+                    parent, other["id"], record["id"],
+                }
+                wait_for(lambda: cli("issue", "list", "--scope=roots")["issues"],
+                         lambda rows: any(row["id"] == parent and row["stage"] == "done" for row in rows))
                 if args.web:
                     subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=40, env=env)
+                cli("chat", "send", "record-chat", "开始刚才记下的发布说明。")
+                [started] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"],
+                                     lambda rows: len(rows) == 1 and rows[0]["stage"] == "todo")
+                assert started["id"] == record["id"]
+                receipt = cli("issue", "read", record["id"])
+                assert cli("issue", "start", record["id"])["task_id"] == receipt["task_id"]
+                assert not cli("issue", "messages", record["id"])["awaiting_start"]
+                with sqlite3.connect(root / "server.sqlite") as database:
+                    assert database.execute("SELECT count(*) FROM tasks WHERE issue_id = ?", [record["id"]]).fetchone() == (1,)
             finally:
                 runner.terminate()
                 runner.wait(timeout=7)

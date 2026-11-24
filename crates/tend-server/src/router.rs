@@ -1,7 +1,7 @@
 use crate::store::{Attempt, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{AgentQuery, DispatchIssue, ExternalCondition, IssueDispatch};
+use protocol::{AgentQuery, DispatchIssue, ExternalCondition};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -13,10 +13,12 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 10;
+const TOOL_REVISION: i64 = 11;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
+    "When the user wants to record work for later, use tend_record_issue to save it without scheduling execution. ",
+    "When the user asks to start that scope, use tend_start_issue with its original Issue ID. ",
     "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
     "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
     "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
@@ -38,11 +40,11 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "When no user update is needed, answer exactly TEND_NO_UPDATE. Make timely decisions about useful user updates."
 );
 
-fn dispatch_tool() -> Value {
+fn dispatch_tool(name: &str, description: &str) -> Value {
     json!({
         "type": "function",
-        "name": "tend_dispatch_issue",
-        "description": "Queue a top-level Tend Issue for an Issue Agent. Return the durable Issue, Task, and operation identities.",
+        "name": name,
+        "description": description,
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -181,7 +183,20 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let process = client.process_identity()?;
     let mut loaded_thread = None;
     let mut tools = vec![
-        dispatch_tool(),
+        dispatch_tool(
+            "tend_dispatch_issue",
+            "Queue a top-level Issue now and return its durable Issue, Task, and operation identities.",
+        ),
+        dispatch_tool(
+            "tend_record_issue",
+            "Record an Issue for later without creating an execution Task.",
+        ),
+        json!({
+            "type": "function", "name": "tend_start_issue",
+            "description": "Start a recorded Issue from this Chat using its saved scope and original Issue ID.",
+            "inputSchema": {"type":"object","properties":{"issue_id":{"type":"string"}},
+                           "required":["issue_id"],"additionalProperties":false}
+        }),
         read_dispatch_tool(),
         relay_tool(),
         subscribe_tool(),
@@ -339,13 +354,13 @@ impl TurnHandler for DispatchHandler<'_> {
                     "No dispatch with that operation ID belongs to this Chat input",
                 )
             }
-            "tend_dispatch_issue" => self.dispatch(&call),
-            "tend_list_issues" | "tend_read_issue" => {
+            "tend_dispatch_issue" | "tend_record_issue" => self.dispatch(&call),
+            "tend_list_issues" | "tend_read_issue" | "tend_start_issue" => {
                 let Some(chat) = self.store.router_chat(self.attempt_id, &call)? else {
                     return Ok(tool_error("Cannot verify the current Chat"));
                 };
                 if call.tool == "tend_list_issues" {
-                    let page = self.store.issue_board(Some(&chat), i64::MAX)?;
+                    let page = self.store.issue_board(Some(&chat), i64::MAX, false)?;
                     return Ok(ToolOutput {
                         success: true,
                         body: serde_json::to_value(page)?,
@@ -357,8 +372,14 @@ impl TurnHandler for DispatchHandler<'_> {
                 else {
                     return Ok(tool_error("Provide the original Issue ID"));
                 };
+                if call.tool == "tend_start_issue" {
+                    return tool_receipt(
+                        self.store.start_recorded_issue(id, Some(&chat))?,
+                        "No startable recorded Issue with that ID belongs to this Chat",
+                    );
+                }
                 match self.store.issue(id)? {
-                    Some(issue) if issue.chat_id == chat => Ok(ToolOutput {
+                    Some(issue) if issue.chat_id() == chat => Ok(ToolOutput {
                         success: true,
                         body: serde_json::to_value(issue)?,
                     }),
@@ -483,13 +504,18 @@ impl DispatchHandler<'_> {
             ));
         }
         tool_receipt(
-            self.store.dispatch_issue(self.attempt_id, call, &work)?,
+            self.store.dispatch_issue(
+                self.attempt_id,
+                call,
+                &work,
+                call.tool == "tend_record_issue",
+            )?,
             "Dispatch call does not match its saved origin or intent",
         )
     }
 }
 
-fn tool_receipt(receipt: Option<IssueDispatch>, missing: &str) -> Result<ToolOutput> {
+fn tool_receipt(receipt: Option<impl serde::Serialize>, missing: &str) -> Result<ToolOutput> {
     Ok(match receipt {
         Some(receipt) => ToolOutput {
             success: true,

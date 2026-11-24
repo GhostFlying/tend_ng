@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, RefObject } from "react";
 import {
+  chatLink,
   download,
   mergeMessages,
   readMessages,
@@ -9,14 +10,15 @@ import {
 } from "./api";
 import type { Artifact, Message, PendingMessage } from "./api";
 
-function pendingKey(issue?: string) {
-  return issue
-    ? `tend.pending-issue-message.v1:${issue}`
-    : "tend.pending-message.v1";
+function pendingKey(chat: string, issue?: string) {
+  if (issue) return `tend.pending-issue-message.v1:${issue}`;
+  return chat === "main"
+    ? "tend.pending-message.v1"
+    : `tend.pending-message.v1:${chat}`;
 }
 
-function savedMessage(issue?: string): PendingMessage | null {
-  const value = sessionStorage.getItem(pendingKey(issue));
+function savedMessage(chat: string, issue?: string): PendingMessage | null {
+  const value = sessionStorage.getItem(pendingKey(chat, issue));
   if (!value) return null;
   try {
     return JSON.parse(value) as PendingMessage;
@@ -110,6 +112,7 @@ function MessageRow({
   message,
   source,
   showReference,
+  sourceChat,
   issue,
   token,
   onReply,
@@ -117,6 +120,7 @@ function MessageRow({
   message: Message;
   source?: Message;
   showReference: boolean;
+  sourceChat: string;
   issue?: string;
   token: string;
   onReply: (message: Message) => void;
@@ -179,7 +183,7 @@ function MessageRow({
       {detail?.source_message_id && (
         <a
           className="issue-link"
-          href={`/#message-${detail.source_message_id}`}
+          href={chatLink(sourceChat, detail.source_message_id)}
         >
           原对话
         </a>
@@ -245,6 +249,7 @@ function MessageRow({
 function Composer({
   token,
   issue,
+  chatId,
   replyId,
   replyText,
   textarea,
@@ -253,13 +258,14 @@ function Composer({
 }: {
   token: string;
   issue?: string;
+  chatId: string;
   replyId: string | null;
   replyText?: string;
   textarea: RefObject<HTMLTextAreaElement | null>;
   onCancelReply: () => void;
   onSent: (reply: string | null) => void;
 }) {
-  const [pending] = useState(() => savedMessage(issue));
+  const [pending] = useState(() => savedMessage(chatId, issue));
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
   const [sending, setSending] = useState(false);
@@ -275,12 +281,12 @@ function Composer({
         ? attempt.current
         : { operation_id: operationId(), text: value, reply_to: quote };
     attempt.current = message;
-    sessionStorage.setItem(pendingKey(issue), JSON.stringify(message));
+    sessionStorage.setItem(pendingKey(chatId, issue), JSON.stringify(message));
     setSending(true);
     setError("");
     try {
-      await sendMessage(token, message, issue);
-      sessionStorage.removeItem(pendingKey(issue));
+      await sendMessage(token, message, issue, chatId);
+      sessionStorage.removeItem(pendingKey(chatId, issue));
       attempt.current = null;
       setText("");
       onSent(replyId);
@@ -362,26 +368,31 @@ function Composer({
 export function Chat({
   token,
   issue,
+  chatId,
   onReachable,
   onTitle,
 }: {
   token: string;
   issue?: string;
+  chatId: string;
   onReachable: (online: boolean) => void;
   onTitle: (title: string) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [sourceChat, setSourceChat] = useState(chatId);
+  const [awaitingStart, setAwaitingStart] = useState(false);
   const [before, setBefore] = useState<number | null | undefined>(undefined);
   const [loadingHistory, setLoadingHistory] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [replyId, setReplyId] = useState(
-    () => savedMessage(issue)?.reply_to ?? null,
+    () => savedMessage(chatId, issue)?.reply_to ?? null,
   );
   const textarea = useRef<HTMLTextAreaElement>(null);
   const timeline = useRef<HTMLElement>(null);
   const follow = useRef(true);
+  const anchor = useRef(window.location.hash.slice(1));
   const preserve = useRef<{ top: number; height: number } | null>(null);
 
   useEffect(() => {
@@ -394,6 +405,7 @@ export function Chat({
           undefined,
           controller.signal,
           issue,
+          chatId,
         );
         if (controller.signal.aborted) return;
         setMessages((current) => mergeMessages(current, page.messages));
@@ -402,6 +414,8 @@ export function Chat({
         );
         setError("");
         if (page.title) onTitle(page.title);
+        setSourceChat(page.chat_id || chatId);
+        setAwaitingStart(page.awaiting_start === true);
         onReachable(true);
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -417,11 +431,18 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, issue, refresh, onReachable, onTitle]);
+  }, [token, issue, chatId, refresh, onReachable, onTitle]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
     if (!element) return;
+    const target = anchor.current && document.getElementById(anchor.current);
+    if (target) {
+      anchor.current = "";
+      follow.current = false;
+      target.scrollIntoView({ block: "center" });
+      return;
+    }
     if (preserve.current) {
       element.scrollTop =
         preserve.current.top + element.scrollHeight - preserve.current.height;
@@ -436,7 +457,7 @@ export function Chat({
     setLoadingHistory(true);
     setHistoryError("");
     try {
-      const page = await readMessages(token, before, undefined, issue);
+      const page = await readMessages(token, before, undefined, issue, chatId);
       if (timeline.current) {
         preserve.current = {
           top: timeline.current.scrollTop,
@@ -476,6 +497,7 @@ export function Chat({
         message={message}
         source={source}
         showReference={showReference}
+        sourceChat={sourceChat}
         issue={issue}
         token={token}
         onReply={(question) => {
@@ -518,18 +540,28 @@ export function Chat({
           </ol>
         </div>
       </main>
-      <Composer
-        token={token}
-        issue={issue}
-        replyId={replyId}
-        replyText={replyId ? byId.get(replyId)?.text : undefined}
-        textarea={textarea}
-        onCancelReply={() => setReplyId(null)}
-        onSent={(sentReply) => {
-          setReplyId((current) => (current === sentReply ? null : current));
-          setRefresh((number) => number + 1);
-        }}
-      />
+      {awaitingStart ? (
+        <footer className="dock">
+          <p className="lane board-empty">
+            暂无 Issue Owner。可在<a href={chatLink(sourceChat)}>原对话</a>
+            中安排工作。
+          </p>
+        </footer>
+      ) : (
+        <Composer
+          token={token}
+          issue={issue}
+          chatId={chatId}
+          replyId={replyId}
+          replyText={replyId ? byId.get(replyId)?.text : undefined}
+          textarea={textarea}
+          onCancelReply={() => setReplyId(null)}
+          onSent={(sentReply) => {
+            setReplyId((current) => (current === sentReply ? null : current));
+            setRefresh((number) => number + 1);
+          }}
+        />
+      )}
     </>
   );
 }

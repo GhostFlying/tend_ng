@@ -99,6 +99,8 @@ def main():
                 wait_for(lambda: sql("server", "SELECT id FROM issues WHERE id = ?", child), bool)
                 initial = wait_for(lambda: read("issue", "read", child),
                                    lambda issue: issue["status"] == "running")
+                [card] = read("issue", "list", "--scope=roots")["issues"]
+                assert card["id"] == parent and card["stage"] == "in_progress" and card["running"] > 0
             (root / "ask-now").touch()
             wait_for(lambda: sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?",
                                  initial["task_id"]), lambda rows: rows == [("waiting",)])
@@ -115,6 +117,10 @@ def main():
                     assert question["attention"] == {"id": original_attention, "state": "awaiting_user"}
                     [pending] = read("attention", "list", "main")
                     assert pending["task_id"] == initial["task_id"] and pending["question_message_id"] == question["id"]
+                    [card] = read("issue", "list", "--scope=roots")["issues"]
+                    assert card["attention"] == {
+                        "chat_id": "main", "question_message_id": question["id"],
+                    }
                     waiting = read("issue", "read", child)
                     assert waiting["status"] == "waiting" and waiting["run"]["phase"]["waiting_for_attention"]
                     assert cli("chat", "send", "other", REPLY, "--reply-to", question["id"]).returncode != 0

@@ -70,6 +70,9 @@ def main():
                 shared = json.loads((root / "siblings.json").read_text())["shared"]["action"]["task_id"]
                 assert sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?", shared) == [
                     ("queued",)]
+                [root_card] = wait_for(lambda: cli("issue", "list", "--scope=roots")["issues"],
+                                       lambda rows: len(rows) == 1 and rows[0]["stage"] == "waiting")
+                assert root_card["running"] == 0 and root_card["waiting_for"] == "external"
                 wait_for(lambda: cli("pr", "watches", issue), lambda rows: len(rows) == 3)
                 [(due,)] = wait_for(lambda: sql("server", "SELECT due_at FROM external_batches WHERE task_id = ?", task), bool)
                 assert sql("server", "SELECT count(*) FROM external_deliveries") == [(1,)]

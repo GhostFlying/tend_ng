@@ -390,7 +390,8 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/issues"))
         .filter(|id| protocol::valid_id(id));
-    if path == protocol::ISSUE_BOARD_PATH || issue_chat.is_some() {
+    let roots_only = path == protocol::TOP_LEVEL_BOARD_PATH;
+    if roots_only || path == protocol::ISSUE_BOARD_PATH || issue_chat.is_some() {
         if request.method() != &Method::Get {
             return Ok(api_error(405, "method not allowed"));
         }
@@ -399,7 +400,7 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
         };
         return Ok((
             200,
-            serde_json::to_value(store.issue_board(issue_chat, before)?)?,
+            serde_json::to_value(store.issue_board(issue_chat, before, roots_only)?)?,
         ));
     }
     if let Some(issue) = path
@@ -448,6 +449,19 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
             Method::Post => link_pull(store, &issue_id.to_owned(), request),
             _ => Ok(api_error(405, "method not allowed")),
         };
+    }
+    if let Some(issue_id) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/start"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok(match store.start_recorded_issue(issue_id, None)? {
+            Some(issue) => (200, serde_json::to_value(issue)?),
+            None => api_error(409, "No startable recorded Issue with that ID"),
+        });
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")

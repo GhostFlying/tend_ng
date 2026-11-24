@@ -1,5 +1,6 @@
 mod artifacts;
 mod attention;
+mod board;
 pub(crate) mod control;
 mod coordination;
 pub(crate) mod discovery;
@@ -63,7 +64,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 22,
+            version <= 23,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -195,7 +196,10 @@ impl Store {
                      SELECT json_extract(fact, '$.head_sha') FROM external_facts WHERE id = external_latest.fact_id
                  ) WHERE stream = 'ci';"
             )?;
-            tx.pragma_update(None, "user_version", 22)?;
+        }
+        if version < 23 {
+            work::migrate_backlog(&tx)?;
+            tx.pragma_update(None, "user_version", 23)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
