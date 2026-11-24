@@ -9,6 +9,7 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
     let (file, mime) = if matches!(path, "/" | "/issues" | "/agents" | "/hosts" | "/more")
         || path
             .strip_prefix("/issues/")
+            .map(|route| route.strip_suffix("/overview").unwrap_or(route))
             .is_some_and(protocol::valid_id)
     {
         (root.join("index.html"), "text/html; charset=utf-8")

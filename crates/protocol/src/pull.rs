@@ -132,6 +132,34 @@ pub struct IssueBoard {
     pub next_before: Option<i64>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueOverview {
+    pub id: String,
+    pub title: String,
+    pub stage: BoardStage,
+    pub objective: String,
+    pub repo_ids: Vec<String>,
+    pub chat_id: String,
+    pub source_message_id: String,
+    pub children: Vec<IssueOverviewChild>,
+    pub pulls: Vec<PullLink>,
+    pub artifacts: Vec<IssueOverviewArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueOverviewChild {
+    pub id: String,
+    pub title: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueOverviewArtifact {
+    #[serde(flatten)]
+    pub artifact: crate::Artifact,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub issue_title: Option<String>,
+}
+
 pub fn issue_pulls_path(issue: &str) -> String {
     format!("/api/v1/issues/{issue}/pulls")
 }

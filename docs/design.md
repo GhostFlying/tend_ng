@@ -79,7 +79,7 @@ Agent 在 Skill 指引下使用本机注入的 Tend 工具。Router 直接在 Se
 
 ## 4. 消息投递、外部事件与等待
 
-Issue 详情显示近期讨论、当前 Owner 和轻量输入框。父 Issue Chat 将自身和下属各级子 Issue 的留言按时间合并展示，保留原作者和所属 Issue。派发和新输入保存在各自的目标 Issue，回复沿原留言归属送达。 [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示)
+看板卡片打开 Issue 概览，显示标题、看板阶段、工作目标和已登记的关联。用户可从概览进入原 Issue 对话或打开原 Chat 消息。Issue 对话显示近期讨论、当前 Owner 和轻量输入框。父 Issue Chat 将自身和下属各级子 Issue 的留言按时间合并展示，保留原作者和所属 Issue。派发和新输入保存在各自的目标 Issue，回复沿原留言归属送达。 [Issue 看板概览](plans/issue-overview.md) · [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示)
 
 Agent 通过显式留言工具把正文写入 Issue Chat。执行过程在同一时间线默认收起，用户点击后按原 Run 从实际执行实例加载。 [Issue Chat 的留言与执行过程](chat-routing.md#issue-chat-的留言与执行过程)
 

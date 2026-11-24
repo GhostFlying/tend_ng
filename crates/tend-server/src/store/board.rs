@@ -1,7 +1,10 @@
-use super::{PAGE_SIZE, Store, pull, work::read_list};
+use super::{PAGE_SIZE, Store, artifacts, pull, work::read_list};
 use anyhow::Result;
-use protocol::{BoardAttention, BoardStage, BoardWait, IssueBoard, IssueCard};
-use rusqlite::{Connection, params};
+use protocol::{
+    BoardAttention, BoardStage, BoardWait, IssueBoard, IssueCard, IssueOverview,
+    IssueOverviewArtifact, IssueOverviewChild,
+};
+use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
 
 const TREE: &str =
@@ -10,6 +13,15 @@ const TREE: &str =
          UNION ALL
          SELECT tree.root, child.id FROM tree JOIN issues child ON child.parent_issue_id = tree.issue
      )";
+
+const CARD_FIELDS: &str = "i.rowid, i.id, i.parent_issue_id, i.title, i.state,
+    COALESCE(t.status, 'backlog'),
+    COALESCE(t.repo_ids, json_extract(d.request, '$.repo_ids'), '[]')";
+const CARD_JOINS: &str = "FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
+    LEFT JOIN tasks t ON t.rowid = (
+        SELECT rowid FROM tasks WHERE issue_id = i.id ORDER BY rowid DESC LIMIT 1
+    )
+    LEFT JOIN router_dispatches d ON d.issue_id = i.id";
 
 #[derive(Default)]
 struct Progress {
@@ -48,6 +60,69 @@ impl Progress {
 }
 
 impl Store {
+    pub fn issue_overview(&self, id: &str) -> Result<Option<IssueOverview>> {
+        let tx = self.db.unchecked_transaction()?;
+        let Some((mut card, objective, chat_id, source_message_id)) = tx
+            .query_row(
+                &format!(
+                    "SELECT {CARD_FIELDS}, i.objective, source.chat_id, source.id
+                     {CARD_JOINS} WHERE i.id = ?1"
+                ),
+                [id],
+                |row| Ok((read_card(row)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let roots = serde_json::to_string(&[id])?;
+        enrich_cards(&tx, &roots, std::slice::from_mut(&mut card), true)?;
+        let children = {
+            let mut query = tx.prepare(
+                "SELECT id, title FROM issues WHERE parent_issue_id = ?1 ORDER BY rowid",
+            )?;
+            query
+                .query_map([id], |row| {
+                    Ok(IssueOverviewChild {
+                        id: row.get(0)?,
+                        title: row.get(1)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let files = {
+            let mut query = tx.prepare(&format!(
+                "{TREE}
+                 SELECT a.id, a.name, a.bytes, a.available, CASE WHEN i.id != tree.root THEN i.title END
+                 FROM tree JOIN artifacts a ON a.issue_id = tree.issue
+                 JOIN issues i ON i.id = a.issue_id
+                 ORDER BY a.rowid"
+            ))?;
+            query
+                .query_map([&roots], |row| {
+                    Ok(IssueOverviewArtifact {
+                        artifact: artifacts::artifact(row)?,
+                        issue_title: row.get(4)?,
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        tx.commit()?;
+        let (_, card) = card;
+        Ok(Some(IssueOverview {
+            id: card.id,
+            title: card.title,
+            stage: card.stage,
+            objective,
+            repo_ids: card.repo_ids,
+            chat_id,
+            source_message_id,
+            children,
+            pulls: card.pulls,
+            artifacts: files,
+        }))
+    }
+
     pub fn issue_board(
         &self,
         chat: Option<&str>,
@@ -56,38 +131,15 @@ impl Store {
     ) -> Result<IssueBoard> {
         let tx = self.db.unchecked_transaction()?;
         let mut page = {
-            let mut query = tx.prepare(
-                "SELECT i.rowid, i.id, i.parent_issue_id, i.title, i.state,
-                        COALESCE(t.status, 'backlog'),
-                        COALESCE(t.repo_ids, json_extract(d.request, '$.repo_ids'), '[]')
-                 FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
-                 LEFT JOIN tasks t ON t.rowid = (
-                    SELECT rowid FROM tasks WHERE issue_id = i.id ORDER BY rowid DESC LIMIT 1
-                 )
-                 LEFT JOIN router_dispatches d ON d.issue_id = i.id
+            let mut query = tx.prepare(&format!(
+                "SELECT {CARD_FIELDS}
+                 {CARD_JOINS}
                  WHERE (?1 IS NULL OR source.chat_id = ?1) AND i.rowid < ?2
                    AND (NOT ?4 OR i.parent_issue_id IS NULL)
                  ORDER BY i.rowid DESC LIMIT ?3",
-            )?;
+            ))?;
             query
-                .query_map(params![chat, before, PAGE_SIZE + 1, roots_only], |row| {
-                    Ok((
-                        row.get::<_, i64>(0)?,
-                        IssueCard {
-                            id: row.get(1)?,
-                            parent_issue_id: row.get(2)?,
-                            title: row.get(3)?,
-                            issue_state: row.get(4)?,
-                            task_state: row.get(5)?,
-                            repo_ids: read_list(row, 6)?,
-                            stage: BoardStage::default(),
-                            running: 0,
-                            waiting_for: None,
-                            attention: None,
-                            pulls: Vec::new(),
-                        },
-                    ))
-                })?
+                .query_map(params![chat, before, PAGE_SIZE + 1, roots_only], read_card)?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
         let next_before = if page.len() > PAGE_SIZE {
@@ -104,18 +156,7 @@ impl Store {
                     .map(|(_, card)| card.id.as_str())
                     .collect::<Vec<_>>(),
             )?;
-            let mut progress = read_progress(&tx, &roots)?;
-            let mut attentions = read_attentions(&tx, &roots)?;
-            for (_, card) in &mut page {
-                let progress = progress.remove(&card.id).unwrap_or_default();
-                card.attention = attentions.remove(&card.id);
-                card.running = progress.running;
-                card.stage = progress.stage(card);
-                if matches!(card.stage, BoardStage::Waiting) {
-                    card.waiting_for = Some(progress.reason(card));
-                }
-            }
-            attach_pulls(&tx, &roots, &mut page, roots_only)?;
+            enrich_cards(&tx, &roots, &mut page, roots_only)?;
         }
         tx.commit()?;
         Ok(IssueBoard {
@@ -123,6 +164,45 @@ impl Store {
             next_before,
         })
     }
+}
+
+fn read_card(row: &Row<'_>) -> rusqlite::Result<(i64, IssueCard)> {
+    Ok((
+        row.get(0)?,
+        IssueCard {
+            id: row.get(1)?,
+            parent_issue_id: row.get(2)?,
+            title: row.get(3)?,
+            issue_state: row.get(4)?,
+            task_state: row.get(5)?,
+            repo_ids: read_list(row, 6)?,
+            stage: BoardStage::default(),
+            running: 0,
+            waiting_for: None,
+            attention: None,
+            pulls: Vec::new(),
+        },
+    ))
+}
+
+fn enrich_cards(
+    db: &Connection,
+    roots: &str,
+    page: &mut [(i64, IssueCard)],
+    aggregate_pulls: bool,
+) -> Result<()> {
+    let mut progress = read_progress(db, roots)?;
+    let mut attentions = read_attentions(db, roots)?;
+    for (_, card) in &mut *page {
+        let progress = progress.remove(&card.id).unwrap_or_default();
+        card.attention = attentions.remove(&card.id);
+        card.running = progress.running;
+        card.stage = progress.stage(card);
+        if matches!(card.stage, BoardStage::Waiting) {
+            card.waiting_for = Some(progress.reason(card));
+        }
+    }
+    attach_pulls(db, roots, page, aggregate_pulls)
 }
 
 fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progress>> {

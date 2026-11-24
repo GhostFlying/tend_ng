@@ -449,6 +449,19 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/overview"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok(match store.issue_overview(issue_id)? {
+            Some(issue) => (200, serde_json::to_value(issue)?),
+            None => api_error(404, "Issue not found"),
+        });
+    }
+    if let Some(issue_id) = path
+        .strip_prefix("/api/v1/issues/")
         .and_then(|path| path.strip_suffix("/pulls"))
         .filter(|id| protocol::valid_id(id))
     {

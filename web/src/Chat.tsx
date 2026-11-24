@@ -8,7 +8,7 @@ import {
   readRollout,
   sendMessage,
 } from "./api";
-import type { Artifact, Message, PendingMessage } from "./api";
+import type { Artifact, Message, Page, PendingMessage } from "./api";
 
 function pendingKey(chat: string, issue?: string) {
   if (issue) return `tend.pending-issue-message.v1:${issue}`;
@@ -38,12 +38,18 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : "暂时无法连接 Tend";
 }
 
+function messageAnchor() {
+  return /^#message-([a-zA-Z0-9_-]+)$/.exec(window.location.hash)?.[1] ?? "";
+}
+
 function RunRow({
+  id,
   token,
   run,
   author,
   issue,
 }: {
+  id: string;
   token: string;
   run: string;
   author: string;
@@ -74,7 +80,7 @@ function RunRow({
     );
   }
   return (
-    <li className="run-row">
+    <li className="run-row" id={`message-${id}`}>
       <button
         type="button"
         className="text-button run-toggle"
@@ -392,22 +398,86 @@ export function Chat({
   const textarea = useRef<HTMLTextAreaElement>(null);
   const timeline = useRef<HTMLElement>(null);
   const follow = useRef(true);
-  const anchor = useRef(window.location.hash.slice(1));
+  const anchor = useRef(messageAnchor());
+  const checkedAnchor = useRef(false);
+  const historyRequest = useRef<AbortController | null>(null);
   const preserve = useRef<{ top: number; height: number } | null>(null);
 
   useEffect(() => {
+    function followHash() {
+      const id = messageAnchor();
+      if (!id || document.getElementById(`message-${id}`)) {
+        anchor.current = "";
+        return;
+      }
+      anchor.current = id;
+      checkedAnchor.current = false;
+      historyRequest.current?.abort();
+      setRefresh((number) => number + 1);
+    }
+    window.addEventListener("hashchange", followHash);
+    return () => {
+      window.removeEventListener("hashchange", followHash);
+      historyRequest.current?.abort();
+    };
+  }, []);
+
+  useEffect(() => {
     const controller = new AbortController();
+    const { signal } = controller;
     let timer: number;
+    let seeking = false;
+
+    async function seekLinkedMessage(page: Page) {
+      seeking = true;
+      const id = anchor.current;
+      let cursor = page.next_before;
+      const history: Message[][] = [];
+      if (
+        id &&
+        cursor !== null &&
+        !page.messages.some((message) => message.id === id)
+      ) {
+        setLoadingHistory(true);
+        setHistoryError("");
+        try {
+          while (cursor !== null) {
+            const earlier = await readMessages(
+              token,
+              cursor,
+              signal,
+              issue,
+              chatId,
+            );
+            if (signal.aborted) return;
+            history.push(earlier.messages);
+            cursor = earlier.next_before;
+            if (earlier.messages.some((message) => message.id === id)) break;
+          }
+        } catch (error) {
+          if (signal.aborted) return;
+          setHistoryError(errorText(error));
+        }
+        setBefore(cursor);
+        if (history.length > 0) {
+          const linkedHistory = history.reverse().flat();
+          setMessages((current) => mergeMessages(current, linkedHistory, true));
+        }
+      }
+      checkedAnchor.current = true;
+      setLoadingHistory(false);
+    }
+
     async function update() {
       try {
         const page = await readMessages(
           token,
           undefined,
-          controller.signal,
+          signal,
           issue,
           chatId,
         );
-        if (controller.signal.aborted) return;
+        if (signal.aborted) return;
         setMessages((current) => mergeMessages(current, page.messages));
         setBefore((cursor) =>
           cursor === undefined ? page.next_before : cursor,
@@ -417,14 +487,15 @@ export function Chat({
         setSourceChat(page.chat_id || chatId);
         setAwaitingStart(page.awaiting_start === true);
         onReachable(true);
+        if (anchor.current && !checkedAnchor.current && !seeking)
+          void seekLinkedMessage(page);
       } catch (error) {
-        if (!controller.signal.aborted) {
+        if (!signal.aborted) {
           setError(errorText(error));
           onReachable(false);
         }
       }
-      if (!controller.signal.aborted)
-        timer = window.setTimeout(() => void update(), 1500);
+      if (!signal.aborted) timer = window.setTimeout(() => void update(), 1500);
     }
     void update();
     return () => {
@@ -436,10 +507,12 @@ export function Chat({
   useLayoutEffect(() => {
     const element = timeline.current;
     if (!element) return;
-    const target = anchor.current && document.getElementById(anchor.current);
+    const target =
+      anchor.current && document.getElementById(`message-${anchor.current}`);
     if (target) {
       anchor.current = "";
       follow.current = false;
+      preserve.current = null;
       target.scrollIntoView({ block: "center" });
       return;
     }
@@ -454,10 +527,14 @@ export function Chat({
 
   async function loadEarlier() {
     if (before == null || loadingHistory) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    historyRequest.current = controller;
     setLoadingHistory(true);
     setHistoryError("");
     try {
-      const page = await readMessages(token, before, undefined, issue, chatId);
+      const page = await readMessages(token, before, signal, issue, chatId);
+      if (signal.aborted) return;
       if (timeline.current) {
         preserve.current = {
           top: timeline.current.scrollTop,
@@ -467,9 +544,9 @@ export function Chat({
       setBefore(page.next_before);
       setMessages((current) => mergeMessages(current, page.messages, true));
     } catch (error) {
-      setHistoryError(errorText(error));
+      if (!signal.aborted) setHistoryError(errorText(error));
     } finally {
-      setLoadingHistory(false);
+      if (!signal.aborted) setLoadingHistory(false);
     }
   }
 
@@ -481,6 +558,7 @@ export function Chat({
       return (
         <RunRow
           key={message.id}
+          id={message.id}
           token={token}
           run={detail.run_id}
           author={detail.author}

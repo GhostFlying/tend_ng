@@ -56,6 +56,15 @@ export type PullLink = {
 export type BoardStage =
   "backlog" | "todo" | "in_progress" | "waiting" | "done" | "cancelled";
 
+export const issueStageLabels: Record<BoardStage, string> = {
+  backlog: "待安排",
+  todo: "待推进",
+  in_progress: "进行中",
+  waiting: "等待中",
+  done: "已完成",
+  cancelled: "已取消",
+};
+
 export type BoardIssue = {
   id: string;
   parent_issue_id: string | null;
@@ -71,6 +80,19 @@ export type BoardIssue = {
 };
 
 export type BoardPage = { issues: BoardIssue[]; next_before: number | null };
+
+export type IssueOverviewData = {
+  id: string;
+  title: string;
+  stage: BoardStage;
+  objective: string;
+  repo_ids: string[];
+  chat_id: string;
+  source_message_id: string;
+  children: { id: string; title: string }[];
+  pulls: PullLink[];
+  artifacts: (Artifact & { issue_title?: string })[];
+};
 
 export type Activity = {
   seq: number;
@@ -126,6 +148,18 @@ export type Page = {
 export function chatLink(chat: string, message?: string) {
   const path = chat === "main" ? "/" : `/?chat=${encodeURIComponent(chat)}`;
   return message ? `${path}#message-${encodeURIComponent(message)}` : path;
+}
+
+export function issueOverviewLink(id: string) {
+  return `/issues/${encodeURIComponent(id)}/overview`;
+}
+
+export function pullLinkLabel(pull: PullLink) {
+  const repository = new URL(pull.url).pathname
+    .split("/")
+    .slice(1, 3)
+    .join("/");
+  return `${repository} #${pull.number}`;
 }
 
 function messagePath(issue?: string, chat = "main") {
@@ -197,6 +231,17 @@ export async function readIssueBoard(
   const path = "/api/v1/issue-board";
   const url = before === undefined ? path : `${path}?before=${before}`;
   return (await request(token, url, { signal })).json() as Promise<BoardPage>;
+}
+
+export async function readIssueOverview(
+  token: string,
+  issue: string,
+  signal: AbortSignal,
+) {
+  const path = `/api/v1/issues/${encodeURIComponent(issue)}/overview`;
+  return (
+    await request(token, path, { signal })
+  ).json() as Promise<IssueOverviewData>;
 }
 
 export async function readNotifications(

@@ -471,6 +471,88 @@ a {
   text-overflow: ellipsis;
 }
 
+.issue-overview {
+  padding: 32px 24px;
+  overflow-wrap: anywhere;
+}
+
+.issue-overview h1 {
+  font-size: 24px;
+  line-height: 1.35;
+  font-weight: 650;
+}
+
+.issue-overview-meta,
+.issue-file-source {
+  color: var(--muted);
+}
+
+.issue-overview-meta,
+.issue-overview-links {
+  margin-top: 8px;
+}
+
+.issue-overview-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 16px;
+}
+
+.issue-overview a {
+  text-underline-offset: 3px;
+}
+
+.issue-overview section {
+  margin-top: 24px;
+}
+
+.issue-overview h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.issue-overview ul {
+  margin: 0;
+  padding-inline-start: 20px;
+}
+
+.issue-overview li + li {
+  margin-top: 4px;
+}
+
+.issue-objective p,
+p.issue-objective {
+  white-space: pre-wrap;
+}
+
+.issue-objective summary {
+  cursor: pointer;
+}
+
+.issue-objective-preview {
+  display: block;
+}
+
+.issue-objective-expand {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.issue-objective[open] .issue-objective-preview {
+  display: none;
+}
+
+.issue-objective[open] p {
+  margin-top: 6px;
+}
+
+@media (max-width: 760px) {
+  .issue-overview {
+    padding: 24px 16px;
+  }
+}
+
 .issue-heading > span,
 .run-author {
   color: var(--muted);
@@ -754,6 +836,7 @@ a {
 }
 
 .board-card {
+  position: relative;
   min-width: 0;
   padding: 10px 12px 12px;
   border: 1px solid var(--border);
@@ -783,6 +866,16 @@ a {
 
 .board-card-title:hover {
   text-decoration: underline;
+}
+
+.board-card-title::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.board-card a:not(.board-card-title) {
+  position: relative;
 }
 
 .board-card-state,

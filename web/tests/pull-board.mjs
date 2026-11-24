@@ -7,9 +7,21 @@ const {
   TEND_URL: url,
   TEND_TOKEN: token,
   TEND_BOARD_SCREENSHOTS: screenshots,
+  TEND_BOARD_SOURCE: source,
 } = process.env;
-assert(url && token);
+assert(url && token && source);
+const issueMessage = "board-issue-history-54";
 const browser = await chromium.launch({ args: ["--no-proxy-server"] });
+
+async function waitForVisibleMessage(page, id) {
+  await page.waitForFunction((id) => {
+    const row = document.getElementById(`message-${id}`);
+    if (!row) return false;
+    const view = row.closest("main").getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    return bounds.top >= view.top && bounds.bottom <= view.bottom;
+  }, id);
+}
 
 try {
   for (const [width, height] of [
@@ -18,7 +30,12 @@ try {
   ]) {
     const page = await browser.newPage({ viewport: { width, height } });
     const errors = [];
+    const reads = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      const target = new URL(request.url());
+      if (target.pathname.endsWith("/messages")) reads.push(target);
+    });
     await page.goto(url);
     await page.getByLabel("访问令牌").fill(token);
     await page.getByRole("button", { name: "连接", exact: true }).click();
@@ -75,7 +92,46 @@ try {
     }
     await card.getByRole("link", { name: parent, exact: true }).click();
     await page.getByRole("heading", { name: parent, exact: true }).waitFor();
-    await page.getByRole("link", { name: "看板", exact: true }).click();
+    const overview = page.getByRole("main");
+    await overview.getByText("已完成 · example", { exact: true }).waitFor();
+    await overview.getByRole("link", { name: "核对安装步骤" }).waitFor();
+    assert.equal(
+      await overview.getByRole("link", { name: "example/guide #73" }).count(),
+      1,
+    );
+    const chat = overview.getByRole("link", { name: "进入 Issue 对话" });
+    const ownerPath = await chat.getAttribute("href");
+    assert.equal(new URL(page.url()).pathname, ownerPath + "/overview");
+    assert.equal(await page.getByLabel("发消息给 Issue Owner").count(), 0);
+    await overview.getByRole("link", { name: "查看原消息" }).click();
+    await page.waitForURL(`${url}/#message-${source}`);
+    await waitForVisibleMessage(page, source);
+    const olderReads = (path) =>
+      reads.filter(
+        (read) => read.pathname === path && read.searchParams.has("before"),
+      );
+    assert.equal(olderReads("/api/v1/chats/main/messages").length, 2);
+
+    await page.goBack();
+    await chat.click();
+    await page.getByText("Issue history 159", { exact: true }).waitFor();
+    const ownerApi = `/api/v1${ownerPath}/messages`;
+    assert.equal(olderReads(ownerApi).length, 0);
+    assert.equal(await page.locator(`#message-${issueMessage}`).count(), 0);
+    await page.goto(`${url}${ownerPath}#message-${issueMessage}`);
+    await waitForVisibleMessage(page, issueMessage);
+    assert.equal(olderReads(ownerApi).length, 2);
+    await page.waitForResponse((response) => {
+      const target = new URL(response.url());
+      return target.pathname === ownerApi && !target.search;
+    });
+    await waitForVisibleMessage(page, issueMessage);
+    assert.equal(olderReads(ownerApi).length, 2);
+    await page.getByRole("button", { name: "读取更早的消息" }).click();
+    await page.getByText("Issue history 0", { exact: true }).waitFor();
+    assert.equal(olderReads(ownerApi).length, 3);
+    await page.getByRole("link", { name: "Issue 概览", exact: true }).click();
+    await page.getByRole("link", { name: "返回看板" }).click();
     if (width === 390) {
       await page.getByRole("button", { name: /^已取消/ }).click();
       await page.locator("#board-cancelled-content .board-empty").waitFor();
@@ -131,6 +187,11 @@ try {
       await page.setViewportSize({ width, height });
     }
     await page.getByRole("link", { name: "稍后整理发布说明" }).click();
+    await overview
+      .getByText("待安排 · release-notes", { exact: true })
+      .waitFor();
+    assert.equal(await overview.getByRole("list").count(), 0);
+    await chat.click();
     await page.getByText("暂无 Issue Owner。", { exact: false }).waitFor();
     await page.route("**/api/v1/issue-board", (route) =>
       route.fulfill({ json: { issues: [], next_before: null } }),
@@ -147,7 +208,7 @@ try {
     await page.close();
   }
   console.log(
-    "PASS read-only Issue board and PR links in Chromium on desktop and mobile",
+    "PASS Issue overview, PR links, and third-page message anchors in desktop and mobile Chromium",
   );
 } finally {
   await browser.close();

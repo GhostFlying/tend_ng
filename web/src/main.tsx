@@ -1,8 +1,9 @@
 import { useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { readMessages } from "./api";
+import { issueOverviewLink, readMessages } from "./api";
 import { IssueBoard } from "./IssueBoard";
+import { IssueOverview } from "./IssueOverview";
 import { Chat } from "./Chat";
 import { Notifications } from "./Notifications";
 import { Agents, Hosts } from "./Resources";
@@ -27,9 +28,9 @@ const resourceTitle =
 const tokenKey = "tend.token.v1";
 const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
 const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
-const issue = /^\/issues\/([a-zA-Z0-9_-]+)$/.exec(
-  window.location.pathname,
-)?.[1];
+const issueRoute = /^\/issues\/([a-zA-Z0-9_-]+)(\/overview)?$/.exec(path);
+const issue = issueRoute?.[1];
+const overview = !!issueRoute?.[2];
 
 function Connect({ onConnect }: { onConnect: (token: string) => void }) {
   const [token, setToken] = useState("");
@@ -129,7 +130,7 @@ function App() {
             </a>
             <a
               href="/issues"
-              aria-current={board ? "page" : undefined}
+              aria-current={board || issue ? "page" : undefined}
               aria-label="看板"
             >
               <NavIcon name="board" />
@@ -159,10 +160,14 @@ function App() {
           }
           data-resource={token && resourceTitle ? path.slice(1) : undefined}
         >
-          {token && issue ? (
+          {token && overview ? (
+            <a href="/issues" className="text-button">
+              返回看板
+            </a>
+          ) : token && issue ? (
             <div className="issue-heading">
-              <a href="/" className="text-button">
-                对话
+              <a href={issueOverviewLink(issue)} className="text-button">
+                Issue 概览
               </a>
               <span aria-hidden="true">/</span>
               <h1>{title || "Issue 对话"}</h1>
@@ -188,6 +193,12 @@ function App() {
         {token ? (
           board ? (
             <IssueBoard token={token} onReachable={setReachable} />
+          ) : issue && overview ? (
+            <IssueOverview
+              token={token}
+              issue={issue}
+              onReachable={setReachable}
+            />
           ) : path === "/agents" ? (
             <Agents token={token} onReachable={setReachable} />
           ) : path === "/hosts" ? (

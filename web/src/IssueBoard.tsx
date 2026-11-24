@@ -1,15 +1,14 @@
 import { useEffect, useRef, useState } from "react";
-import { chatLink, readIssueBoard } from "./api";
+import {
+  chatLink,
+  issueOverviewLink,
+  issueStageLabels,
+  pullLinkLabel,
+  readIssueBoard,
+} from "./api";
 import type { BoardIssue, BoardPage, BoardStage, PullLink } from "./api";
 
-const columns: { id: BoardStage; title: string }[] = [
-  { id: "backlog", title: "待安排" },
-  { id: "todo", title: "待推进" },
-  { id: "in_progress", title: "进行中" },
-  { id: "waiting", title: "等待中" },
-  { id: "done", title: "已完成" },
-  { id: "cancelled", title: "已取消" },
-];
+const columns = Object.entries(issueStageLabels) as [BoardStage, string][];
 
 const cancelledPreferenceKey = "tend.ng.board.cancelled-expanded";
 
@@ -57,14 +56,10 @@ function progress(issue: BoardIssue) {
 
 function Pull({ pull }: { pull: PullLink }) {
   const facts = pull.facts;
-  const repository = new URL(pull.url).pathname
-    .split("/")
-    .slice(1, 3)
-    .join("/");
   return (
     <li className="board-pull">
       <a href={pull.url} target="_blank" rel="noreferrer">
-        {repository} #{pull.number}
+        {pullLinkLabel(pull)}
       </a>
       <div className="board-pull-status">
         {facts && (
@@ -94,7 +89,7 @@ function Card({ issue }: { issue: BoardIssue }) {
   return (
     <li className="board-card">
       {repositories && <div className="board-card-repos">{repositories}</div>}
-      <a className="board-card-title" href={`/issues/${issue.id}`}>
+      <a className="board-card-title" href={issueOverviewLink(issue.id)}>
         {issue.title}
       </a>
       {(detail || issue.attention) && (
@@ -205,7 +200,7 @@ export function IssueBoard({
   }
 
   const byStage = new Map<BoardStage, BoardIssue[]>(
-    columns.map(({ id }) => [id, []]),
+    columns.map(([id]) => [id, []]),
   );
   for (const issue of page?.issues ?? []) byStage.get(issue.stage)?.push(issue);
 
@@ -225,7 +220,7 @@ export function IssueBoard({
             role="group"
             aria-label="选择 Issue 阶段"
           >
-            {columns.map(({ id, title }) => (
+            {columns.map(([id, title]) => (
               <button
                 key={id}
                 type="button"
@@ -246,7 +241,7 @@ export function IssueBoard({
             className="board-columns"
             data-cancelled-expanded={cancelledExpanded}
           >
-            {columns.map(({ id, title }) => {
+            {columns.map(([id, title]) => {
               const cards = byStage.get(id) ?? [];
               const collapsed = id === "cancelled" && !cancelledExpanded;
               return (

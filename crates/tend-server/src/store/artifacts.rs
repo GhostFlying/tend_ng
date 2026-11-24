@@ -31,7 +31,7 @@ pub fn pending(db: &Connection, runner: &str, task: Option<&str>) -> Result<Vec<
         .collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
-fn artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
+pub(super) fn artifact(row: &rusqlite::Row<'_>) -> rusqlite::Result<Artifact> {
     Ok(Artifact {
         id: row.get(0)?,
         name: row.get(1)?,

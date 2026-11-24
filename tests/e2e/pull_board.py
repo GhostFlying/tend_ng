@@ -61,7 +61,7 @@ def main():
                 root, "pull-board",
             ], env=env)
             try:
-                cli("chat", "send", "main", REQUEST)
+                original = cli("chat", "send", "main", REQUEST)["message_id"]
                 messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
                                     lambda rows: len(rows) == 2)
                 [parent] = messages[0]["issue_ids"]
@@ -127,7 +127,19 @@ def main():
                 wait_for(lambda: cli("issue", "list", "--scope=roots")["issues"],
                          lambda rows: any(row["id"] == parent and row["stage"] == "done" for row in rows))
                 if args.web:
-                    subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=40, env=env)
+                    # Put both anchors on page three, with another page of Issue history behind it.
+                    with sqlite3.connect(root / "server.sqlite") as database:
+                        database.executemany(
+                            "INSERT INTO chat_messages (id, chat_id, text) VALUES (?, 'main', ?)",
+                            ((f"board-chat-history-{i}", f"Main Chat history {i}") for i in range(105)),
+                        )
+                        database.executemany(
+                            "INSERT INTO issue_messages (id, issue_id, kind, author, text) "
+                            "VALUES (?, ?, 'agent', 'fixture', ?)",
+                            ((f"board-issue-history-{i}", parent, f"Issue history {i}") for i in range(160)),
+                        )
+                    browser_env = {**env, "TEND_BOARD_SOURCE": original}
+                    subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=45, env=browser_env)
                 cli("chat", "send", "record-chat", "开始刚才记下的发布说明。")
                 [started] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"],
                                      lambda rows: len(rows) == 1 and rows[0]["stage"] == "todo")
