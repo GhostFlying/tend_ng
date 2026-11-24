@@ -47,6 +47,14 @@
   line-height: 22px;
 }
 
+.header.resource-header:not([data-resource="agents"]) {
+  padding-inline: 16px;
+}
+
+.header.resource-header:not([data-resource="agents"]) h1 {
+  font-size: 18px;
+}
+
 .resource-page {
   flex: 1;
   min-height: 0;
@@ -236,6 +244,10 @@
 .agent-state {
   color: var(--resource-secondary);
   font-size: 12px;
+}
+
+.agent-state {
+  white-space: nowrap;
 }
 
 .agent-state i {
@@ -463,7 +475,7 @@
 }
 
 .host-identity small[data-online="true"] {
-  color: var(--resource-online);
+  color: var(--label);
   background: var(--resource-online-bg);
 }
 
@@ -508,6 +520,9 @@
 }
 
 .host-dialog-header button {
+  width: 28px;
+  min-height: 28px;
+  border: 1px solid var(--border);
   font-size: 22px;
 }
 
@@ -569,6 +584,18 @@
 
   .app .header-actions {
     display: none;
+  }
+
+  .header.resource-header[data-resource="agents"] {
+    border-bottom: 0;
+  }
+
+  .agent-tabs button {
+    min-height: 40px;
+  }
+
+  .host-dialog-header button {
+    min-height: 44px;
   }
 
   .agent-directory {

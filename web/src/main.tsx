@@ -157,6 +157,7 @@ function App() {
           className={
             token && resourceTitle ? "header resource-header" : "header"
           }
+          data-resource={token && resourceTitle ? path.slice(1) : undefined}
         >
           {token && issue ? (
             <div className="issue-heading">
