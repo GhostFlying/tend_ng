@@ -23,12 +23,22 @@ const QUERY: &str = "query($owner:String!, $repo:String!, $number:Int!) {
   }
 }";
 
+const CHECKS_AT_COMMIT: &str = "query($owner:String!, $repo:String!, $sha:GitObjectID!) {
+  repository(owner:$owner, name:$repo) { object(oid:$sha) { ... on Commit {
+    oid statusCheckRollup { state contexts(first:100) { nodes {
+      ... on CheckRun { databaseId name status conclusion }
+      ... on StatusContext { context state }
+    } } }
+  } } }
+}";
+
 pub fn spawn(store: Store, program: OsString) {
     thread::spawn(move || {
         loop {
             let result = (|| {
                 if let Some(pull) = store.due_pull()? {
-                    store.observe_pull(&pull, observe(&program, &pull))?;
+                    let watched = store.watched_ci_heads(&pull)?;
+                    store.observe_pull(&pull, observe(&program, &pull, &watched))?;
                     return Ok(true);
                 }
                 Ok::<_, anyhow::Error>(false)
@@ -46,6 +56,7 @@ pub fn spawn(store: Store, program: OsString) {
 fn observe(
     program: &OsString,
     pull: &GitHubPull,
+    watched: &[String],
 ) -> Result<(PullFacts, Vec<ExternalFact>), &'static str> {
     let (owner, repo) = pull.repository.split_once('/').ok_or("invalid_reference")?;
     let output = request(
@@ -85,16 +96,11 @@ fn observe(
         .to_owned();
     let commit = &pr["commits"]["nodes"][0]["commit"];
     let ci = if commit["oid"] == head_sha {
-        match commit["statusCheckRollup"]["state"].as_str() {
-            Some("SUCCESS") => Some("success"),
-            Some("FAILURE" | "ERROR") => Some("failure"),
-            Some("PENDING" | "EXPECTED") => Some("pending"),
-            _ => None,
-        }
+        ci_summary(&commit["statusCheckRollup"])
     } else {
         None
     };
-    let check_facts = if commit["oid"] == head_sha {
+    let mut check_facts = if commit["oid"] == head_sha {
         checks(
             pull,
             &head_sha,
@@ -103,6 +109,15 @@ fn observe(
     } else {
         Vec::new()
     };
+    let head_repository = pr["headRepository"]["nameWithOwner"]
+        .as_str()
+        .map(str::to_ascii_lowercase);
+    let check_repository = head_repository.as_deref().unwrap_or(&pull.repository);
+    for sha in watched.iter().filter(|sha| **sha != head_sha) {
+        if let Ok(facts) = candidate_checks(program, check_repository, pull, sha) {
+            check_facts.extend(facts);
+        }
+    }
     Ok((
         PullFacts {
             title,
@@ -111,12 +126,62 @@ fn observe(
             head_sha,
             ci: ci.map(str::to_owned),
             head_branch: pr["headRefName"].as_str().map(str::to_owned),
-            head_repository: pr["headRepository"]["nameWithOwner"]
-                .as_str()
-                .map(str::to_ascii_lowercase),
+            head_repository,
         },
         check_facts,
     ))
+}
+
+fn ci_summary(rollup: &Value) -> Option<&'static str> {
+    match rollup["state"].as_str() {
+        Some("SUCCESS") => Some("success"),
+        Some("FAILURE" | "ERROR") => Some("failure"),
+        Some("PENDING" | "EXPECTED") => Some("pending"),
+        _ => None,
+    }
+}
+
+fn candidate_checks(
+    program: &OsString,
+    repository: &str,
+    pull: &GitHubPull,
+    sha: &str,
+) -> Result<Vec<ExternalFact>, &'static str> {
+    let (owner, repo) = repository.split_once('/').ok_or("invalid_reference")?;
+    let output = request(
+        program,
+        &[
+            "api",
+            "graphql",
+            "--hostname",
+            "github.com",
+            "-f",
+            &format!("query={CHECKS_AT_COMMIT}"),
+            "-f",
+            &format!("owner={owner}"),
+            "-f",
+            &format!("repo={repo}"),
+            "-f",
+            &format!("sha={sha}"),
+        ],
+    )?;
+    let commit = &output["data"]["repository"]["object"];
+    if commit["oid"] != sha {
+        return Ok(Vec::new());
+    }
+    let rollup = &commit["statusCheckRollup"];
+    let mut facts = checks(pull, sha, &rollup["contexts"]["nodes"]);
+    if let Some(state) = ci_summary(rollup) {
+        facts.push(ExternalFact {
+            url: pull.url(),
+            event: ExternalKind::Ci,
+            state: state.to_owned(),
+            head_sha: Some(sha.to_owned()),
+            check: None,
+            run_id: None,
+        });
+    }
+    Ok(facts)
 }
 
 fn checks(pull: &GitHubPull, head: &str, nodes: &Value) -> Vec<ExternalFact> {

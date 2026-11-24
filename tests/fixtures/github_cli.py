@@ -30,6 +30,15 @@ args = dict(value.split("=", 1) for value in sys.argv[6::2])
 assert args["owner"] == "example" and args["repo"] == "guide"
 assert "statusCheckRollup" in args["query"]
 
+if "sha" in args:
+    assert args["sha"] == "b" * 40
+    print(json.dumps({"data": {"repository": {"object": {
+        "oid": args["sha"], "statusCheckRollup": {"state": "SUCCESS",
+            "contexts": {"nodes": [{"name": "build-linux", "databaseId": 13,
+                "status": "COMPLETED", "conclusion": "SUCCESS"}]}}
+    }}}}))
+    sys.exit(0)
+
 number = int(args["number"])
 with (root / "github-reads").open("a") as log:
     log.write(f"{number}\n")
@@ -46,16 +55,16 @@ if number == 99 or (root / f"deny-{number}").exists():
 
 if number == 82:
     mode = (root / "wait-mode").read_text()
-    head = "a" * 40
+    head = ("c" if mode == "advanced" else "a") * 40
     print(json.dumps({"data": {"repository": {"pullRequest": {
         "title": "CI wait fixture", "state": "OPEN", "isDraft": False,
         "headRefOid": head, "headRefName": "fixture-branch",
         "headRepository": {"nameWithOwner": "Example/Guide"},
         "commits": {"nodes": [{"commit": {"oid": "b" * 40 if mode == "stale" else head,
-            "statusCheckRollup": {"state": "PENDING" if mode == "pending" else "SUCCESS",
+            "statusCheckRollup": {"state": "PENDING" if mode in {"pending", "advanced"} else "SUCCESS",
                 "contexts": {"nodes": [{"name": "build-linux", "databaseId": 7,
-                    "status": "IN_PROGRESS" if mode == "pending" else "COMPLETED",
-                    "conclusion": None if mode == "pending" else "SUCCESS"}]}}
+                    "status": "IN_PROGRESS" if mode in {"pending", "advanced"} else "COMPLETED",
+                    "conclusion": None if mode in {"pending", "advanced"} else "SUCCESS"}]}}
         }}]},
     }}}}))
     sys.exit(0)

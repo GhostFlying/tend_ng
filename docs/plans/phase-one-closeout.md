@@ -53,3 +53,13 @@ CLI 为已结束的顶层 Issue 登记回收。Server 暂停该树的新准入�
 - 默认继续按仓库、category、capability 和可用度分配。查询入口复用分配的资格规则，返回符合的具名配置及其 Runner。Router 使用 Server 的登记和当前可用度，Issue Agent 读取当前 Runner 本地的配置与仓库。
 - 顶层派发可显式指定 Agent 及其 Runner。子 Issue 只能在树已归属的 Runner 指名。记录原选择，实际领取仍核对当前配置与版本。缺少合格配置仍保留派发及原因。
 - 固定 fixture 以默认排在前面的配置及显式指名的后续配置验证真实分配。Router 模型和 reasoning effort 由 Server 进程选择。
+
+## 固定候选提交与收尾验收
+
+- GitHub 的 PR 状态照常跟踪当前 head。仅对活跃条件显式指定的旧候选提交读对应的 CI，按实际 SHA 和检查身份匹配。没有固定 SHA 的条件跟随当前 head，旧候选的事实留作证据。
+- 收尾记录真实 Codex 的主 Chat 交付和 Attention、本地定向跨进程验收、以及两条同步路径下的 API 响应观察。运行入口统一写进 README，配置保存在部署者的本机。
+
+## 角色指引与按需查证
+
+- 把角色指引作为短文本随原生回合载入。复杂工作提醒 Work Agent 寻求独立审阅，保留对审阅方式和结果的自主判断。Review Agent 说明候选、范围、证据和结论。
+- Router 在原 Chat 按需读取相关 Issue 的持久事实。只读查证共用用户 API 的读逻辑，继续由 Router 组织给用户的答复。

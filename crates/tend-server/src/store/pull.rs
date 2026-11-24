@@ -212,6 +212,20 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+
+    pub fn watched_ci_heads(&self, pull: &GitHubPull) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT json_extract(condition, '$.head_sha') AS head
+             FROM (
+                 SELECT condition FROM external_watches WHERE url = ?1 AND state = 'active'
+                 UNION ALL SELECT condition FROM external_routes WHERE url = ?1
+             )
+             WHERE json_extract(condition, '$.event') = 'ci' AND head IS NOT NULL",
+        )?;
+        Ok(statement
+            .query_map([pull.url()], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
 }
 
 pub(super) fn issue_exists(db: &Connection, issue: &str) -> Result<bool> {

@@ -197,7 +197,12 @@ fn register(
     Ok(())
 }
 
-pub fn observe(db: &Connection, fact_id: &str, fact: &ExternalFact) -> Result<()> {
+pub fn observe(
+    db: &Connection,
+    fact_id: &str,
+    fact: &ExternalFact,
+    pinned_only: bool,
+) -> Result<()> {
     let mut query = db.prepare(
         "SELECT id, message_seq, condition, mode FROM external_routes WHERE url = ?1 ORDER BY rowid",
     )?;
@@ -210,7 +215,8 @@ pub fn observe(db: &Connection, fact_id: &str, fact: &ExternalFact) -> Result<()
         ))
     })? {
         let (id, source, condition, mode) = row?;
-        if serde_json::from_str::<ExternalCondition>(&condition)?.matches(fact) {
+        let condition = serde_json::from_str::<ExternalCondition>(&condition)?;
+        if (!pinned_only || condition.head_sha.is_some()) && condition.matches(fact) {
             queue(db, &id, fact_id, &fact.url, &mode, source)?;
         }
     }

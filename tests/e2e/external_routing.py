@@ -31,9 +31,9 @@ def main():
             with sqlite3.connect(root / f"{database}.sqlite") as db:
                 return db.execute(statement, values).fetchall()
 
-        def require(message, number, event, state, op):
+        def require(message, number, event, state, op, **fields):
             return cli("pr", "require", message, json.dumps({
-                "url": PULL + str(number), "event": event, "state": state
+                "url": PULL + str(number), "event": event, "state": state, **fields
             }), op)
 
         with server(server_bin, root, server_env, listen=addr, github_cli=TESTS / "fixtures/github_cli.py"):
@@ -79,6 +79,22 @@ def main():
             messages = cli("chat", "read", "main")["messages"]
             assert sum(message["id"] == topic for message in messages) == 1
             assert all(message["text"] != "TEND_NO_UPDATE" for message in messages)
+
+            require(topic, 82, "ci", "success", "follow-head", check="build-linux")
+            require(topic, 82, "ci", "success", "pinned-head", head_sha="b" * 40,
+                    check="build-linux", run_id="13")
+            (root / "wait-mode").write_text("advanced")
+            sql("UPDATE github_pulls SET due_at = 0 WHERE number = 82")
+            wait_for(lambda: sql("SELECT json_extract(facts, '$.head_sha') FROM github_pulls WHERE number = 82"),
+                     lambda rows: rows == [("c" * 40,)])
+            routed = sql("SELECT d.route_id, f.fact FROM external_route_deliveries d "
+                         "JOIN external_facts f ON f.id = d.fact_id WHERE d.batch_id != ?", batch)
+            facts = {name: json.loads(value) for name, value in routed}
+            [optional] = [entry["watch_id"] for entry in entries if entry["mode"] == "optional"]
+            assert facts.keys() == {"pinned-head", optional, "unassigned-open"}, facts
+            assert facts["pinned-head"]["head_sha"] == "b" * 40
+            assert facts["pinned-head"]["run_id"] == "13"
+
     print("PASS observed PR state, required Issue and Router routes, native subscriptions, and one batch per recipient")
 
 

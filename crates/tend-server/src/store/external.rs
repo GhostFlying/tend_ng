@@ -89,7 +89,7 @@ pub fn register(
     })? {
         let (fact_id, data, error) = saved?;
         let fact = serde_json::from_str(&data)?;
-        if matches(&watch, &fact, error.as_deref()) {
+        if matches(&watch, &fact, error.as_deref(), false) {
             queue(db, &watch, &fact_id)?;
             if mode == WatchMode::Wait {
                 return Ok(());
@@ -114,11 +114,11 @@ pub fn clear_waits(db: &Connection, task: &str) -> Result<()> {
     Ok(())
 }
 
-fn matches(watch: &Watch, fact: &ExternalFact, error: Option<&str>) -> bool {
+fn matches(watch: &Watch, fact: &ExternalFact, error: Option<&str>, pinned_only: bool) -> bool {
     if error.is_some() {
         watch.mode == WatchMode::Wait
     } else {
-        watch.condition.matches(fact)
+        (!pinned_only || watch.condition.head_sha.is_some()) && watch.condition.matches(fact)
     }
 }
 
@@ -192,6 +192,7 @@ pub fn observe(
                     run_id: None,
                 },
                 Some(error),
+                false,
             );
         }
         Err(_) => return Ok(()),
@@ -208,20 +209,30 @@ pub fn observe(
         check: None,
         run_id: None,
     };
-    save_fact(db, "pull", &fact, None)?;
+    save_fact(db, "pull", &fact, None, false)?;
+    let current_ci_stream = format!("ci:{}", summary.head_sha);
     if let Some(ci) = &summary.ci {
         fact.event = ExternalKind::Ci;
         fact.state.clone_from(ci);
-        save_fact(db, "ci", &fact, None)?;
+        save_fact(db, &current_ci_stream, &fact, None, false)?;
     } else {
         db.execute(
-            "DELETE FROM external_latest WHERE url = ?1 AND stream = 'ci'",
-            [&fact.url],
+            "DELETE FROM external_latest WHERE url = ?1 AND stream = ?2",
+            params![fact.url, current_ci_stream],
         )?;
     }
     for check in checks {
-        let stream = serde_json::to_string(&(&check.head_sha, &check.check, &check.run_id))?;
-        save_fact(db, &stream, check, None)?;
+        let stream = match (&check.head_sha, &check.check) {
+            (Some(sha), None) => format!("ci:{sha}"),
+            _ => serde_json::to_string(&(&check.head_sha, &check.check, &check.run_id))?,
+        };
+        save_fact(
+            db,
+            &stream,
+            check,
+            None,
+            check.head_sha.as_deref() != Some(&summary.head_sha),
+        )?;
     }
     Ok(())
 }
@@ -231,6 +242,7 @@ fn save_fact(
     stream: &str,
     fact: &ExternalFact,
     error: Option<&str>,
+    pinned_only: bool,
 ) -> Result<()> {
     let data = serde_json::to_string(fact)?;
     let previous = db.query_row(
@@ -267,12 +279,12 @@ fn save_fact(
             condition: serde_json::from_str(&condition)?,
             mode: watch_mode(&mode),
         };
-        if matches(&watch, fact, error) {
+        if matches(&watch, fact, error, pinned_only) {
             queue(db, &watch, &id)?;
         }
     }
     if error.is_none() {
-        super::external_routing::observe(db, &id, fact)?;
+        super::external_routing::observe(db, &id, fact, pinned_only)?;
     }
     Ok(())
 }
