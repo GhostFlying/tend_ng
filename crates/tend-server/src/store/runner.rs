@@ -4,8 +4,8 @@ use super::{
 };
 use anyhow::{Result, ensure};
 use protocol::{
-    ClaimDecision, IssueDispatch, Placement, RunnerProfile, RunnerRecord, RunnerSync,
-    RunnerSyncReply, TaskAssignment,
+    ClaimDecision, CoordinationFollowup, IssueDispatch, Placement, RunnerProfile, RunnerRecord,
+    RunnerSync, RunnerSyncReply, TaskAssignment,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -72,19 +72,24 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
-    let pinned: Option<String> = db.query_row(
-        "SELECT pinned_runner_id FROM tasks WHERE id = ?1",
-        [&dispatch.task_id],
-        |row| row.get(0),
-    )?;
+    let (pinned, named, previous): (Option<String>, Option<String>, Option<String>) = db
+        .query_row(
+            "SELECT pinned_runner_id, pinned_agent_id, previous_task_id FROM tasks WHERE id = ?1",
+            [&dispatch.task_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
     for available in available_runners(db)? {
         let profile = available.profile;
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
         }
-        let Some(agent) =
-            protocol::matching_task_agent(&profile, &dispatch.category, &dispatch.work).cloned()
-        else {
+        let Some(agent) = protocol::matching_task_agent(
+            &profile,
+            &dispatch.category,
+            &dispatch.work,
+            named.as_deref(),
+        )
+        .cloned() else {
             continue;
         };
         let placement = Placement {
@@ -100,6 +105,10 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
             source_message_id: dispatch.source_message_id,
             chat_id: dispatch.chat_id,
             parent_issue_id: dispatch.parent_issue_id,
+            followup: previous.map(|previous_task_id| CoordinationFollowup {
+                previous_task_id,
+                issue_state: dispatch.issue_state,
+            }),
             work: dispatch.work,
         };
         let contract = serde_json::to_string(&assignment)?;
@@ -146,23 +155,37 @@ impl Store {
         }
         let pending = {
             let mut statement = self.db.prepare(
-                "SELECT rowid, id FROM tasks WHERE status = 'awaiting_assignment' AND rowid > ?1
+                "SELECT rowid, id, pinned_runner_id, pinned_agent_id
+                 FROM tasks WHERE status = 'awaiting_assignment' AND rowid > ?1
                  ORDER BY rowid LIMIT ?2",
             )?;
             statement
                 .query_map(params![*after, PAGE_SIZE], |row| {
-                    Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
         };
-        *after = pending.last().map_or(0, |(seq, _)| *seq);
+        *after = pending.last().map_or(0, |(seq, ..)| *seq);
         let query = format!("{DISPATCH_QUERY} WHERE t.id = ?1");
-        for (_, id) in pending {
+        for (_, id, pinned, named) in pending {
             let Some(dispatch) = self.db.query_row(&query, [&id], read_dispatch).optional()? else {
                 continue;
             };
             if runners.iter().any(|runner| {
-                protocol::matching_task_agent(&runner.profile, &dispatch.category, &dispatch.work)
+                pinned
+                    .as_ref()
+                    .is_none_or(|id| *id == runner.profile.runner_id)
+                    && protocol::matching_task_agent(
+                        &runner.profile,
+                        &dispatch.category,
+                        &dispatch.work,
+                        named.as_deref(),
+                    )
                     .is_some()
             }) {
                 let tx = self

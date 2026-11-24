@@ -13,7 +13,7 @@ pub(super) const DISPATCH_QUERY: &str =
             i.parent_issue_id
        FROM tasks t
        JOIN issues i ON i.id = t.issue_id
-       LEFT JOIN router_dispatches d ON t.id = d.task_id
+       LEFT JOIN router_dispatches d ON i.id = d.issue_id
        LEFT JOIN child_dispatches child ON t.id = child.task_id
        JOIN chat_messages m ON m.seq = i.source_seq
        LEFT JOIN runner_assignments a ON a.id = t.current_assignment";
@@ -75,7 +75,7 @@ impl Store {
         let request = serde_json::to_string(work)?;
         let prior = tx
             .query_row(
-                &format!("{DISPATCH_QUERY} WHERE d.attempt_id = ?1 AND d.call_id = ?2"),
+                &format!("{DISPATCH_QUERY} WHERE t.id = d.task_id AND d.attempt_id = ?1 AND d.call_id = ?2"),
                 params![attempt_id, call.call_id],
                 |row| Ok((row.get::<_, String>(11)?, read_dispatch(row)?)),
             )
@@ -107,13 +107,13 @@ impl Store {
             params![operation_id, issue_id, task_id, attempt_id, call.call_id, request],
         )?;
         let receipt = tx.query_row(
-            &format!("{DISPATCH_QUERY} WHERE d.operation_id = ?1"),
+            &format!("{DISPATCH_QUERY} WHERE t.id = d.task_id AND d.operation_id = ?1"),
             [&operation_id],
             read_dispatch,
         )?;
         super::runner::assign(&tx, receipt)?;
         let receipt = tx.query_row(
-            &format!("{DISPATCH_QUERY} WHERE d.operation_id = ?1"),
+            &format!("{DISPATCH_QUERY} WHERE t.id = d.task_id AND d.operation_id = ?1"),
             [&operation_id],
             read_dispatch,
         )?;
@@ -125,7 +125,7 @@ impl Store {
         Ok(self
             .db
             .query_row(
-                &format!("{DISPATCH_QUERY} WHERE i.id = ?1"),
+                &format!("{DISPATCH_QUERY} WHERE i.id = ?1 ORDER BY t.rowid DESC LIMIT 1"),
                 [id],
                 read_dispatch,
             )
@@ -143,7 +143,7 @@ impl Store {
             .query_row(
                 &format!(
                     "{DISPATCH_QUERY}
-                     WHERE d.operation_id = ?1 AND EXISTS (
+                     WHERE t.id = d.task_id AND d.operation_id = ?1 AND EXISTS (
                          SELECT 1 FROM router_attempts a
                          WHERE a.id = ?2 AND a.thread_id = ?3 AND a.turn_id = ?4
                            AND a.seq = i.source_seq
@@ -157,7 +157,7 @@ impl Store {
 
     pub fn dispatches_for_input(&self, source: i64) -> Result<Vec<IssueDispatch>> {
         let mut statement = self.db.prepare(&format!(
-            "{DISPATCH_QUERY} WHERE i.source_seq = ?1 AND d.operation_id IS NOT NULL ORDER BY i.rowid"
+            "{DISPATCH_QUERY} WHERE i.source_seq = ?1 AND t.id = d.task_id ORDER BY i.rowid"
         ))?;
         Ok(statement
             .query_map([source], read_dispatch)?

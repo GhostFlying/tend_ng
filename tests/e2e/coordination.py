@@ -1,5 +1,6 @@
 """Delegate offline, run a work child, and resume the same parent Task on one slot."""
 import argparse
+from contextlib import nullcontext
 import json
 import os
 from pathlib import Path
@@ -9,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from chat import server, wait_for
+from chat import lose_first_response, server, wait_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
 
@@ -18,9 +19,10 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for executable in ("server", "cli", "runner"):
         parser.add_argument(executable, type=lambda value: Path(value).resolve())
-    parser.add_argument("--scenario", choices=("explicit-close", "task-only", "no-candidate"),
+    parser.add_argument("--scenario", choices=("explicit-close", "task-only", "no-candidate", "late-close"),
                         default="explicit-close")
     args = parser.parse_args()
+    late = args.scenario == "late-close"
     env = {**os.environ, "TEND_TOKEN": "tend-coordination-fixture"}
 
     with tempfile.TemporaryDirectory(prefix="tend-coordination-") as temporary:
@@ -57,12 +59,18 @@ def main():
             with sqlite3.connect(root / f"{database}.sqlite") as db:
                 return db.execute(statement, values).fetchall()
 
-        with (root / "runner.stderr").open("w") as stderr:
-            runner = subprocess.Popen(
+        def start_runner(target, stderr):
+            return subprocess.Popen(
                 [args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
                  "--app-server", sys.executable, FIXTURE, root, args.scenario],
-                env=connected, stderr=stderr,
+                env={**env, "TEND_URL": f"http://{target}"}, stderr=stderr,
             )
+
+        def has_followup(reply):
+            return any("followup" in assignment for assignment in reply.get("assignments", []))
+
+        with (root / "runner.stderr").open("w") as stderr:
+            runner = start_runner(address, stderr)
             try:
                 with server(args.server, root, env, listen=address):
                     cli("chat", "send", "main", "Dispatch from Chat.")
@@ -73,17 +81,23 @@ def main():
                                      lambda view: view["status"] == "running")
                 (root / "delegate-now").touch()
                 wait_for(lambda: sql("runner", "SELECT execution_state FROM received_assignments"),
-                         lambda rows: rows == [("waiting",)])
+                         lambda rows: rows == [("finished" if late else "waiting",)])
                 [(run_id, state)] = sql("runner", "SELECT id, state FROM local_runs")
                 assert (run_id, state) == (first["run"]["run_id"], "stopped")
                 assert sql("runner", "SELECT count(*) FROM run_outbox WHERE record_kind = 'operation' "
-                                    "AND acknowledged = 0") == [(1,)]
+                                    "AND acknowledged = 0") == [(2 if late else 1,)]
                 delegated = json.loads((root / "delegation.json").read_text())
                 child = delegated["action"]["issue_id"]
-                with server(args.server, root, env, listen=address):
+                proxy = lose_first_response(address, drop_when=has_followup) if late else nullcontext((address, []))
+                with server(args.server, root, env, listen=address), proxy as (target, posted):
+                    if late:
+                        runner.terminate()
+                        runner.wait(timeout=7)
+                        runner = start_runner(target, stderr)
                     final = wait_for(lambda: cli("issue", "read", parent),
-                                     lambda view: view["status"] == "completed")
-                    assert final["task_id"] == first["task_id"]
+                                     lambda view: view["status"] == "completed"
+                                     and (view["task_id"] != first["task_id"] if late else True))
+                    assert (final["task_id"] != first["task_id"]) == late
                     assert final["issue_state"] == "closed"
                     assert final["run"]["run_id"] != first["run"]["run_id"]
                     work = cli("issue", "read", child)
@@ -97,13 +111,22 @@ def main():
                         observed.append((work["run"]["run_id"], "stopped"))
                         assert (root / "runner.runs" / "workspaces" / parent
                                 / "repos" / "example" / "guide.txt").read_text() == "A fixture guide.\n"
-                    assert work["issue_state"] == ("closed" if args.scenario == "explicit-close" else "open")
+                    assert work["issue_state"] == ("closed" if args.scenario in {"late-close", "explicit-close"} else "open")
                     observed.append((final["run"]["run_id"], "stopped"))
                     assert sql("runner", "SELECT id, state FROM local_runs ORDER BY rowid") == observed
                     assert sql("server", "SELECT run_id FROM issue_inputs") == [(final["run"]["run_id"],)]
-                    operations = 3 if args.scenario == "explicit-close" else 2
+                    operations = 3 if args.scenario in {"late-close", "explicit-close"} else 2
                     assert sql("server", "SELECT count(*) FROM runner_operations") == [(operations,)]
                     assert sql("server", "SELECT count(DISTINCT runner_id) FROM runner_assignments") == [(1,)]
+                    if late:
+                        assert sql("server", "SELECT id, status, previous_task_id FROM tasks "
+                                             "WHERE issue_id = ? ORDER BY rowid", parent) == [
+                            (first["task_id"], "completed", None),
+                            (final["task_id"], "completed", first["task_id"]),
+                        ]
+                        first_delivery, repeated_delivery = [reply for _, _, reply in posted if has_followup(reply)]
+                        assert first_delivery["assignments"] == repeated_delivery["assignments"]
+                        assert first_delivery["inputs"] == repeated_delivery["inputs"]
                     wait_for(lambda: sql("runner", "SELECT count(*) FROM run_outbox WHERE acknowledged = 0"),
                              lambda rows: rows == [(0,)])
             except BaseException:
@@ -112,7 +135,7 @@ def main():
             finally:
                 runner.terminate()
                 runner.wait(timeout=7)
-    print(f"PASS offline child delegation and same-Task resumption with one Runner slot ({args.scenario})")
+    print(f"PASS offline child delegation and parent coordination with one Runner slot ({args.scenario})")
 
 
 if __name__ == "__main__":

@@ -87,16 +87,17 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         } => "failed",
         _ => return Ok(false),
     };
-    let expected = if previous.is_some() {
-        "running"
-    } else if observation.input_ids.is_empty() {
-        "accepted"
-    } else {
-        "waiting"
-    };
     let updated = db.execute(
-        "UPDATE tasks SET status = ?2 WHERE id = ?1 AND status = ?3",
-        params![observation.task_id, status, expected],
+        "UPDATE tasks SET status = ?2 WHERE id = ?1 AND (
+            (?3 AND status = 'running') OR
+            (NOT ?3 AND (status = 'accepted' OR (?4 AND status = 'waiting')))
+         )",
+        params![
+            observation.task_id,
+            status,
+            previous.is_some(),
+            !observation.input_ids.is_empty()
+        ],
     )?;
     if updated == 0 {
         return Ok(false);
@@ -113,9 +114,9 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
     )?;
     for input in &observation.input_ids {
         if db.execute(
-            "UPDATE issue_inputs SET run_id = ?2 WHERE id = ?1 AND assignment_id = ?3
+            "UPDATE issue_inputs SET run_id = ?2 WHERE id = ?1 AND task_id = ?3
              AND (run_id IS NULL OR run_id = ?2)",
-            params![input, observation.run_id, observation.assignment_id],
+            params![input, observation.run_id, observation.task_id],
         )? != 1
         {
             return Ok(false);

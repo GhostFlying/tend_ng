@@ -1,7 +1,8 @@
 use anyhow::Result;
 use protocol::{
-    IssueInput, IssueInputCause, RUNNER_SYNC_BATCH, RunObservation, RunOutcome, RunPhase,
-    RunnerProfile, WORK_CATEGORIES, WorkAction, WorkOperation, matching_task_agent,
+    IssueDelivery, IssueInput, IssueInputCause, RUNNER_SYNC_BATCH, RunObservation, RunOutcome,
+    RunPhase, RunnerProfile, TaskAssignment, WORK_CATEGORIES, WorkAction, WorkOperation,
+    matching_task_agent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -25,6 +26,27 @@ pub fn create_tables(db: &Connection) -> Result<()> {
             run_id TEXT REFERENCES task_runs(id)
          );
          CREATE INDEX pending_issue_inputs ON issue_inputs(assignment_id) WHERE run_id IS NULL;",
+    )?;
+    Ok(())
+}
+
+pub(super) fn migrate_input_targets(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE tasks ADD COLUMN pinned_agent_id TEXT;
+         ALTER TABLE tasks ADD COLUMN previous_task_id TEXT REFERENCES tasks(id);
+         CREATE INDEX tasks_by_issue ON tasks(issue_id);
+         ALTER TABLE issue_inputs RENAME TO old_issue_inputs;
+         CREATE TABLE issue_inputs (
+            id TEXT PRIMARY KEY,
+            task_id TEXT NOT NULL REFERENCES tasks(id),
+            payload TEXT NOT NULL,
+            run_id TEXT REFERENCES task_runs(id)
+         );
+         INSERT INTO issue_inputs(id, task_id, payload, run_id)
+         SELECT o.id, a.task_id, o.payload, o.run_id FROM old_issue_inputs o
+         JOIN runner_assignments a ON a.id = o.assignment_id ORDER BY o.rowid;
+         DROP TABLE old_issue_inputs;
+         CREATE INDEX pending_issue_inputs ON issue_inputs(task_id) WHERE run_id IS NULL;",
     )?;
     Ok(())
 }
@@ -106,7 +128,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 "INSERT INTO child_dispatches (task_id, operation_id) VALUES (?1, ?2)",
                 params![task_id, operation.operation_id],
             )?;
-            if matching_task_agent(runner, requested, work).is_none() {
+            if matching_task_agent(runner, requested, work, None).is_none() {
                 let missing_repo_ids = work
                     .repo_ids
                     .iter()
@@ -115,9 +137,9 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                     .collect();
                 enqueue(
                     db,
+                    &source_task,
                     IssueInput {
                         input_id: operation.operation_id.clone(),
-                        assignment_id: operation.assignment_id.clone(),
                         child_issue_id: issue_id.clone(),
                         child_task_id: task_id.clone(),
                         cause: IssueInputCause::NoCandidate {
@@ -139,13 +161,13 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             )?;
             if changed != 0
                 && let Some(parent_issue) = parent_issue
-                && let Some(assignment_id) = parent_assignment(db, &parent_issue)?
+                && let Some(parent_task) = target_task(db, &parent_issue)?
             {
                 enqueue(
                     db,
+                    &parent_task,
                     IssueInput {
                         input_id: operation.operation_id.clone(),
-                        assignment_id,
                         child_issue_id: source_issue,
                         child_task_id: source_task,
                         cause: IssueInputCause::IssueClosed,
@@ -159,16 +181,37 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
 }
 
 pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) -> Result<()> {
-    let RunPhase::Stopped { outcome, error, .. } = &observation.phase else {
+    let RunPhase::Stopped {
+        outcome,
+        error,
+        waiting_for_children,
+    } = &observation.phase
+    else {
         return Ok(());
     };
     let child = db.query_row(
         "SELECT i.id, i.parent_issue_id, i.state FROM tasks t JOIN issues i ON t.issue_id = i.id
-         WHERE t.id = ?1 AND i.parent_issue_id IS NOT NULL",
+         WHERE t.id = ?1",
         [&observation.task_id],
-        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)),
-    ).optional()?;
-    let Some((child_issue_id, parent_issue, state)) = child else {
+        |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    let (child_issue_id, parent_issue, state) = child;
+    let Some(parent_issue) = parent_issue else {
+        if !waiting_for_children
+            && db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL)",
+                [&observation.task_id],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
+            target_task(db, &child_issue_id)?;
+        }
         return Ok(());
     };
     // A successful close already carries the owner's outcome. A stopped
@@ -176,14 +219,14 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
     if *outcome == RunOutcome::Completed && state == "closed" {
         return Ok(());
     }
-    let Some(assignment_id) = parent_assignment(db, &parent_issue)? else {
+    let Some(parent_task) = target_task(db, &parent_issue)? else {
         return Ok(());
     };
     enqueue(
         db,
+        &parent_task,
         IssueInput {
             input_id: observation.event_id.clone(),
-            assignment_id,
             child_issue_id,
             child_task_id: observation.task_id.clone(),
             cause: IssueInputCause::TaskStopped {
@@ -197,43 +240,80 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
     )
 }
 
-fn parent_assignment(db: &Connection, issue: &str) -> Result<Option<String>> {
-    Ok(db
+fn target_task(db: &Connection, issue: &str) -> Result<Option<String>> {
+    let original = db
         .query_row(
-            "SELECT current_assignment FROM tasks WHERE issue_id = ?1 AND category = 'issue-router'
-         ORDER BY rowid DESC LIMIT 1",
+            "SELECT t.id, t.status, a.contract FROM tasks t
+             LEFT JOIN runner_assignments a ON a.id = t.current_assignment
+             WHERE t.issue_id = ?1 AND t.category = 'issue-router'
+             ORDER BY t.rowid DESC LIMIT 1",
             [issue],
-            |row| row.get::<_, Option<String>>(0),
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
         )
-        .optional()?
-        .flatten())
+        .optional()?;
+    let Some((previous, status, contract)) = original else {
+        return Ok(None);
+    };
+    if !matches!(status.as_str(), "completed" | "failed") {
+        return Ok(Some(previous));
+    }
+    let Some(contract) = contract else {
+        return Ok(None);
+    };
+    let prior: TaskAssignment = serde_json::from_str(&contract)?;
+    let task = protocol::new_id();
+    db.execute(
+        "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
+                            pinned_runner_id, pinned_agent_id, previous_task_id)
+         SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids, '[]', ?3, ?4, id
+         FROM tasks WHERE id = ?2",
+        params![
+            task,
+            previous,
+            prior.placement.runner_id,
+            prior.placement.agent.id
+        ],
+    )?;
+    db.execute(
+        "UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL",
+        params![previous, task],
+    )?;
+    Ok(Some(task))
 }
 
-fn enqueue(db: &Connection, input: IssueInput) -> Result<()> {
+fn enqueue(db: &Connection, task: &str, input: IssueInput) -> Result<()> {
     db.execute(
-        "INSERT INTO issue_inputs (id, assignment_id, payload) VALUES (?1, ?2, ?3)",
-        params![
-            input.input_id,
-            input.assignment_id,
-            serde_json::to_string(&input)?
-        ],
+        "INSERT INTO issue_inputs (id, task_id, payload) VALUES (?1, ?2, ?3)",
+        params![input.input_id, task, serde_json::to_string(&input)?],
     )?;
     Ok(())
 }
 
-pub fn pending_inputs(db: &Connection, runner: &str) -> Result<Vec<IssueInput>> {
+pub fn pending_inputs(db: &Connection, runner: &str) -> Result<Vec<IssueDelivery>> {
     let mut statement = db.prepare(
-        "SELECT i.payload FROM issue_inputs i
-         JOIN runner_assignments a ON a.id = i.assignment_id
-         JOIN tasks t ON t.id = a.task_id
-         WHERE i.run_id IS NULL AND a.runner_id = ?1 AND a.state = 'accepted'
-           AND t.status IN ('accepted', 'waiting', 'running')
+        "SELECT i.payload, a.id FROM issue_inputs i
+         JOIN tasks t ON t.id = i.task_id
+         JOIN runner_assignments a ON a.id = t.current_assignment
+         WHERE i.run_id IS NULL AND a.runner_id = ?1
+           AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
          ORDER BY i.rowid LIMIT ?2",
     )?;
     statement
         .query_map(params![runner, RUNNER_SYNC_BATCH], |row| {
-            row.get::<_, String>(0)
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         })?
-        .map(|value| Ok(serde_json::from_str(&value?)?))
+        .map(|value| {
+            let (payload, assignment_id) = value?;
+            Ok(IssueDelivery {
+                assignment_id,
+                input: serde_json::from_str(&payload)?,
+            })
+        })
         .collect()
 }

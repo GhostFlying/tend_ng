@@ -43,7 +43,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 5,
+            version <= 6,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -117,7 +117,10 @@ impl Store {
         }
         if version < 5 {
             coordination::create_tables(&tx)?;
-            tx.pragma_update(None, "user_version", 5)?;
+        }
+        if version < 6 {
+            coordination::migrate_input_targets(&tx)?;
+            tx.pragma_update(None, "user_version", 6)?;
         }
         tx.commit()?;
         Ok(store)

@@ -51,8 +51,9 @@ def server(binary, root, env, listen="127.0.0.1:0"):
 
 
 @contextmanager
-def lose_first_response(upstream):
+def lose_first_response(upstream, drop_when=lambda _reply: True):
     posted = []
+    dropped = []
 
     class Proxy(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
@@ -68,8 +69,10 @@ def lose_first_response(upstream):
                 })
                 response = with_connection.getresponse()
                 body = response.read()
-                posted.append((json.loads(request), response.status, json.loads(body)))
-                if len(posted) == 1:
+                reply = json.loads(body)
+                posted.append((json.loads(request), response.status, reply))
+                if not dropped and drop_when(reply):
+                    dropped.append(reply)
                     self.close_connection = True
                     return
                 self.send_response(response.status)

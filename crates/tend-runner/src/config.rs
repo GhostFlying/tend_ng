@@ -77,7 +77,13 @@ impl Config {
                     .required_capabilities
                     .iter()
                     .all(|cap| agent.capabilities.contains(cap)))
-            && protocol::matching_task_agent(profile, &agent.category, &assignment.work).is_some();
+            && protocol::matching_task_agent(
+                profile,
+                &agent.category,
+                &assignment.work,
+                Some(&agent.id),
+            )
+            .is_some();
         if valid {
             ClaimDecision::Accepted
         } else {

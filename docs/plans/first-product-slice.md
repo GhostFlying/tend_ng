@@ -106,6 +106,12 @@ python3 tests/e2e/issue_run.py target/debug/tend-server target/debug/tend target
 
 在 devcontainer 运行 `python3 tests/e2e/coordination.py target/debug/tend-server target/debug/tend target/debug/tend-runner`。用 `--scenario task-only` 复验无显式结案的 Task，用 `--scenario no-candidate` 复验待分配反馈。
 
+### 结算后的子项回报
+
+- Server 按持久业务事实确定收件 Task。仍在推进的协调目标保留原 Task；原 Task 已结算时，在原 Issue 为后到输入登记一个接续 Task，沿同一 Runner 和具名 Owner 领取。新 Task 起步时读取原 Issue 的当前状态。
+- 若 Server 刚收到原 Task 停妥，尚未绑定任何 Run 的输入随新的收件 Task 接续。原事件身份、子 Issue 和回报内容保留。已绑定到 Run 的输入仍沿原 Run 查证。
+- 复用单 slot 验收，让 Issue Agent 委派后先结案，随后恢复 Server 通信并完成子 Issue。核对只有一个新的协调 Task、原 Issue 仍结案、同一 Owner 收到晚到事实。另用丢响应路径核对待处理记录仍沿原身份去重。
+
 ## 最少验收
 
 同一输入跑正常路径和断线路径。断线路径在 Work Agent 已持久领取后切断 Runner 与 Server 的通信。Work Agent 仍可写文件、得到本地受理回执并停妥。此时用户可以继续在主 Chat 发消息，Router 根据 Server 已保存的事实回复。重连后先用全量对账补齐，丢弃一次 Server 提交后的响应，再用原操作重传。核对 Work Agent 只执行一次，原 Chat 只有一条 Router 发布的交付，结果可沿来源 Issue 查证，文件可下载，父子 Agent 曾分时使用唯一的 slot。 [首个技术 smoke](rust-offline-smoke.md#执行结果) · [工作 Runner 离线时的主 Chat](../design-questions.md#工作-runner-离线时的主-chat)

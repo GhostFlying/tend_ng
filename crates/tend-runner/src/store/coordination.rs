@@ -1,7 +1,7 @@
 use super::{Store, run::LocalRun};
 use anyhow::{Result, ensure};
 use codex_app::ToolCall;
-use protocol::{IssueInput, WorkAction, WorkOperation};
+use protocol::{IssueDelivery, IssueInput, WorkAction, WorkOperation};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
@@ -37,21 +37,30 @@ impl Store {
         }
         let mut statement = self.0.prepare(
             "SELECT operation FROM local_work_operations
-             WHERE assignment_id = ?1 AND json_extract(operation, '$.action.kind') = 'delegate'
+             WHERE (assignment_id = ?1 OR assignment_id IN (
+                SELECT id FROM received_assignments WHERE task_id = ?2
+             )) AND json_extract(operation, '$.action.kind') = 'delegate'
              ORDER BY rowid",
         )?;
+        let followup = run.assignment.followup.as_ref();
+        let previous = followup.map(|followup| followup.previous_task_id.as_str());
         let delegations = statement
-            .query_map([&run.assignment.placement.assignment_id], |row| {
-                row.get::<_, String>(0)
-            })?
+            .query_map(
+                [
+                    Some(run.assignment.placement.assignment_id.as_str()),
+                    previous,
+                ],
+                |row| row.get::<_, String>(0),
+            )?
             .map(|value| Ok(serde_json::from_str::<WorkOperation>(&value?)?))
             .collect::<Result<Vec<_>>>()?;
         let records = serde_json::json!({
             "child_inputs": run.inputs,
             "previous_delegations": delegations,
+            "followup": followup,
         });
         Ok(Some(format!(
-            "Continue the same coordination Task with these durable records.\n{records}"
+            "Read these durable coordination records, including any previous Task and current Issue state.\n{records}"
         )))
     }
 
@@ -106,35 +115,47 @@ impl Store {
     }
 }
 
-pub(super) fn accept_input(db: &Connection, input: &IssueInput) -> Result<()> {
+pub(super) fn accept_input(db: &Connection, delivery: &IssueDelivery) -> Result<()> {
+    let IssueDelivery {
+        assignment_id,
+        input,
+    } = delivery;
+    let accepted: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM received_assignments WHERE id = ?1 AND execution_state != 'rejected')",
+        [assignment_id], |row| row.get(0),
+    )?;
+    if !accepted {
+        return Ok(());
+    }
     let payload = serde_json::to_string(input)?;
     let inserted = db.execute(
         "INSERT INTO local_issue_inputs (id, assignment_id, child_issue_id, payload)
          VALUES (?1, ?2, ?3, ?4) ON CONFLICT(id) DO NOTHING",
-        params![
-            input.input_id,
-            input.assignment_id,
-            input.child_issue_id,
-            payload
-        ],
+        params![input.input_id, assignment_id, input.child_issue_id, payload],
     )?;
     if inserted == 0 {
-        let original: String = db.query_row(
-            "SELECT payload FROM local_issue_inputs WHERE id = ?1",
+        let (original, assignee, run_id): (String, String, Option<String>) = db.query_row(
+            "SELECT payload, assignment_id, run_id FROM local_issue_inputs WHERE id = ?1",
             [&input.input_id],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
         ensure!(
-            payload == original,
+            *input == serde_json::from_str::<IssueInput>(&original)?,
             "parent input changes its original fact"
         );
-    } else {
+        if assignment_id == &assignee || run_id.is_some() {
+            return Ok(());
+        }
         db.execute(
-            "UPDATE received_assignments SET execution_state = 'queued'
-             WHERE id = ?1 AND execution_state = 'waiting'",
-            [&input.assignment_id],
+            "UPDATE local_issue_inputs SET assignment_id = ?2 WHERE id = ?1",
+            params![input.input_id, assignment_id],
         )?;
     }
+    db.execute(
+        "UPDATE received_assignments SET execution_state = 'queued'
+         WHERE id = ?1 AND execution_state = 'waiting'",
+        [assignment_id],
+    )?;
     Ok(())
 }
 

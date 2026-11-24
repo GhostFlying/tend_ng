@@ -63,7 +63,15 @@ pub struct TaskAssignment {
     pub chat_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_issue_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followup: Option<CoordinationFollowup>,
     pub work: DispatchIssue,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CoordinationFollowup {
+    pub previous_task_id: String,
+    pub issue_state: String,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -99,7 +107,7 @@ pub struct RunnerSyncReply {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub confirmed_operations: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub inputs: Vec<IssueInput>,
+    pub inputs: Vec<IssueDelivery>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -132,9 +140,15 @@ pub enum WorkAction {
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IssueDelivery {
+    pub assignment_id: String,
+    #[serde(flatten)]
+    pub input: IssueInput,
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct IssueInput {
     pub input_id: String,
-    pub assignment_id: String,
     pub child_issue_id: String,
     pub child_task_id: String,
     #[serde(flatten)]
@@ -197,6 +211,7 @@ pub fn matching_task_agent<'a>(
     profile: &'a RunnerProfile,
     category: &str,
     work: &DispatchIssue,
+    named: Option<&str>,
 ) -> Option<&'a AgentProfile> {
     if !work
         .repo_ids
@@ -211,10 +226,9 @@ pub fn matching_task_agent<'a>(
             .all(|cap| agent.capabilities.contains(cap))
     };
     if category != "issue-router" {
-        return profile
-            .agents
-            .iter()
-            .find(|agent| agent.category == category && satisfies(agent));
+        return profile.agents.iter().find(|agent| {
+            agent.category == category && named.is_none_or(|id| agent.id == id) && satisfies(agent)
+        });
     }
     if !work.required_capabilities.is_empty()
         && !profile
@@ -227,5 +241,5 @@ pub fn matching_task_agent<'a>(
     profile
         .agents
         .iter()
-        .find(|agent| agent.category == "issue-router")
+        .find(|agent| agent.category == "issue-router" && named.is_none_or(|id| agent.id == id))
 }

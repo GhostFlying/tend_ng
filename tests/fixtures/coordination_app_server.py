@@ -69,6 +69,9 @@ if role == "parent":
     delegated = tool("tend_delegate_work", args, "delegate", "original-delegate")
     assert tool("tend_delegate_work", args, "replay-delegate", "original-delegate") == delegated
     (root / "delegation.json").write_text(json.dumps(delegated))
+    if scenario == "late-close":
+        (root / "original-parent.json").write_text(json.dumps(assignment))
+        tool("tend_close_issue", {"summary": "The main objective is settled."}, "early-close", "early-close")
 elif role == "child":
     assert tools == {"tend_close_issue"}
     assert assignment["placement"]["agent"]["id"] == "worker"
@@ -76,18 +79,26 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario == "explicit-close":
+    if scenario in {"explicit-close", "late-close"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 else:
     assert tools == {"tend_delegate_work", "tend_close_issue"}
     delegated = json.loads((root / "delegation.json").read_text())
-    assert assignment["placement"]["assignment_id"] == delegated["assignment_id"]
     context = json.loads(items[0]["text"].split("\n", 1)[1])
     assert context["previous_delegations"] == [delegated]
+    if scenario == "late-close":
+        original = json.loads((root / "original-parent.json").read_text())
+        assert assignment["placement"]["assignment_id"] != delegated["assignment_id"]
+        assert assignment["placement"]["agent"] == original["placement"]["agent"]
+        assert context["followup"] == {
+            "previous_task_id": original["task_id"], "issue_state": "closed",
+        }
+    else:
+        assert assignment["placement"]["assignment_id"] == delegated["assignment_id"]
     [result] = context["child_inputs"]
     assert result["child_issue_id"] == delegated["action"]["issue_id"]
     assert result["child_task_id"] == delegated["action"]["task_id"]
-    if scenario == "explicit-close":
+    if scenario in {"explicit-close", "late-close"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":
@@ -96,7 +107,8 @@ else:
     else:
         assert result["kind"] == "task_stopped"
         assert result["outcome"] == "completed"
-    tool("tend_close_issue", {"summary": result["summary"]}, "close-parent", "parent-close")
+    if scenario != "late-close":
+        tool("tend_close_issue", {"summary": result["summary"]}, "close-parent", "parent-close")
 
 send({
     "method": "turn/completed",
