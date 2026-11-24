@@ -1,4 +1,5 @@
 mod artifacts;
+mod inspect;
 mod router;
 mod store;
 mod web;
@@ -78,6 +79,7 @@ fn main() -> Result<()> {
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
     let placement = Store::open(&db)?;
     let transfers = artifacts::serve(&db)?;
+    let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let artifact_root = db.with_extension("artifacts");
     thread::spawn(move || schedule(placement));
     router::spawn(router::Config {
@@ -99,6 +101,21 @@ fn main() -> Result<()> {
         }
         let (status, body) = if !authenticated(&request, &auth) {
             api_error(401, "valid Tend token required")
+        } else if let Some(run) = protocol::rollout_id(request.url()) {
+            if request.method() != &Method::Get {
+                let (_, body) = api_error(405, "method not allowed");
+                let _ = request.respond(json_response(405, &body)?);
+                continue;
+            }
+            let run = run.to_owned();
+            if let Err(
+                TrySendError::Full((request, _)) | TrySendError::Disconnected((request, _)),
+            ) = inspections.try_send((request, run))
+            {
+                let (_, body) = api_error(503, "Rollout reader is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
         } else if let Some(endpoint) = artifacts::Endpoint::parse(request.url()) {
             if let Err(
                 TrySendError::Full((request, _)) | TrySendError::Disconnected((request, _)),
@@ -192,11 +209,15 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             serde_json::to_value(store.attentions(chat_id, false)?)?,
         ));
     }
-    let chat_id = path
-        .strip_prefix("/api/v1/chats/")
-        .and_then(|path| path.strip_suffix("/messages"))
-        .filter(|id| protocol::valid_id(id));
-    let Some(chat_id) = chat_id else {
+    let target = path
+        .strip_suffix("/messages")
+        .and_then(|path| {
+            path.strip_prefix("/api/v1/chats/")
+                .map(|id| (id, false))
+                .or_else(|| path.strip_prefix("/api/v1/issues/").map(|id| (id, true)))
+        })
+        .filter(|(id, _)| protocol::valid_id(id));
+    let Some((id, issue)) = target else {
         return Ok(api_error(404, "endpoint not found"));
     };
 
@@ -214,10 +235,16 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
                 };
                 before
             };
-            Ok((200, serde_json::to_value(store.messages(chat_id, before)?)?))
+            if issue {
+                return Ok(match store.issue_messages(id, before)? {
+                    Some(page) => (200, serde_json::to_value(page)?),
+                    None => api_error(404, "Issue not found"),
+                });
+            }
+            Ok((200, serde_json::to_value(store.messages(id, before)?)?))
         }
         Method::Post => {
-            let chat_id = chat_id.to_owned();
+            let id = id.to_owned();
             let Some(bytes) = request_bytes(request)? else {
                 return Ok(api_error(413, "message request too large"));
             };
@@ -237,15 +264,24 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             {
                 return Ok(api_error(400, "valid reply message ID required"));
             }
-            match store.accept(&chat_id, &message)? {
+            let accepted = if issue {
+                let Some(accepted) = store.post_issue_message(&id, &message)? else {
+                    return Ok(api_error(404, "Issue or assigned Task not found"));
+                };
+                accepted
+            } else {
+                store.accept(&id, &message)?
+            };
+            match accepted {
                 Accepted::Received(receipt) => Ok((200, serde_json::to_value(receipt)?)),
                 Accepted::Conflict => Ok(api_error(
                     409,
                     "operation ID is already used for a different message",
                 )),
-                Accepted::InvalidReply => {
-                    Ok(api_error(404, "Decision question not found in this Chat"))
-                }
+                Accepted::InvalidReply => Ok(api_error(
+                    404,
+                    "Quoted message not found in this conversation",
+                )),
             }
         }
         _ => Ok(api_error(405, "method not allowed")),

@@ -25,7 +25,7 @@ pub struct Client {
     request_id: u64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Turn {
     pub id: String,
@@ -34,7 +34,7 @@ pub struct Turn {
     pub error: Option<TurnError>,
 }
 
-#[derive(Debug, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Deserialize, serde::Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum TurnStatus {
     InProgress,
@@ -43,7 +43,7 @@ pub enum TurnStatus {
     Interrupted,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, serde::Serialize)]
 pub struct TurnError {
     pub message: String,
 }

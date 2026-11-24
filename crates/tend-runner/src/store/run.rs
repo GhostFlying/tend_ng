@@ -84,6 +84,18 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
 }
 
 impl Store {
+    pub fn native_turn(&self, run: &str) -> Result<Option<(String, String)>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT thread_id, turn_id FROM local_runs WHERE id = ?1
+               AND thread_id IS NOT NULL AND turn_id IS NOT NULL",
+                [run],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
+
     pub fn next_run(&mut self) -> Result<Option<LocalRun>> {
         let active = self.0.query_row(
             "SELECT r.id FROM local_runs r WHERE r.state IN ('prepared', 'running') ORDER BY r.rowid LIMIT 1",
@@ -218,17 +230,19 @@ impl Store {
         );
         let assignment_id = &run.assignment.placement.assignment_id;
         let waiting_for_attention = coordination::waiting_for_attention(&tx, assignment_id)?;
-        let waiting_for_children =
-            !waiting_for_attention && coordination::has_followup(&tx, assignment_id)?;
-        let next_state = if waiting_for_attention || waiting_for_children {
-            if coordination::has_unread_input(&tx, assignment_id)? {
+        let has_unread = coordination::has_unread_input(&tx, assignment_id)?;
+        let queued_input = outcome == RunOutcome::Completed && has_unread;
+        let waiting_for_children = !waiting_for_attention
+            && !queued_input
+            && coordination::has_followup(&tx, assignment_id)?;
+        let next_state =
+            if queued_input || (waiting_for_attention || waiting_for_children) && has_unread {
                 "queued"
-            } else {
+            } else if waiting_for_attention || waiting_for_children {
                 "waiting"
-            }
-        } else {
-            "finished"
-        };
+            } else {
+                "finished"
+            };
         tx.execute(
             "UPDATE received_assignments SET execution_state = ?2 WHERE id = ?1",
             params![assignment_id, next_state],
@@ -241,6 +255,7 @@ impl Store {
                 error,
                 waiting_for_children,
                 waiting_for_attention,
+                queued_input,
             },
         )?;
         tx.commit()?;

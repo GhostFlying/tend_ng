@@ -171,6 +171,8 @@ Codex rollout 等原生执行原件由实际执行实例保管。Router 原件�
 
 Issue Chat 消息页用已有的 Run 引用呈现折叠入口。用户点开或刷新某段执行过程时，才发起对应 Run 的读取请求。 [Issue Chat 的留言与执行过程](chat-routing.md#issue-chat-的留言与执行过程)
 
+在工作 Runner 配置中可设置 `"inspect": {"listen": "127.0.0.1:8833", "url": "http://127.0.0.1:8833"}`。同机部署可以用回环地址。跨机部署将 `url` 设为 Server 能通过已有可信通道访问的地址，`listen` 由实际转发或绑定方式决定。Runner 心跳公布该地址，Server 按原 Run 使用共用的预共享 token 读取原生回合。未设置地址的 Runner 仍可执行和同步。
+
 ## 后续实时流
 
 一期通过普通 API、页面定期查询和 Runner 定期通信完成 Chat、Attention、看板、通知及 Queue 和 Steer。Steer 的实际送达以运行该 Agent 的实例对目标回合的核验和回执为准。

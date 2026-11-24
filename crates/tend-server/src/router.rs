@@ -13,13 +13,14 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 4;
+const TOOL_REVISION: i64 = 5;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
     "Tend may supply a replay record before the request. It means the following text is the same original input. ",
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
     "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
+    "Use tend_relay_issue_message to deliver the current user message to a related existing Issue when its Owner needs to act. ",
     "If the remaining work is unclear, explain what Tend has already saved or ask a focused question. ",
     "A Tend Issue report is a background fact, not a fresh user request. Reply to the original topic, ",
     "summarize the actual result, and mention any supplied delivery files. Tend attaches those files to your final answer. ",
@@ -57,6 +58,20 @@ fn read_dispatch_tool() -> Value {
             "type": "object",
             "properties": { "operation_id": { "type": "string" } },
             "required": ["operation_id"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn relay_tool() -> Value {
+    json!({
+        "type": "function",
+        "name": "tend_relay_issue_message",
+        "description": "Queue the current user message, with its original text and source identity, for the Owner of an existing Issue from this Chat.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"issue_id": {"type": "string"}},
+            "required": ["issue_id"],
             "additionalProperties": false
         }
     })
@@ -138,7 +153,7 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;
-    let mut tools = vec![dispatch_tool(), read_dispatch_tool()];
+    let mut tools = vec![dispatch_tool(), read_dispatch_tool(), relay_tool()];
     tools.extend(attention_tools());
     while let Some(input) = store.next_input(chat)? {
         let number = if let Some(attempt) = &input.attempt {
@@ -262,6 +277,23 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" => self.dispatch(&call),
+            "tend_relay_issue_message" => {
+                let Some(issue) = call.arguments["issue_id"]
+                    .as_str()
+                    .filter(|id| protocol::valid_id(id))
+                else {
+                    return Ok(tool_error("A valid Issue ID is required"));
+                };
+                Ok(
+                    match self.store.relay_to_issue(self.attempt_id, &call, issue)? {
+                        Some(receipt) => ToolOutput {
+                            success: true,
+                            body: serde_json::to_value(receipt)?,
+                        },
+                        None => tool_error("This user message cannot be relayed to that Issue"),
+                    },
+                )
+            }
             "tend_read_attentions" => Ok(ToolOutput {
                 success: true,
                 body: serde_json::to_value(self.store.router_attentions(self.attempt_id, &call)?)?,

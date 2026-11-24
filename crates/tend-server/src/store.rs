@@ -1,6 +1,7 @@
 mod artifacts;
 mod attention;
 mod coordination;
+mod issue_chat;
 mod reports;
 mod run;
 mod runner;
@@ -51,7 +52,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 9,
+            version <= 10,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -137,7 +138,10 @@ impl Store {
         }
         if version < 9 {
             attention::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 9)?;
+        }
+        if version < 10 {
+            issue_chat::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 10)?;
         }
         tx.execute_batch("CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);")?;
         tx.commit()?;
@@ -175,10 +179,15 @@ impl Store {
                 },
             );
         }
-        if let Some(reply) = &request.reply_to
-            && attention::quoted(&tx, chat_id, reply)?.is_none()
-        {
-            return Ok(Accepted::InvalidReply);
+        if let Some(reply) = &request.reply_to {
+            let valid: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id = ?1 AND chat_id = ?2)",
+                params![reply, chat_id],
+                |row| row.get(0),
+            )?;
+            if !valid {
+                return Ok(Accepted::InvalidReply);
+            }
         }
 
         let message_id = protocol::new_id();
@@ -353,13 +362,32 @@ impl Store {
                 "original_request": input.text,
             });
             input.text = format!("Tend Attention for the user's original topic.\n{payload}");
-        } else if let Some(reply_to) = reply_to
-            && let Some(fact) = attention::quoted(&self.db, chat_id, &reply_to)?
-        {
-            input.reply_context = Some(format!(
-                "The following user message explicitly replies to this Tend Attention.\n{}",
-                serde_json::to_string(&fact)?,
-            ));
+        } else if let Some(reply_to) = reply_to {
+            let context = if let Some(fact) = attention::quoted(&self.db, chat_id, &reply_to)? {
+                format!(
+                    "The following user message explicitly replies to this Tend Attention.\n{}",
+                    serde_json::to_string(&fact)?,
+                )
+            } else {
+                let text: String = self.db.query_row(
+                    "SELECT text FROM chat_messages WHERE id = ?1",
+                    [&reply_to],
+                    |row| row.get(0),
+                )?;
+                let mut query = self.db.prepare(
+                    "WITH RECURSIVE thread(seq, reply_to) AS (
+                         SELECT seq, reply_to FROM chat_messages WHERE id = ?1
+                         UNION ALL SELECT m.seq, m.reply_to FROM chat_messages m JOIN thread t ON m.id = t.reply_to
+                     ) SELECT i.id FROM thread t JOIN issues i ON i.source_seq = t.seq
+                       WHERE i.parent_issue_id IS NULL ORDER BY i.rowid",
+                )?;
+                let issues = query
+                    .query_map([&reply_to], |row| row.get::<_, String>(0))?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                let payload = json!({"message_id": reply_to, "text": text, "issue_ids": issues});
+                format!("The following user message replies to this saved Chat message.\n{payload}")
+            };
+            input.reply_context = Some(context);
         }
         Ok(Some(input))
     }
@@ -422,7 +450,7 @@ impl Store {
              UNION ALL
              SELECT m.seq, 'assistant', substr(m.text, 1, 512), NULL
                FROM recent i JOIN chat_messages source ON source.seq = i.seq
-               JOIN chat_messages m ON m.reply_to = source.id
+               JOIN chat_messages m ON m.reply_to = source.id AND m.operation_id IS NULL
              ORDER BY 1 DESC LIMIT 12",
         )?;
         let mut messages = statement

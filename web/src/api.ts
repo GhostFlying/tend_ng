@@ -13,20 +13,43 @@ export type Message = {
   router_state: "queued" | "awaiting_turn" | "completed" | "failed" | null;
   router_error: string | null;
   artifacts?: Artifact[];
+  issue_ids?: string[];
+  issue?: IssueMessage;
   attention?: {
     id: string;
     state: "pending" | "awaiting_user" | "answered" | "delivered";
   };
 };
 
-export type Page = { messages: Message[]; next_before: number | null };
+type IssueMessage = {
+  id: string;
+  issue_id: string;
+  issue_title: string;
+  kind: "user" | "agent" | "dispatch" | "relay" | "run";
+  author: string;
+  text: string;
+  reply_to: string | null;
+  run_id: string | null;
+  source_message_id: string | null;
+  forwarded_from?: string;
+};
+
+export type Page = {
+  messages: Message[];
+  next_before: number | null;
+  title?: string;
+};
+
+function messagePath(issue?: string) {
+  return issue
+    ? `/api/v1/issues/${encodeURIComponent(issue)}/messages`
+    : "/api/v1/chats/main/messages";
+}
 export type PendingMessage = {
   operation_id: string;
   text: string;
   reply_to?: string;
 };
-
-const messages = "/api/v1/chats/main/messages";
 
 async function request(token: string, path: string, options?: RequestInit) {
   const headers = new Headers(options?.headers);
@@ -47,17 +70,65 @@ export async function readMessages(
   token: string,
   before?: number,
   signal?: AbortSignal,
-) {
+  issue?: string,
+): Promise<Page> {
+  const messages = messagePath(issue);
   const path = before === undefined ? messages : `${messages}?before=${before}`;
-  return (await request(token, path, { signal })).json() as Promise<Page>;
+  const response = await request(token, path, { signal });
+  if (!issue) return response.json() as Promise<Page>;
+  const page: {
+    title: string;
+    next_before: number | null;
+    messages: IssueMessage[];
+  } = await response.json();
+  return {
+    title: page.title,
+    next_before: page.next_before,
+    messages: page.messages.map((message) => ({
+      id: message.id,
+      text: message.text,
+      author: message.kind === "user" ? "user" : "router",
+      reply_to: message.reply_to,
+      router_state: null,
+      router_error: null,
+      issue: message,
+    })),
+  };
 }
 
-export async function sendMessage(token: string, message: PendingMessage) {
-  await request(token, messages, {
+export async function sendMessage(
+  token: string,
+  message: PendingMessage,
+  issue?: string,
+) {
+  await request(token, messagePath(issue), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(message),
   });
+}
+
+type RolloutItem = { type: string; text?: string; [field: string]: unknown };
+
+export async function readRollout(
+  token: string,
+  run: string,
+  signal: AbortSignal,
+) {
+  const response = await request(
+    token,
+    `/api/v1/runs/${encodeURIComponent(run)}/rollout`,
+    { signal },
+  );
+  const data: { turn: { items: RolloutItem[] } } = await response.json();
+  return data.turn.items
+    .filter((item) => item.type !== "userMessage")
+    .map((item) =>
+      item.type === "agentMessage" && item.text
+        ? item.text
+        : JSON.stringify(item, null, 2),
+    )
+    .join("\n\n");
 }
 
 export async function download(token: string, file: Artifact) {

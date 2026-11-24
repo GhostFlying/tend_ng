@@ -6,7 +6,11 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
         return None;
     }
     let path = request.url().split('?').next()?;
-    let (file, mime) = if path == "/" {
+    let (file, mime) = if path == "/"
+        || path
+            .strip_prefix("/issues/")
+            .is_some_and(protocol::valid_id)
+    {
         (root.join("index.html"), "text/html; charset=utf-8")
     } else {
         let name = path.strip_prefix("/assets/")?;

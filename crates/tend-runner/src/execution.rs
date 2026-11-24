@@ -12,6 +12,7 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone)]
 pub struct Runtime {
     pub root: PathBuf,
     pub artifacts: PathBuf,
@@ -49,7 +50,7 @@ fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
     Ok(true)
 }
 
-fn client(runtime: &Runtime, cwd: &Path) -> Result<Client> {
+pub(crate) fn client(runtime: &Runtime, cwd: &Path) -> Result<Client> {
     let mut command = Command::new(&runtime.program);
     command
         .args(&runtime.args)

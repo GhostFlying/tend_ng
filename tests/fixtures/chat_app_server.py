@@ -10,6 +10,10 @@ WEB_REQUEST = "在示例仓库整理一份使用说明，完成后把文件和�
 ATTENTION_REQUEST = "请为示例仓库整理使用说明。需要我决定时就在这里问。"
 ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
+ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
+ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
+cases[ISSUE_CHAT_REQUEST] = {"dispatch": True}
+cases[ISSUE_CHAT_RELAY] = {"answer": "我已把补充要求交给负责指南的 Agent。"}
 cases[WEB_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REPLY] = {"answer": "我已把精简版的决定交给负责的 Agent。"}
@@ -51,7 +55,7 @@ def missing_thread(request):
     }), flush=True)
 
 
-def dispatch(thread_id, turn_id, token, *, remaining=False):
+def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
@@ -63,6 +67,8 @@ def dispatch(thread_id, turn_id, token, *, remaining=False):
             "repo_ids": ["example"], "required_capabilities": ["image_gen"],
         },
     }
+    if guide:
+        params["arguments"].update(title="示例仓库上手指南", objective="整理示例仓库的快速上手指南。")
     if remaining:
         params["arguments"].update(
             title="Prepare release notes", objective="Summarize the separate release work."
@@ -205,9 +211,20 @@ for line in sys.stdin:
                 )
                 assert receipt["user_message_id"] and receipt["question_message_id"] == fact["question_message_id"]
                 answer = case["answer"]
+            elif text == ISSUE_CHAT_RELAY:
+                quoted = json.loads(context.split("replies to this saved Chat message.\n", 1)[1].splitlines()[0])
+                [issue] = quoted["issue_ids"]
+                relay = {"issue_id": issue}
+                receipt = decision_tool("tend_relay_issue_message", relay, thread_id, turn_id,
+                                        params["clientUserMessageId"])
+                assert receipt == decision_tool("tend_relay_issue_message", relay, thread_id, turn_id,
+                                                params["clientUserMessageId"])
+                assert receipt["issue_id"] == issue and receipt["text"] == text
+                answer = case["answer"]
             elif case.get("dispatch"):
                 if starts == 1:
-                    receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"])
+                    receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"],
+                                       guide=text == ISSUE_CHAT_REQUEST)
                     with database:
                         database.execute(
                             "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))
@@ -227,7 +244,7 @@ for line in sys.stdin:
                     assert confirmed == receipt, (confirmed, receipt)
                     dispatch(thread_id, turn_id, params["clientUserMessageId"], remaining=True)
                 answer = ("我已把这项工作交给负责的 Agent。整理好后，我会把文件发回这里。"
-                          if text in {WEB_REQUEST, ATTENTION_REQUEST}
+                          if text in {WEB_REQUEST, ATTENTION_REQUEST, ISSUE_CHAT_REQUEST}
                           else f"Issue {receipt['issue_id']} is waiting for assignment.")
             else:
                 answer = case["answer"]

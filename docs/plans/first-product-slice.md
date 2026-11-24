@@ -184,4 +184,17 @@ python3 tests/e2e/attention.py target/debug/tend-server target/debug/tend target
 
 用户在主 Chat 引用 Router 的回报并补充要求，核对输入先入队给 Router，答复仍在原话题显示为同一个助手。再主动进入同一工作的 Issue Chat 发言，核对原话直接入队给对应 Owner。 [从消息确定工作归属](../chat-routing.md#从消息确定工作归属)
 
-用同一个 fixture 让用户在子 Issue Chat 提问，Owner 输出过程说明并用留言工具答复。打开父 Issue 的合并时间线，核对原作者、回复关系、对应子 Issue 和一条显式答复，同时查看默认收起的执行过程入口。消息页读取只使用 Server 已保存的消息与执行引用。点开入口后，核对唯一的读取目标是对应 Run 的原 Runner，并能看到过程说明与工具执行。核对上级 Agent 的待处理输入来自显式留言，过程查看只读取原记录。原 Runner 不可达时，入口显示读取状态，已同步的留言与交付可继续阅读。 [Issue Chat 的留言与执行过程](../chat-routing.md#issue-chat-的留言与执行过程)
+用同一个 fixture 让用户在子 Issue Chat 提问，Owner 输出过程说明并用留言工具答复。打开父 Issue 的合并时间线，核对原作者、回复关系、对应子 Issue 和一条显式答复，同时查看默认收起的执行过程入口。消息页读取只使用 Server 已保存的消息与执行引用。点开入口后，核对唯一的读取目标是对应 Run 的原 Runner，并能看到过程说明与原生条目。核对上级 Agent 的待处理输入来自显式留言，过程查看只读取原记录。原 Runner 不可达时，入口显示读取状态，已同步的留言与交付可继续阅读。 [Issue Chat 的留言与执行过程](../chat-routing.md#issue-chat-的留言与执行过程)
+
+- Server 在同一事务保存留言和对应 Owner 的待取输入。父视图的回复按原留言所属 Issue 路由。活跃 Task 在下一 Run 读到队列输入。原 Task 已结算时在同一个 Issue 由原 Owner 接续，保留 Issue 状态和工作区。
+- Router 的派发和上级委派进入目标 Issue 时间线。用户通过主 Chat 补充时，Router 可以把用户原话按原消息 ID 转达给已有 Issue。Issue Agent 可沿原消息转达给自己的直属工作子 Issue，接续原 Owner。Agent 的显式留言在 Runner 本机先持久受理，再广播给各级上级 Owner。
+- 执行过程以原 Run 的折叠入口进入时间线。Runner 独立提供可选的按需读取监听地址。Server 仅在展开时通过配置的原 Runner 地址读取 Codex 历史，并在独立请求线程处理。已同步留言与临时不可读的历史各自保留。
+- 用固定夹具让一个 slot 上的 Work Agent 持有活跃 Run，从父视图引用子 Issue 留言发送补充。验证当前 Run 与后续 Run 的输入边界、显式回复的原作者与关联、Router 和 Issue Agent 逐级转达去重，以及原 Runner 退出后仍能打开已有讨论。
+
+在 devcontainer 构建 Web 后运行该切片。CLI 可用 `tend issue messages <issue-id>` 查看合并时间线，用 `tend issue message <issue-id> <text> --reply-to <message-id>` 回复，用 `tend run rollout <run-id>` 按需读取执行记录。 [桌面引用回复](images/issue-chat-desktop.png) · [窄屏展开执行过程](images/issue-chat-mobile.png)
+
+```sh
+cargo build --locked
+pnpm --dir web build
+python3 tests/e2e/issue_chat.py target/debug/tend-server target/debug/tend target/debug/tend-runner --web
+```

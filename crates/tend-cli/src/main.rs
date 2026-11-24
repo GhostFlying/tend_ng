@@ -1,11 +1,11 @@
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
-    ApiError, Attention, DEFAULT_LISTEN, IssueDispatch, MessagePage, Receipt, SendMessage,
-    TOKEN_ENV,
+    ApiError, Attention, DEFAULT_LISTEN, IssueDispatch, IssueMessagePage, MessagePage, Receipt,
+    SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend issue read <issue-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend issue read <issue-id>\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -19,11 +19,13 @@ fn main() -> Result<()> {
     ensure!(protocol::valid_id(id), "{USAGE}");
 
     let base = env::var("TEND_URL").unwrap_or_else(|_| format!("http://{DEFAULT_LISTEN}"));
-    let endpoint = match namespace.as_str() {
-        "chat" => protocol::messages_path(id),
-        "issue" => protocol::issue_path(id),
-        "artifact" => protocol::artifact_path(id),
-        "attention" => protocol::attentions_path(id),
+    let endpoint = match (namespace.as_str(), command.as_str()) {
+        ("chat", _) => protocol::messages_path(id),
+        ("issue", "read") => protocol::issue_path(id),
+        ("issue", "messages" | "message") => protocol::issue_messages_path(id),
+        ("run", "rollout") => protocol::rollout_path(id),
+        ("artifact", _) => protocol::artifact_path(id),
+        ("attention", _) => protocol::attentions_path(id),
         _ => bail!("{USAGE}"),
     };
     let path = format!("{}{}", base.trim_end_matches('/'), endpoint);
@@ -35,7 +37,7 @@ fn main() -> Result<()> {
         .build();
 
     match (namespace.as_str(), command.as_str(), rest) {
-        ("chat", "send", [text, arguments @ ..]) => {
+        ("chat", "send", [text, arguments @ ..]) | ("issue", "message", [text, arguments @ ..]) => {
             let (operation, reply) = match arguments {
                 [] => (None, None),
                 [operation] => (Some(operation), None),
@@ -68,20 +70,25 @@ fn main() -> Result<()> {
                 .with_context(|| format!("send operation {}", request.operation_id))?;
             println!("{}", serde_json::to_string(&receipt)?);
         }
-        ("chat", "read", [] | [_]) => {
+        ("chat", "read", [] | [_]) | ("issue", "messages", [] | [_]) => {
             let mut request = http.get(&path).set("Authorization", &auth);
             if let Some(before) = rest.first() {
                 request = request.query("before", &before.parse::<i64>()?.to_string());
             }
-            let page: MessagePage = checked(request.call())?.into_json()?;
-            println!("{}", serde_json::to_string(&page)?);
+            let response = checked(request.call())?;
+            let page = if namespace == "issue" {
+                serde_json::to_string(&response.into_json::<IssueMessagePage>()?)?
+            } else {
+                serde_json::to_string(&response.into_json::<MessagePage>()?)?
+            };
+            println!("{page}");
         }
         ("issue", "read", []) => {
             let issue: IssueDispatch =
                 checked(http.get(&path).set("Authorization", &auth).call())?.into_json()?;
             println!("{}", serde_json::to_string(&issue)?);
         }
-        ("artifact", "download", []) => {
+        ("artifact", "download", []) | ("run", "rollout", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;
             io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
         }

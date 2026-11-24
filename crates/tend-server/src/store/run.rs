@@ -81,6 +81,11 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
             outcome,
             waiting_for_attention: true,
             ..
+        }
+        | RunPhase::Stopped {
+            outcome,
+            queued_input: true,
+            ..
         } if previous.is_some() || *outcome == RunOutcome::Failed => "waiting",
         RunPhase::Stopped {
             outcome: RunOutcome::Completed,
@@ -127,10 +132,29 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
             return Ok(false);
         }
     }
+    if observation.phase == RunPhase::Started {
+        super::issue_chat::record_run(db, &observation.run_id)?;
+    }
     db.execute(
         "INSERT INTO runner_run_events (id, runner_id, observation) VALUES (?1, ?2, ?3)",
         params![observation.event_id, runner, original],
     )?;
     super::coordination::report_task_stop(db, observation)?;
     Ok(true)
+}
+
+impl super::Store {
+    pub fn run_origin(&self, run: &str) -> Result<Option<(String, Option<String>)>> {
+        Ok(self
+            .db
+            .query_row(
+                "SELECT a.runner_id, json_extract(r.profile, '$.inspect_url')
+               FROM task_runs t JOIN runner_assignments a ON a.id = t.assignment_id
+               JOIN runners r ON r.id = a.runner_id
+               WHERE t.id = ?1 AND json_extract(t.observation, '$.turn_id') IS NOT NULL",
+                [run],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?)
+    }
 }

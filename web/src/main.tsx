@@ -6,6 +6,9 @@ import { Chat } from "./Chat";
 import "./style.css";
 
 const tokenKey = "tend.token.v1";
+const issue = /^\/issues\/([a-zA-Z0-9_-]+)$/.exec(
+  window.location.pathname,
+)?.[1];
 
 function Connect({ onConnect }: { onConnect: (token: string) => void }) {
   const [token, setToken] = useState("");
@@ -57,6 +60,7 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem(tokenKey));
   const [reachable, setReachable] = useState<boolean | null>(null);
+  const [title, setTitle] = useState("");
 
   function connect(value: string) {
     sessionStorage.setItem(tokenKey, value);
@@ -92,7 +96,11 @@ function App() {
             </span>
           </div>
           <nav aria-label="主导航">
-            <a href="/" aria-current="page" aria-label="对话">
+            <a
+              href="/"
+              aria-current={issue ? undefined : "page"}
+              aria-label="对话"
+            >
               <svg
                 aria-hidden="true"
                 viewBox="0 0 20 20"
@@ -110,7 +118,17 @@ function App() {
       )}
       <div className="content">
         <header className="header">
-          <h1>Tend</h1>
+          {token && issue ? (
+            <div className="issue-heading">
+              <a href="/" className="text-button">
+                对话
+              </a>
+              <span aria-hidden="true">/</span>
+              <h1>{title || "Issue 对话"}</h1>
+            </div>
+          ) : (
+            <h1>Tend</h1>
+          )}
           {token && (
             <button type="button" className="text-button" onClick={disconnect}>
               断开连接
@@ -118,7 +136,12 @@ function App() {
           )}
         </header>
         {token ? (
-          <Chat token={token} onReachable={setReachable} />
+          <Chat
+            token={token}
+            issue={issue}
+            onReachable={setReachable}
+            onTitle={setTitle}
+          />
         ) : (
           <Connect onConnect={connect} />
         )}

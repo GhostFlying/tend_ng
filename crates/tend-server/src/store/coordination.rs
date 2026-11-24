@@ -128,6 +128,18 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 "INSERT INTO child_dispatches (task_id, operation_id) VALUES (?1, ?2)",
                 params![task_id, operation.operation_id],
             )?;
+            let agent: String = db.query_row(
+                "SELECT json_extract(contract, '$.placement.agent.id') FROM runner_assignments WHERE id = ?1",
+                [&operation.assignment_id], |row| row.get(0),
+            )?;
+            super::issue_chat::dispatch(
+                db,
+                &operation.operation_id,
+                issue_id,
+                &agent,
+                &work.objective,
+                None,
+            )?;
             if matching_task_agent(runner, requested, work, None).is_none() {
                 let missing_repo_ids = work
                     .repo_ids
@@ -231,6 +243,29 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 Some((&operation.operation_id, answer)),
             )?;
         }
+        WorkAction::ForwardIssueMessage {
+            child_issue_id,
+            message_id,
+        } => {
+            super::issue_chat::forward(
+                db,
+                operation,
+                &source_issue,
+                &source_task,
+                child_issue_id,
+                message_id,
+            )?;
+        }
+        WorkAction::PostIssueMessage { text, reply_to } => {
+            super::issue_chat::agent_message(
+                db,
+                &operation.operation_id,
+                &source_task,
+                &operation.run_id,
+                text,
+                reply_to.as_deref(),
+            )?;
+        }
     }
     Ok(true)
 }
@@ -241,11 +276,12 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         error,
         waiting_for_children,
         waiting_for_attention,
+        queued_input,
     } = &observation.phase
     else {
         return Ok(());
     };
-    if *waiting_for_attention {
+    if *waiting_for_attention || *waiting_for_children || *queued_input {
         return Ok(());
     }
     let child = db.query_row(
@@ -261,16 +297,14 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         },
     )?;
     let (child_issue_id, parent_issue, state) = child;
+    if db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL)",
+        [&observation.task_id],
+        |row| row.get::<_, bool>(0),
+    )? {
+        target_task(db, &child_issue_id)?;
+    }
     let Some(parent_issue) = parent_issue else {
-        if !waiting_for_children
-            && db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL)",
-                [&observation.task_id],
-                |row| row.get::<_, bool>(0),
-            )?
-        {
-            target_task(db, &child_issue_id)?;
-        }
         return Ok(());
     };
     // A successful close already carries the owner's outcome. A stopped
@@ -304,7 +338,7 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
         .query_row(
             "SELECT t.id, t.status, a.contract FROM tasks t
              LEFT JOIN runner_assignments a ON a.id = t.current_assignment
-             WHERE t.issue_id = ?1 AND t.category = 'issue-router'
+             WHERE t.issue_id = ?1
              ORDER BY t.rowid DESC LIMIT 1",
             [issue],
             |row| {
@@ -330,7 +364,8 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     db.execute(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
                             pinned_runner_id, pinned_agent_id, previous_task_id)
-         SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids, '[]', ?3, ?4, id
+         SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids,
+                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id
          FROM tasks WHERE id = ?2",
         params![
             task,

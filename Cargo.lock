@@ -516,6 +516,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "tiny_http",
  "ureq",
 ]
 
@@ -529,6 +530,7 @@ dependencies = [
  "rusqlite",
  "serde_json",
  "tiny_http",
+ "ureq",
 ]
 
 [[package]]

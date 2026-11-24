@@ -445,3 +445,72 @@ a {
     height: 44px;
   }
 }
+
+.issue-heading,
+.message-heading,
+.run-toggle {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.issue-heading {
+  min-width: 0;
+}
+
+.issue-heading > a {
+  flex: none;
+}
+
+.issue-heading h1 {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.issue-heading > span,
+.run-author {
+  color: var(--muted);
+}
+
+.message-heading,
+.run-toggle {
+  flex-wrap: wrap;
+}
+
+.issue-link {
+  color: var(--muted);
+  font-size: 13px;
+  text-underline-offset: 3px;
+}
+
+.issue-link:hover {
+  color: var(--label);
+}
+
+.run-row {
+  min-width: 0;
+  border-left: 2px solid var(--border-soft);
+  padding-inline-start: 12px;
+}
+
+.run-toggle {
+  min-height: 28px;
+}
+
+.run-detail {
+  margin-block: 6px 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: var(--input);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.run-detail pre {
+  margin: 0;
+  max-height: 16rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

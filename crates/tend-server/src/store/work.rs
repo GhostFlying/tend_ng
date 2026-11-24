@@ -5,7 +5,10 @@ use protocol::{DispatchIssue, IssueDispatch, RunObservation, TaskAssignment};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub(super) const DISPATCH_QUERY: &str =
-    "SELECT i.id, t.id, coalesce(d.operation_id, child.operation_id), m.id, m.chat_id, t.category, t.status,
+    "SELECT i.id, t.id, coalesce(d.operation_id,
+            (SELECT c.operation_id FROM tasks original JOIN child_dispatches c ON c.task_id = original.id
+             WHERE original.issue_id = i.id LIMIT 1)),
+            m.id, m.chat_id, t.category, t.status,
             i.title, i.objective, t.repo_ids, t.required_capabilities, d.request, a.contract,
             i.state,
             (SELECT run.observation FROM task_runs run
@@ -14,7 +17,6 @@ pub(super) const DISPATCH_QUERY: &str =
        FROM tasks t
        JOIN issues i ON i.id = t.issue_id
        LEFT JOIN router_dispatches d ON i.id = d.issue_id
-       LEFT JOIN child_dispatches child ON t.id = child.task_id
        JOIN chat_messages m ON m.seq = i.source_seq
        LEFT JOIN runner_assignments a ON a.id = t.current_assignment";
 
@@ -105,6 +107,19 @@ impl Store {
             "INSERT INTO router_dispatches (operation_id, issue_id, task_id, attempt_id, call_id, request)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![operation_id, issue_id, task_id, attempt_id, call.call_id, request],
+        )?;
+        let source_id: String = tx.query_row(
+            "SELECT id FROM chat_messages WHERE seq = ?1",
+            [source],
+            |row| row.get(0),
+        )?;
+        super::issue_chat::dispatch(
+            &tx,
+            &operation_id,
+            &issue_id,
+            "Router",
+            &work.objective,
+            Some(&source_id),
         )?;
         let receipt = tx.query_row(
             &format!("{DISPATCH_QUERY} WHERE t.id = d.task_id AND d.operation_id = ?1"),

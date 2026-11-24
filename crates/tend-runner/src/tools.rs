@@ -13,8 +13,17 @@ const REPORT: &str = "tend_report_result";
 const ASK: &str = "tend_request_attention";
 const ESCALATE: &str = "tend_escalate_attention";
 const ANSWER: &str = "tend_answer_child_attention";
+const FORWARD: &str = "tend_forward_issue_message";
+const POST: &str = "tend_post_issue_message";
 
 pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
+    let post = json!({
+        "type":"function", "name":POST,
+        "description":"Publish a complete message to the current Issue. When answering a message, use its original ID as reply_to.",
+        "inputSchema":{"type":"object","properties":{
+            "text":{"type":"string"},"reply_to":{"type":"string"}
+        },"required":["text"],"additionalProperties":false}
+    });
     let close = json!({
         "type": "function",
         "name": CLOSE,
@@ -97,9 +106,19 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
                 "additionalProperties": false
             }
         });
+        let forward = json!({
+            "type": "function",
+            "name": FORWARD,
+            "description": "Forward a user message received by this Issue to one of your direct work children, keeping the original wording.",
+            "inputSchema": {"type":"object","properties":{
+                "child_issue_id":{"type":"string"},"message_id":{"type":"string"}
+            },"required":["child_issue_id","message_id"],"additionalProperties":false}
+        });
         (
-            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your own questions and tend_report_result to return agreed results. Close the Issue when its objective is settled.",
-            vec![delegate, close, report, ask, escalate, answer],
+            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
+            vec![
+                delegate, close, report, ask, escalate, answer, post, forward,
+            ],
         )
     } else {
         let submit = json!({
@@ -114,8 +133,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             }
         });
         (
-            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. The original Task will receive the decision. Use tend_submit_artifact for deliveries and tend_close_issue when the Issue is done.",
-            vec![close, submit, ask],
+            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries and tend_close_issue when the Issue is done.",
+            vec![close, submit, ask, post],
         )
     }
 }
@@ -164,6 +183,20 @@ struct ChildAnswer {
     answer: String,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Post {
+    text: String,
+    reply_to: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Forward {
+    child_issue_id: String,
+    message_id: String,
+}
+
 pub fn action(
     run: &LocalRun,
     call: &ToolCall,
@@ -172,6 +205,35 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        POST => {
+            let post: Post = serde_json::from_value(call.arguments.clone())?;
+            ensure!(
+                !post.text.trim().is_empty(),
+                "Write the complete Issue message"
+            );
+            ensure!(
+                post.reply_to
+                    .as_ref()
+                    .is_none_or(|id| protocol::valid_id(id)),
+                "Use the original reply ID"
+            );
+            Ok(WorkAction::PostIssueMessage {
+                text: post.text,
+                reply_to: post.reply_to,
+            })
+        }
+        FORWARD if run.assignment.placement.agent.category == "issue-router" => {
+            let forward: Forward = serde_json::from_value(call.arguments.clone())?;
+            ensure!(
+                protocol::valid_id(&forward.child_issue_id)
+                    && protocol::valid_id(&forward.message_id),
+                "Use the original child Issue and message IDs"
+            );
+            Ok(WorkAction::ForwardIssueMessage {
+                child_issue_id: forward.child_issue_id,
+                message_id: forward.message_id,
+            })
+        }
         DELEGATE if run.assignment.placement.agent.category == "issue-router" => {
             let args: Delegation = serde_json::from_value(call.arguments.clone())?;
             ensure!(

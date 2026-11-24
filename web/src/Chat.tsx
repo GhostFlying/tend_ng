@@ -1,12 +1,22 @@
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent, RefObject } from "react";
-import { download, mergeMessages, readMessages, sendMessage } from "./api";
+import {
+  download,
+  mergeMessages,
+  readMessages,
+  readRollout,
+  sendMessage,
+} from "./api";
 import type { Artifact, Message, PendingMessage } from "./api";
 
-const pendingKey = "tend.pending-message.v1";
+function pendingKey(issue?: string) {
+  return issue
+    ? `tend.pending-issue-message.v1:${issue}`
+    : "tend.pending-message.v1";
+}
 
-function savedMessage(): PendingMessage | null {
-  const value = sessionStorage.getItem(pendingKey);
+function savedMessage(issue?: string): PendingMessage | null {
+  const value = sessionStorage.getItem(pendingKey(issue));
   if (!value) return null;
   try {
     return JSON.parse(value) as PendingMessage;
@@ -26,20 +36,96 @@ function errorText(error: unknown) {
   return error instanceof Error ? error.message : "暂时无法连接 Tend";
 }
 
+function RunRow({
+  token,
+  run,
+  author,
+  issue,
+}: {
+  token: string;
+  run: string;
+  author: string;
+  issue?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  const [text, setText] = useState<string | null>(null);
+  const [error, setError] = useState("");
+  const request = useRef<AbortController | null>(null);
+  useEffect(() => () => request.current?.abort(), []);
+  function toggle() {
+    setOpen(!open);
+    if (open) {
+      request.current?.abort();
+      return;
+    }
+    request.current = new AbortController();
+    const { signal } = request.current;
+    setText(null);
+    setError("");
+    void readRollout(token, run, signal).then(
+      (value) => {
+        if (!signal.aborted) setText(value);
+      },
+      (reason) => {
+        if (!signal.aborted) setError(errorText(reason));
+      },
+    );
+  }
+  return (
+    <li className="run-row">
+      <button
+        type="button"
+        className="text-button run-toggle"
+        aria-expanded={open}
+        aria-controls={`run-${run}`}
+        onClick={toggle}
+      >
+        <span aria-hidden="true">{open ? "▾" : "▸"}</span>
+        <span>{open ? "收起执行过程" : "查看执行过程"}</span>
+        <span className="run-author">
+          {author}
+          {issue ? ` · ${issue}` : ""}
+        </span>
+      </button>
+      {open && (
+        <div id={`run-${run}`} className="run-detail">
+          {error ? (
+            <span className="error" role="alert">
+              {error}
+            </span>
+          ) : text === null ? (
+            <span role="status">正在读取…</span>
+          ) : text ? (
+            <pre>{text}</pre>
+          ) : (
+            <span>这次执行暂无过程记录</span>
+          )}
+        </div>
+      )}
+    </li>
+  );
+}
+
 function MessageRow({
   message,
   source,
+  showReference,
+  issue,
   token,
   onReply,
 }: {
   message: Message;
   source?: Message;
+  showReference: boolean;
+  issue?: string;
   token: string;
   onReply: (message: Message) => void;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
   const user = message.author === "user";
+  const detail = message.issue;
+  const descendant = detail && detail.issue_id !== issue;
   const pending =
     message.router_state === "queued" ||
     message.router_state === "awaiting_turn";
@@ -61,13 +147,53 @@ function MessageRow({
       className={user ? "message message-user" : "message"}
       id={`message-${message.id}`}
     >
-      <span className="author">{user ? "你" : "Tend"}</span>
-      {source && (
+      <div className="message-heading">
+        <span className="author">
+          {user ? "你" : (detail?.author ?? "Tend")}
+        </span>
+        {descendant && (
+          <a className="issue-link" href={`/issues/${detail.issue_id}`}>
+            {detail.issue_title}
+          </a>
+        )}
+        {detail?.kind === "dispatch" && (
+          <span className="message-state">派发</span>
+        )}
+        {detail?.kind === "relay" && (
+          <span className="message-state">
+            {detail.forwarded_from ? "转达" : "来自主对话"}
+          </span>
+        )}
+      </div>
+      {source && showReference && (
         <a className="reference" href={`#message-${source.id}`}>
           {source.text}
         </a>
       )}
       <p>{message.text}</p>
+      {message.issue_ids?.map((id, index, ids) => (
+        <a className="issue-link" key={id} href={`/issues/${id}`}>
+          查看 Issue{ids.length > 1 ? ` ${index + 1}` : ""}
+        </a>
+      ))}
+      {detail?.source_message_id && (
+        <a
+          className="issue-link"
+          href={`/#message-${detail.source_message_id}`}
+        >
+          原对话
+        </a>
+      )}
+      {!message.attention &&
+      (detail || message.issue_ids?.length || source?.issue_ids?.length) ? (
+        <button
+          className="text-button"
+          type="button"
+          onClick={() => onReply(message)}
+        >
+          回复
+        </button>
+      ) : null}
       {message.attention && (
         <div className="attention-actions">
           <span role="status">
@@ -118,6 +244,7 @@ function MessageRow({
 
 function Composer({
   token,
+  issue,
   replyId,
   replyText,
   textarea,
@@ -125,13 +252,14 @@ function Composer({
   onSent,
 }: {
   token: string;
+  issue?: string;
   replyId: string | null;
   replyText?: string;
   textarea: RefObject<HTMLTextAreaElement | null>;
   onCancelReply: () => void;
   onSent: (reply: string | null) => void;
 }) {
-  const [pending] = useState(savedMessage);
+  const [pending] = useState(() => savedMessage(issue));
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
   const [sending, setSending] = useState(false);
@@ -147,12 +275,12 @@ function Composer({
         ? attempt.current
         : { operation_id: operationId(), text: value, reply_to: quote };
     attempt.current = message;
-    sessionStorage.setItem(pendingKey, JSON.stringify(message));
+    sessionStorage.setItem(pendingKey(issue), JSON.stringify(message));
     setSending(true);
     setError("");
     try {
-      await sendMessage(token, message);
-      sessionStorage.removeItem(pendingKey);
+      await sendMessage(token, message, issue);
+      sessionStorage.removeItem(pendingKey(issue));
       attempt.current = null;
       setText("");
       onSent(replyId);
@@ -187,8 +315,8 @@ function Composer({
           )}
           <textarea
             ref={textarea}
-            aria-label="发消息给 Tend"
-            placeholder="发消息给 Tend…"
+            aria-label={issue ? "发消息给 Issue Owner" : "发消息给 Tend"}
+            placeholder={issue ? "发消息给 Issue Owner…" : "发消息给 Tend…"}
             value={text}
             rows={2}
             readOnly={sending}
@@ -233,10 +361,14 @@ function Composer({
 
 export function Chat({
   token,
+  issue,
   onReachable,
+  onTitle,
 }: {
   token: string;
+  issue?: string;
   onReachable: (online: boolean) => void;
+  onTitle: (title: string) => void;
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
   const [before, setBefore] = useState<number | null | undefined>(undefined);
@@ -245,7 +377,7 @@ export function Chat({
   const [error, setError] = useState("");
   const [historyError, setHistoryError] = useState("");
   const [replyId, setReplyId] = useState(
-    () => savedMessage()?.reply_to ?? null,
+    () => savedMessage(issue)?.reply_to ?? null,
   );
   const textarea = useRef<HTMLTextAreaElement>(null);
   const timeline = useRef<HTMLElement>(null);
@@ -257,13 +389,19 @@ export function Chat({
     let timer: number;
     async function update() {
       try {
-        const page = await readMessages(token, undefined, controller.signal);
+        const page = await readMessages(
+          token,
+          undefined,
+          controller.signal,
+          issue,
+        );
         if (controller.signal.aborted) return;
         setMessages((current) => mergeMessages(current, page.messages));
         setBefore((cursor) =>
           cursor === undefined ? page.next_before : cursor,
         );
         setError("");
+        if (page.title) onTitle(page.title);
         onReachable(true);
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -279,7 +417,7 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, refresh, onReachable]);
+  }, [token, issue, refresh, onReachable, onTitle]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
@@ -298,7 +436,7 @@ export function Chat({
     setLoadingHistory(true);
     setHistoryError("");
     try {
-      const page = await readMessages(token, before);
+      const page = await readMessages(token, before, undefined, issue);
       if (timeline.current) {
         preserve.current = {
           top: timeline.current.scrollTop,
@@ -317,16 +455,28 @@ export function Chat({
   const byId = new Map(messages.map((message) => [message.id, message]));
   let lastUser: string | null = null;
   const rows = messages.map((message) => {
+    const detail = message.issue;
+    if (detail?.kind === "run" && detail.run_id) {
+      return (
+        <RunRow
+          key={message.id}
+          token={token}
+          run={detail.run_id}
+          author={detail.author}
+          issue={detail.issue_id === issue ? undefined : detail.issue_title}
+        />
+      );
+    }
+    const source = message.reply_to ? byId.get(message.reply_to) : undefined;
+    const showReference = Boolean(issue) || message.reply_to !== lastUser;
     if (message.author === "user") lastUser = message.id;
-    const source =
-      message.reply_to && message.reply_to !== lastUser
-        ? byId.get(message.reply_to)
-        : undefined;
     return (
       <MessageRow
         key={message.id}
         message={message}
         source={source}
+        showReference={showReference}
+        issue={issue}
         token={token}
         onReply={(question) => {
           setReplyId(question.id);
@@ -370,6 +520,7 @@ export function Chat({
       </main>
       <Composer
         token={token}
+        issue={issue}
         replyId={replyId}
         replyText={replyId ? byId.get(replyId)?.text : undefined}
         textarea={textarea}

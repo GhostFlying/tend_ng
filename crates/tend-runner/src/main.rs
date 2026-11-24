@@ -1,6 +1,7 @@
 mod artifacts;
 mod config;
 mod execution;
+mod inspect;
 mod reconcile;
 mod store;
 mod tools;
@@ -95,14 +96,23 @@ fn main() -> Result<()> {
         Store::open(&db_path, &config)?,
         Arc::clone(&server),
     );
+    let runtime = execution::Runtime {
+        root: db_path.with_extension("runs"),
+        artifacts: db_path.with_extension("artifacts"),
+        program,
+        args: app_args,
+    };
+    if let Some(inspection) = &config.inspect {
+        inspect::serve(
+            inspection.listen,
+            Store::open(&db_path, &config)?,
+            runtime.clone(),
+            config.runner_id.clone(),
+            auth,
+        )?;
+    }
     if config.slot_limit > 0 {
         let local = Store::open(&db_path, &config)?;
-        let runtime = execution::Runtime {
-            root: db_path.with_extension("runs"),
-            artifacts: db_path.with_extension("artifacts"),
-            program,
-            args: app_args,
-        };
         thread::spawn(move || execution::serve(local, runtime));
     }
 

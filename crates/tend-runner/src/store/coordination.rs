@@ -86,6 +86,49 @@ impl Store {
 
         let operation_id = protocol::new_id();
         let action = build(&operation_id)?;
+        if let WorkAction::ForwardIssueMessage {
+            child_issue_id,
+            message_id,
+        } = &action
+        {
+            let known = self.0.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
+                   WHERE json_extract(i.payload, '$.message.id') = ?1
+                     AND json_extract(i.payload, '$.message.issue_id') = ?3
+                     AND json_extract(i.payload, '$.message.kind') IN ('user', 'relay')
+                     AND json_extract(a.contract, '$.issue_id') = ?3
+                ) AND EXISTS(
+                   SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                   WHERE json_extract(o.operation, '$.action.kind') = 'delegate'
+                     AND json_extract(o.operation, '$.action.issue_id') = ?2
+                     AND json_extract(a.contract, '$.issue_id') = ?3
+                )",
+                params![message_id, child_issue_id, run.assignment.issue_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(
+                known,
+                "Forward a user message received by this Issue to one of its work children"
+            );
+        }
+        if let WorkAction::PostIssueMessage {
+            reply_to: Some(reply),
+            ..
+        } = &action
+        {
+            let known: bool = self.0.query_row(
+                "SELECT EXISTS(
+                   SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
+                   WHERE json_extract(i.payload, '$.message.id') = ?1 AND json_extract(a.contract, '$.issue_id') = ?2
+                   UNION ALL
+                   SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                   WHERE o.id = ?1 AND json_extract(o.operation, '$.action.kind') = 'post_issue_message'
+                     AND json_extract(a.contract, '$.issue_id') = ?2
+                )", params![reply, run.assignment.issue_id], |row| row.get(0),
+            )?;
+            ensure!(known, "Reply to a message received or posted by this Issue");
+        }
         if let WorkAction::EscalateAttention { attention_id }
         | WorkAction::AnswerChildAttention { attention_id, .. } = &action
         {
@@ -227,9 +270,6 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
     )?;
     if closed {
         return Ok(false);
-    }
-    if has_unread_input(db, assignment)? {
-        return Ok(true);
     }
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_work_operations o

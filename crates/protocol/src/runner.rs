@@ -1,4 +1,4 @@
-use crate::{AttentionRequest, DispatchIssue};
+use crate::{AttentionRequest, DispatchIssue, IssueMessage};
 use serde::{Deserialize, Serialize};
 
 pub const RUNNER_PROTOCOL: u32 = 1;
@@ -30,6 +30,8 @@ pub struct RunnerProfile {
     pub slot_limit: u32,
     pub running_slots: u32,
     pub available_for_assignment: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inspect_url: Option<String>,
 }
 
 impl RunnerProfile {
@@ -157,6 +159,15 @@ pub enum WorkAction {
         attention_id: String,
         answer: String,
     },
+    ForwardIssueMessage {
+        child_issue_id: String,
+        message_id: String,
+    },
+    PostIssueMessage {
+        text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply_to: Option<String>,
+    },
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -180,6 +191,9 @@ pub struct IssueInput {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum IssueInputCause {
     IssueClosed,
+    IssueMessage {
+        message: IssueMessage,
+    },
     AttentionRequested {
         attention_id: String,
         request: AttentionRequest,
@@ -238,6 +252,8 @@ pub enum RunPhase {
         waiting_for_children: bool,
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         waiting_for_attention: bool,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        queued_input: bool,
     },
 }
 

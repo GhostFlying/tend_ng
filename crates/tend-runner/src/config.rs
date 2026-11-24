@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashSet,
     fs::File,
+    net::SocketAddr,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,6 +16,13 @@ pub struct Config {
     pub slot_limit: u32,
     pub repos: Vec<Repo>,
     pub agents: Vec<AgentProfile>,
+    pub inspect: Option<Inspection>,
+}
+
+#[derive(Deserialize)]
+pub struct Inspection {
+    pub listen: SocketAddr,
+    pub url: String,
 }
 
 #[derive(Deserialize, Serialize)]
@@ -41,6 +49,15 @@ impl Config {
             );
             repo.path = root.join(&repo.path);
         }
+        if let Some(inspect) = &config.inspect {
+            ensure!(
+                inspect
+                    .url
+                    .strip_prefix("http://")
+                    .is_some_and(|host| !host.is_empty()),
+                "Runner inspection URL must be an HTTP base address"
+            );
+        }
         let profile = config.profile(0);
         ensure!(profile.valid(), "invalid Runner configuration");
         let mut agents = HashSet::new();
@@ -65,6 +82,7 @@ impl Config {
             slot_limit: self.slot_limit,
             running_slots: 0,
             available_for_assignment: self.slot_limit.saturating_sub(unfinished),
+            inspect_url: self.inspect.as_ref().map(|inspect| inspect.url.clone()),
         }
     }
 

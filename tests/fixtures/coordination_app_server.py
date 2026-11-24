@@ -37,11 +37,81 @@ def gate(name):
         time.sleep(.02)
 
 
+def issue_chat(turn, assignment, items, tools):
+    assert "tend_post_issue_message" in tools
+    context = json.loads(items[0]["text"].split("\n", 1)[1]) if len(items) > 1 else None
+    if not worker:
+        if not (root / "delegation.json").exists():
+            args = {"title": "整理快速上手指南", "objective": "整理安装和首次运行步骤。",
+                    "category": "implementation", "required_capabilities": ["image_gen"]}
+            delegated = tool("tend_delegate_work", args, "delegate", "delegate")
+            (root / "delegation.json").write_text(json.dumps(delegated))
+        else:
+            # Wake facts may share a turn. Persist their actual recipient for the test.
+            with (root / "owner-inputs.jsonl").open("a") as evidence:
+                for input in context["child_inputs"]:
+                    evidence.write(json.dumps(input) + "\n")
+            for input in context["child_inputs"]:
+                message = input.get("message", {})
+                if message.get("kind") == "relay":
+                    child = json.loads((root / "delegation.json").read_text())["action"]["issue_id"]
+                    args = {"child_issue_id": child, "message_id": message["id"]}
+                    tool("tend_forward_issue_message", args, "forward", "forward")
+                    tool("tend_forward_issue_message", args, "duplicate-forward", "duplicate-forward")
+    else:
+        assert Path.cwd() == root / "runner.runs" / "workspaces" / assignment["parent_issue_id"]
+        if context is None:
+            args = {"text": "初稿已整理，接下来核对首次运行步骤。"}
+            first = tool("tend_post_issue_message", args, "first", "first")
+            assert tool("tend_post_issue_message", args, "replay-first", "first") == first
+            (root / "first-post.json").write_text(json.dumps(first))
+            gate("finish-first")
+        else:
+            [input] = context["child_inputs"]
+            assert input["kind"] == "issue_message"
+            message = input["message"]
+            if message["kind"] == "relay":
+                assert message["author"] == "coordinator" and message["forwarded_from"]
+                assert message["text"] == "请让负责指南的 Agent 补一段常见问题。"
+                text = "常见问题已补进指南。"
+            else:
+                assert message["author"] == "user"
+            original = json.loads((root / "first-post.json").read_text())
+            first_task = json.loads((root / "delegation.json").read_text())["action"]["task_id"]
+            if message["text"] == "请把验证命令也放进去。":
+                assert assignment["task_id"] == first_task
+                assert input["message"]["reply_to"] == original["operation_id"]
+                text = "验证命令已补进指南。"
+                tool("tend_close_issue", {"summary": "快速上手指南已完成。"}, "close", "close")
+            elif message["kind"] == "user":
+                assert assignment["task_id"] != first_task
+                assert assignment["followup"] == {"previous_task_id": first_task, "issue_state": "closed"}
+                assert input["message"]["text"] == "谢谢，命令适用于 macOS 吗？"
+                text = "适用于 macOS，使用终端执行即可。"
+            tool("tend_post_issue_message", {"text": text, "reply_to": input["message"]["id"]}, "reply", "reply")
+    history = {"id": turn_id, "status": "completed", "items": [
+        {"type": "userMessage", "clientId": turn["params"]["clientUserMessageId"]},
+        {"type": "agentMessage", "id": turn_id + "-detail", "phase": "commentary",
+         "text": "核对安装步骤和验证命令。" if worker else "协调指南的整理工作。"},
+    ]}
+    with (root / f"{thread_id}.json").open("w") as saved:
+        json.dump(history, saved)
+    send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": history}})
+
+
 root = Path(sys.argv[1])
 scenario = sys.argv[2]
 respond(request("initialize"), {})
 request("initialized")
-start = request("thread/start")
+start = json.loads(sys.stdin.readline())
+if scenario == "issue-chat" and start["method"] == "thread/turns/list":
+    thread = start["params"]["threadId"]
+    with (root / "inspection.jsonl").open("a") as visits:
+        visits.write(json.dumps(thread) + "\n")
+    saved = root / f"{thread}.json"
+    respond(start, {"data": [json.loads(saved.read_text())] if saved.exists() else [], "nextCursor": None})
+    sys.exit(0)
+assert start["method"] == "thread/start", start
 model = start["params"]["model"]
 worker = model == "fixture-worker"
 attention = scenario in {"attention", "attention-local"}
@@ -50,6 +120,9 @@ if not worker and (root / "delegation.json").exists():
     role = "resumed"
 if worker and attention and (root / "question.json").exists():
     role = "decision"
+if scenario == "issue-chat":
+    import uuid
+    role = f"{role}-{uuid.uuid4().hex}"
 thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
 assert Path(start["params"]["cwd"]) == Path.cwd()
@@ -59,6 +132,10 @@ items = turn["params"]["input"]
 assignment = json.loads(items[-1]["text"])
 tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
 respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
+
+if scenario == "issue-chat":
+    issue_chat(turn, assignment, items, tools)
+    sys.exit(0)
 
 if role == "parent":
     assert {"tend_delegate_work", "tend_close_issue"} <= tools
