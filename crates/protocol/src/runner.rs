@@ -166,6 +166,9 @@ pub enum WorkAction {
     LinkPull {
         url: String,
     },
+    FindPull {
+        task_id: String,
+    },
     PostIssueMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,6 +244,8 @@ pub struct RunObservation {
     pub turn_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub input_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branches: Vec<crate::WorkBranch>,
     pub phase: RunPhase,
 }
 

@@ -63,6 +63,10 @@ pub struct PullFacts {
     pub draft: bool,
     pub head_sha: String,
     pub ci: Option<String>,
+    #[serde(default)]
+    pub head_branch: Option<String>,
+    #[serde(default)]
+    pub head_repository: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,4 +100,50 @@ pub fn issue_pulls_path(issue: &str) -> String {
 
 pub fn issue_board_path(chat: &str) -> String {
     format!("/api/v1/chats/{chat}/issues")
+}
+
+pub fn github_repository(remote: &str) -> Option<String> {
+    let path = remote
+        .trim()
+        .strip_prefix("https://github.com/")
+        .or_else(|| remote.trim().strip_prefix("git@github.com:"))
+        .or_else(|| remote.trim().strip_prefix("ssh://git@github.com/"))?;
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let (owner, repo) = path.split_once('/')?;
+    (repository_part(owner) && repository_part(repo)).then(|| path.to_ascii_lowercase())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkBranch {
+    pub repo_id: String,
+    pub repository: String,
+    pub head_repository: String,
+    pub branch: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FindPull {
+    pub operation_id: String,
+    pub task_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BranchResult {
+    pub branch: WorkBranch,
+    pub state: String,
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct PullDiscovery {
+    pub operation_id: String,
+    pub task_id: String,
+    pub automatic: bool,
+    pub state: String,
+    pub results: Vec<BranchResult>,
+}
+
+pub fn pull_discoveries_path(issue: &str) -> String {
+    format!("/api/v1/issues/{issue}/pull-discoveries")
 }

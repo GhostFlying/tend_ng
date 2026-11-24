@@ -139,6 +139,9 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         "INSERT INTO runner_run_events (id, runner_id, observation) VALUES (?1, ?2, ?3)",
         params![observation.event_id, runner, original],
     )?;
+    if matches!(status, "completed" | "failed") && observation.turn_id.is_some() {
+        super::discovery::queue_automatic(db, observation)?;
+    }
     super::coordination::report_task_stop(db, observation)?;
     Ok(true)
 }

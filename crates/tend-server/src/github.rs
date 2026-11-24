@@ -1,5 +1,5 @@
 use crate::store::Store;
-use protocol::{GitHubPull, PullFacts};
+use protocol::{BranchResult, GitHubPull, PullFacts, WorkBranch};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -12,7 +12,7 @@ use std::{
 const QUERY: &str = "query($owner:String!, $repo:String!, $number:Int!) {
   repository(owner:$owner, name:$repo) {
     pullRequest(number:$number) {
-      title state isDraft headRefOid
+      title state isDraft headRefOid headRefName headRepository { nameWithOwner }
       commits(last:1) { nodes { commit { oid statusCheckRollup { state } } } }
     }
   }
@@ -92,7 +92,91 @@ fn observe(program: &OsString, pull: &GitHubPull) -> Result<PullFacts, &'static 
         draft,
         head_sha,
         ci: ci.map(str::to_owned),
+        head_branch: pr["headRefName"].as_str().map(str::to_owned),
+        head_repository: pr["headRepository"]["nameWithOwner"]
+            .as_str()
+            .map(str::to_ascii_lowercase),
     })
+}
+
+pub fn spawn_discovery(mut store: Store, program: OsString) {
+    thread::spawn(move || {
+        loop {
+            let outcome = (|| {
+                let Some(request) = store.pending_discovery()? else {
+                    return Ok(false);
+                };
+                let results: Vec<_> = request
+                    .branches
+                    .iter()
+                    .map(|branch| {
+                        let (state, url) = match find(&program, branch) {
+                            Ok(Some(pull)) => ("linked", Some(pull.url())),
+                            Ok(None) => ("missing", None),
+                            Err(reason) => (reason, None),
+                        };
+                        BranchResult {
+                            branch: branch.clone(),
+                            state: state.to_owned(),
+                            url,
+                        }
+                    })
+                    .collect();
+                store.finish_discovery(&request, &results)?;
+                Ok::<_, anyhow::Error>(true)
+            })();
+            match outcome {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => eprintln!("GitHub branch discovery: {error:#}"),
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+fn find(program: &OsString, branch: &WorkBranch) -> Result<Option<GitHubPull>, &'static str> {
+    let (owner, _) = branch
+        .head_repository
+        .split_once('/')
+        .ok_or("invalid_reference")?;
+    let response = request(
+        program,
+        &[
+            "api",
+            "--hostname",
+            "github.com",
+            "--method",
+            "GET",
+            &format!("repos/{}/pulls", branch.repository),
+            "-f",
+            "state=all",
+            "-f",
+            &format!("head={owner}:{}", branch.branch),
+            "-F",
+            "per_page=2",
+        ],
+    )?;
+    let candidates = response.as_array().ok_or("invalid_response")?;
+    match candidates.as_slice() {
+        [] => Ok(None),
+        [pr] if pr["head"]["ref"] == branch.branch
+            && pr["head"]["repo"]["full_name"]
+                .as_str()
+                .is_some_and(|repo| repo.eq_ignore_ascii_case(&branch.head_repository)) =>
+        {
+            let number = pr["number"]
+                .as_i64()
+                .filter(|number| *number > 0)
+                .ok_or("invalid_response")?;
+            Ok(Some(GitHubPull {
+                repository: branch.repository.clone(),
+                number,
+            }))
+        }
+        [_] => Ok(None),
+        _ => Err("ambiguous"),
+    }
 }
 
 fn request(program: &OsString, args: &[&str]) -> Result<Value, &'static str> {
@@ -152,6 +236,16 @@ fn request(program: &OsString, args: &[&str]) -> Result<Value, &'static str> {
         return Err("github_query_failed");
     }
     if !status.success() {
+        let code = output["status"]
+            .as_str()
+            .and_then(|value| value.parse::<i64>().ok())
+            .or_else(|| output["status"].as_i64());
+        if matches!(code, Some(401 | 404))
+            || output["message"] == "Resource not accessible by integration"
+            || output["message"] == "Resource not accessible by personal access token"
+        {
+            return Err("not_accessible");
+        }
         return Err("github_query_failed");
     }
     Ok(output)

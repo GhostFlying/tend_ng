@@ -14,6 +14,7 @@ const ASK: &str = "tend_request_attention";
 const ESCALATE: &str = "tend_escalate_attention";
 const ANSWER: &str = "tend_answer_child_attention";
 const FORWARD: &str = "tend_forward_issue_message";
+const FIND_PULL: &str = "tend_find_pull_request";
 const LINK_PULL: &str = "tend_link_pull_request";
 const POST: &str = "tend_post_issue_message";
 
@@ -31,6 +32,13 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         "description": "Save a GitHub pull request URL against this Issue. The receipt means the Runner accepted the link for synchronization.",
         "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}},
                         "required": ["url"], "additionalProperties": false}
+    });
+    let find_pull = json!({
+        "type": "function",
+        "name": FIND_PULL,
+        "description": "Queue a GitHub pull request lookup for a recorded work branch in this Issue tree. Defaults to the current Task.",
+        "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
+                        "additionalProperties": false}
     });
     let close = json!({
         "type": "function",
@@ -123,9 +131,9 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
         (
-            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request to associate a relevant GitHub PR with this Issue. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
+            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request for a known GitHub PR and tend_find_pull_request for a recorded work branch. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
             vec![
-                delegate, close, report, ask, escalate, answer, post, forward,
+                delegate, close, report, ask, escalate, answer, post, forward, link_pull, find_pull,
             ],
         )
     } else {
@@ -141,8 +149,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             }
         });
         (
-            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries, tend_link_pull_request for GitHub PRs, and tend_close_issue when the Issue is done.",
-            vec![close, submit, ask, post, link_pull],
+            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries, tend_link_pull_request for a known GitHub PR, tend_find_pull_request for its recorded branch, and tend_close_issue when the Issue is done.",
+            vec![close, submit, ask, post, link_pull, find_pull],
         )
     }
 }
@@ -213,6 +221,16 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        FIND_PULL => {
+            let supplied: Option<String> = call
+                .arguments
+                .get("task_id")
+                .map(|id| serde_json::from_value(id.clone()))
+                .transpose()?;
+            let task_id = supplied.unwrap_or_else(|| run.assignment.task_id.clone());
+            ensure!(protocol::valid_id(&task_id), "Use a recorded Task ID");
+            Ok(WorkAction::FindPull { task_id })
+        }
         LINK_PULL => {
             let pull = call.arguments["url"]
                 .as_str()

@@ -182,7 +182,12 @@ impl Store {
         Ok(())
     }
 
-    pub fn mark_started(&mut self, run: &LocalRun, turn_id: &str) -> Result<()> {
+    pub fn mark_started(
+        &mut self,
+        run: &LocalRun,
+        turn_id: &str,
+        branches: &[protocol::WorkBranch],
+    ) -> Result<()> {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -194,7 +199,7 @@ impl Store {
             )? == 1,
             "cannot start the original Run"
         );
-        save_event(&tx, run, RunPhase::Started)?;
+        save_event(&tx, run, RunPhase::Started, branches)?;
         tx.commit()?;
         Ok(())
     }
@@ -205,6 +210,7 @@ impl Store {
         outcome: RunOutcome,
         error: Option<String>,
         recovered_turn: Option<&str>,
+        branches: &[protocol::WorkBranch],
     ) -> Result<()> {
         let tx = self
             .0
@@ -218,7 +224,7 @@ impl Store {
                 )? == 1,
                 "cannot attach the recovered turn"
             );
-            save_event(&tx, run, RunPhase::Started)?;
+            save_event(&tx, run, RunPhase::Started, branches)?;
         }
         ensure!(
             tx.execute(
@@ -257,6 +263,7 @@ impl Store {
                 waiting_for_attention,
                 queued_input,
             },
+            branches,
         )?;
         tx.commit()?;
         Ok(())
@@ -309,7 +316,12 @@ pub(super) fn decode_record(payload: &str, kind: &str) -> Result<RunnerRecord> {
     }
 }
 
-fn save_event(db: &Connection, run: &LocalRun, phase: RunPhase) -> Result<()> {
+fn save_event(
+    db: &Connection,
+    run: &LocalRun,
+    phase: RunPhase,
+    branches: &[protocol::WorkBranch],
+) -> Result<()> {
     let (thread_id, turn_id) = db.query_row(
         "SELECT thread_id, turn_id FROM local_runs WHERE id = ?1",
         [&run.id],
@@ -332,6 +344,7 @@ fn save_event(db: &Connection, run: &LocalRun, phase: RunPhase) -> Result<()> {
             .iter()
             .map(|input| input.input_id.clone())
             .collect(),
+        branches: branches.to_vec(),
         phase,
     };
     db.execute(

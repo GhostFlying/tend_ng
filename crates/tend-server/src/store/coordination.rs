@@ -256,6 +256,16 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 message_id,
             )?;
         }
+        WorkAction::FindPull { task_id } => {
+            super::discovery::queue(
+                db,
+                &source_issue,
+                &protocol::FindPull {
+                    operation_id: operation.operation_id.clone(),
+                    task_id: task_id.clone(),
+                },
+            )?;
+        }
         WorkAction::LinkPull { url } => {
             let Some(pull) = protocol::GitHubPull::parse(url) else {
                 return Ok(false);

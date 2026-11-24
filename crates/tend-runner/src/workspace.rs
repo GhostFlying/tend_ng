@@ -65,6 +65,45 @@ pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn branches(run: &LocalRun, cwd: &Path) -> Vec<protocol::WorkBranch> {
+    if run.assignment.parent_issue_id.is_none() {
+        return Vec::new();
+    }
+    run.repos
+        .iter()
+        .filter_map(|repo| {
+            let path = cwd.join("repos").join(component(&repo.id));
+            let branch = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
+            let origin = git(&path, &["config", "--get", "remote.origin.url"]).ok()?;
+            let repository = protocol::github_repository(&origin)?;
+            let branch_remote_key = format!("branch.{branch}.pushRemote");
+            let branch_remote = format!("branch.{branch}.remote");
+            let preferred = git(&path, &["config", "--get", &branch_remote_key])
+                .or_else(|_| git(&path, &["config", "--get", "remote.pushDefault"]))
+                .or_else(|_| git(&path, &["config", "--get", &branch_remote]))
+                .unwrap_or_else(|_| "origin".to_owned());
+            let push = git(
+                &path,
+                &["config", "--get", &format!("remote.{preferred}.pushurl")],
+            )
+            .or_else(|_| {
+                git(
+                    &path,
+                    &["config", "--get", &format!("remote.{preferred}.url")],
+                )
+            })
+            .ok()?;
+            let head_repository = protocol::github_repository(&push)?;
+            Some(protocol::WorkBranch {
+                repo_id: repo.id.clone(),
+                repository,
+                head_repository,
+                branch,
+            })
+        })
+        .collect()
+}
+
 fn prepare_repository(repo: &Repo, target: &Path, issue: &str) -> Result<String> {
     if target.exists() {
         let origin = git(

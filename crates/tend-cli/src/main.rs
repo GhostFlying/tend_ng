@@ -1,11 +1,12 @@
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
-    ApiError, Attention, DEFAULT_LISTEN, IssueBoard, IssueDispatch, IssueMessagePage, LinkPull,
-    MessagePage, NotificationPage, PullLink, PullLinkReceipt, Receipt, SendMessage, TOKEN_ENV,
+    ApiError, Attention, DEFAULT_LISTEN, FindPull, IssueBoard, IssueDispatch, IssueMessagePage,
+    LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLink, PullLinkReceipt, Receipt,
+    SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend notification list <chat-id> [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id>\n  tend pr link <issue-id> <url> [operation-id]\n  tend pr list <issue-id>\n  tend pr find <issue-id> <task-id> [operation-id]\n  tend pr discoveries <issue-id> [operation-id]\n  tend issue messages <issue-id> [before]\n  tend issue message <issue-id> <text> [operation-id] [--reply-to <message-id>]\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -24,6 +25,7 @@ fn main() -> Result<()> {
         ("issue", "read") => protocol::issue_path(id),
         ("issue", "list") => protocol::issue_board_path(id),
         ("pr", "link" | "list") => protocol::issue_pulls_path(id),
+        ("pr", "find" | "discoveries") => protocol::pull_discoveries_path(id),
         ("issue", "messages" | "message") => protocol::issue_messages_path(id),
         ("run", "rollout") => protocol::rollout_path(id),
         ("artifact", _) => protocol::artifact_path(id),
@@ -94,6 +96,30 @@ fn main() -> Result<()> {
                     .and_then(|response| Ok(response.into_json()?))
                     .with_context(|| format!("link operation {}", request.operation_id))?;
             println!("{}", serde_json::to_string(&receipt)?);
+        }
+        ("pr", "find", [task_id, operation @ ..]) if operation.len() <= 1 => {
+            let operation_id = operation.first().cloned().unwrap_or_else(protocol::new_id);
+            ensure!(
+                protocol::valid_id(task_id) && protocol::valid_id(&operation_id),
+                "invalid Task or operation ID"
+            );
+            let request = FindPull {
+                operation_id,
+                task_id: task_id.clone(),
+            };
+            let receipt: FindPull = send(&http, &path, &auth, &serde_json::to_value(&request)?)
+                .and_then(|response| Ok(response.into_json()?))
+                .with_context(|| format!("discover operation {}", request.operation_id))?;
+            println!("{}", serde_json::to_string(&receipt)?);
+        }
+        ("pr", "discoveries", [] | [_]) => {
+            let mut request = http.get(&path).set("Authorization", &auth);
+            if let Some(operation) = rest.first() {
+                ensure!(protocol::valid_id(operation), "invalid operation ID");
+                request = request.query("operation", operation);
+            }
+            let jobs: Vec<PullDiscovery> = checked(request.call())?.into_json()?;
+            println!("{}", serde_json::to_string(&jobs)?);
         }
         ("pr", "list", []) => {
             let links: Vec<PullLink> =

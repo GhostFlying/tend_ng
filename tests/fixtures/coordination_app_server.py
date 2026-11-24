@@ -161,7 +161,13 @@ elif role == "child":
     assert (Path("repos/example") / ".git").is_file()
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
-    if scenario == "pull-board":
+    if scenario == "pull-discovery":
+        assert "tend_find_pull_request" in tools
+        requested = tool("tend_find_pull_request", {}, "find-pr", "find-pr")
+        assert tool("tend_find_pull_request", {}, "repeat-find-pr", "find-pr") == requested
+        (root / "find-pull.json").write_text(json.dumps(requested))
+        gate("finish-work")
+    elif scenario == "pull-board":
         assert "tend_link_pull_request" in tools
         args = {"url": "https://github.com/Example/Guide/pull/73/"}
         attached = tool("tend_link_pull_request", args, "attach-pr", "attach-pr")
@@ -185,7 +191,7 @@ elif role == "child":
         guide.write_text("A later edit to the workspace file.\n")
         assert tool("tend_submit_artifact", arguments, "replay-submit", "delivery") == delivered
         (root / "submitted.json").write_text(json.dumps(delivered))
-    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board"}:
+    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "decision":
     original = json.loads((root / "question.json").read_text())
@@ -240,7 +246,7 @@ else:
             args["answer"] = "精简版"
         accepted = tool(name, args, "route-question", "route-question")
         assert tool(name, args, "replay-question", "route-question") == accepted
-    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board"}:
+    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":

@@ -43,7 +43,7 @@ fn advance(store: &mut Store, runtime: &Runtime) -> Result<bool> {
         // This is recovery of the original execution. Read history without
         // starting new agent work for it.
         let result = recover(runtime, &run, &cwd);
-        settle(store, &run, result, true)?;
+        settle(store, &run, &cwd, result, true)?;
     } else {
         launch(store, runtime, &run)?;
     }
@@ -74,13 +74,15 @@ fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
 }
 
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
+    let planned_cwd = workspace::directory(&runtime.root, run);
     let started = workspace::prepare(&runtime.root, run)
         .context("prepare Tend workspace")
         .and_then(|directory| Ok((client(runtime, &directory)?, directory)));
     let (mut app, cwd) = match started {
         Ok(started) => started,
-        Err(error) => return settle(store, run, Err(error), false),
+        Err(error) => return settle(store, run, &planned_cwd, Err(error), false),
     };
+    let branches = workspace::branches(run, &cwd);
     let result = (|| {
         let agent = &run.assignment.placement.agent;
         let coordinator = agent.category == "issue-router";
@@ -102,30 +104,44 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun) -> Result<()> {
                 run,
                 cwd: &cwd,
                 artifacts: &runtime.artifacts,
+                branches: &branches,
             },
         )
     })();
     // A terminal notification alone does not prove the managed process has
     // exited. Leave the active record intact if stop cannot be verified.
     app.stop()?;
-    settle(store, run, result, false)
+    settle(store, run, &cwd, result, false)
 }
 
-fn settle(store: &mut Store, run: &LocalRun, result: Result<Turn>, recovered: bool) -> Result<()> {
+fn settle(
+    store: &mut Store,
+    run: &LocalRun,
+    cwd: &Path,
+    result: Result<Turn>,
+    recovered: bool,
+) -> Result<()> {
+    let branches = workspace::branches(run, cwd);
     match result {
         Ok(turn) => {
             let observed = (recovered && run.turn_id.is_none()).then_some(turn.id.as_str());
             if turn.status == TurnStatus::Completed {
-                store.finish(run, RunOutcome::Completed, None, observed)
+                store.finish(run, RunOutcome::Completed, None, observed, &branches)
             } else {
                 let reason = turn.error.map_or_else(
                     || format!("Codex turn ended with {:?}", turn.status),
                     |error| error.message,
                 );
-                store.finish(run, RunOutcome::Failed, Some(reason), observed)
+                store.finish(run, RunOutcome::Failed, Some(reason), observed, &branches)
             }
         }
-        Err(error) => store.finish(run, RunOutcome::Failed, Some(format!("{error:#}")), None),
+        Err(error) => store.finish(
+            run,
+            RunOutcome::Failed,
+            Some(format!("{error:#}")),
+            None,
+            &branches,
+        ),
     }
 }
 
@@ -134,11 +150,12 @@ struct Handler<'a> {
     run: &'a LocalRun,
     cwd: &'a Path,
     artifacts: &'a Path,
+    branches: &'a [protocol::WorkBranch],
 }
 
 impl TurnHandler for Handler<'_> {
     fn started(&mut self, turn_id: &str) -> Result<()> {
-        self.store.mark_started(self.run, turn_id)
+        self.store.mark_started(self.run, turn_id, self.branches)
     }
 
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {

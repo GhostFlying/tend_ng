@@ -197,7 +197,7 @@ impl Store {
     }
 }
 
-fn issue_exists(db: &Connection, issue: &str) -> Result<bool> {
+pub(super) fn issue_exists(db: &Connection, issue: &str) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?1)",
         [issue],

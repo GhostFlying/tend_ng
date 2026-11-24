@@ -21,6 +21,19 @@ python3 tests/e2e/pull_board.py target/debug/tend-server target/debug/tend targe
 
 [桌面看板实拍](images/issue-board-1440.png) · [窄屏看板实拍](images/issue-board-390.png)
 
-## 接续
+## 工作分支补查
 
-从 Runner 上报的实际托管 repo 和工作分支补查 PR。工作 Task 终态和停妥后自动排一次。外部事件的订阅、等待与固定窗口投递共享同一来源，但由独立的持久投递负责。 [PR 关联](../design.md#pr-与-issue-关联) · [任务等待](../task-lifecycle.md)
+- Runner 从托管 worktree 记录实际 GitHub 仓库、推送仓库和工作分支，随开始或停妥事实同步。工作目录和远端凭据留在 Runner。
+- CLI 和 Agent 引用目标 Issue 树内的原 Task。Server 持久化待查分支，用仓库和源分支精确查询；只有唯一匹配时建立关联。查询结果以原请求 ID 可查。一期自动补查由工作 Task 的终态和停妥证据入队，每个原 Task 的分支范围只安排一次。
+- 用同一个真实进程夹具核对运行期间发起显式补查、终态自动补查、已关联分支去重、多匹配和权限失败。CLI 可读到精确结果，外部查询失败时 Task 仍按实际执行事实结算。
+
+用 `tend pr find <issue-id> <task-id>` 发起补查，用 `tend pr discoveries <issue-id> [operation-id]` 查询请求和每个分支的实际结果。分支查询使用已记录的同名远端工作分支，发布到不同名称时可直接登记 PR URL。 [GitHub 按 head 查询参数](https://docs.github.com/en/rest/pulls/pulls#list-pull-requests)
+
+```sh
+python3 tests/e2e/pull_discovery.py target/debug/tend-server target/debug/tend target/debug/tend-runner
+python3 tests/e2e/pull_discovery.py target/debug/tend-server target/debug/tend target/debug/tend-runner --already-linked
+```
+
+## 外部事件投递
+
+外部事件的订阅、等待与固定窗口投递沿独立的持久投递链路接入。 [PR 关联](../design.md#pr-与-issue-关联) · [任务等待](../task-lifecycle.md)

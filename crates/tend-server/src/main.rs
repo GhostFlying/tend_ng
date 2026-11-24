@@ -87,7 +87,8 @@ fn main() -> Result<()> {
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let artifact_root = db.with_extension("artifacts");
     thread::spawn(move || schedule(placement));
-    github::spawn(Store::open(&db)?, github_cli);
+    github::spawn(Store::open(&db)?, github_cli.clone());
+    github::spawn_discovery(Store::open(&db)?, github_cli);
     router::spawn(router::Config {
         db,
         cwd,
@@ -188,6 +189,28 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
             200,
             serde_json::to_value(store.issue_board(chat_id, before)?)?,
         ));
+    }
+    if let Some(issue_id) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/pull-discoveries"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        return match request.method() {
+            Method::Get => {
+                let operation = query
+                    .strip_prefix("operation=")
+                    .filter(|id| protocol::valid_id(id));
+                if !query.is_empty() && operation.is_none() {
+                    return Ok(api_error(400, "invalid discovery operation ID"));
+                }
+                Ok(match store.discoveries(issue_id, operation)? {
+                    Some(jobs) => (200, serde_json::to_value(jobs)?),
+                    None => api_error(404, "Issue not found"),
+                })
+            }
+            Method::Post => find_pull(store, &issue_id.to_owned(), request),
+            _ => Ok(api_error(405, "method not allowed")),
+        };
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")
@@ -329,6 +352,25 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
         }
         _ => Ok(api_error(405, "method not allowed")),
     }
+}
+
+fn find_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u16, Value)> {
+    let Some(bytes) = request_bytes(request)? else {
+        return Ok(api_error(413, "pull request discovery request too large"));
+    };
+    let Ok(find) = serde_json::from_slice::<protocol::FindPull>(&bytes) else {
+        return Ok(api_error(400, "expected operation_id and task_id"));
+    };
+    if !protocol::valid_id(&find.operation_id) || !protocol::valid_id(&find.task_id) {
+        return Ok(api_error(400, "valid operation and Task IDs required"));
+    }
+    Ok(match store.find_pull(issue, &find)? {
+        store::discovery::Accepted::Saved => (200, serde_json::to_value(find)?),
+        store::discovery::Accepted::Conflict => {
+            api_error(409, "operation ID is already used for another discovery")
+        }
+        store::discovery::Accepted::Missing => api_error(404, "Issue not found"),
+    })
 }
 
 fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u16, Value)> {
