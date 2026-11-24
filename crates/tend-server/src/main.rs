@@ -276,10 +276,16 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
         .filter(|version| *version > 0)
         && request.method() == &Method::Get
     {
-        let blockers = store.upgrade_blockers(version)?;
+        let compatible = runner_api::compatible_protocols(version);
+        let blockers = store.upgrade_blockers(&compatible)?;
         return Ok((
             200,
-            json!({"target_protocol":version,"allowed":blockers.is_empty(),"blockers":blockers}),
+            json!({
+                "target_protocol": version,
+                "compatible_range": {"min": compatible.start(), "max": compatible.end()},
+                "allowed": blockers.is_empty(),
+                "blockers": blockers
+            }),
         ));
     }
     if let Some((runner, operation)) = path

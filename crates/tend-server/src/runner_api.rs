@@ -3,6 +3,7 @@ use anyhow::Result;
 use protocol::{RUNNER_PROTOCOL, RUNNER_SYNC_BATCH, RunnerSync, valid_id};
 use serde_json::Value;
 use std::{
+    ops::RangeInclusive,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -11,6 +12,10 @@ use std::{
     thread,
 };
 use tiny_http::{Method, Request};
+
+pub(crate) fn compatible_protocols(server_protocol: u32) -> RangeInclusive<u32> {
+    server_protocol.saturating_sub(1).max(1)..=server_protocol
+}
 
 pub struct Endpoint {
     runner: String,
@@ -78,10 +83,7 @@ fn handle(
     let Ok(sync) = serde_json::from_slice::<RunnerSync>(&bytes) else {
         return Ok(api_error(400, "invalid Runner sync"));
     };
-    if sync.protocol == 0
-        || sync.protocol > RUNNER_PROTOCOL
-        || sync.protocol < RUNNER_PROTOCOL.saturating_sub(1)
-    {
+    if !compatible_protocols(RUNNER_PROTOCOL).contains(&sync.protocol) {
         return Ok(api_error(426, "unsupported Runner protocol"));
     }
     if sync.profile.runner_id != *runner_id

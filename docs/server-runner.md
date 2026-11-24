@@ -26,6 +26,8 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 以目标 Server 的协议代确定升代窗口。在停止当前 Server 前，预检读取本机数据库中各未退役 Runner 的协议登记，包括暂时离线及仍在收尾的实例。若仍有 Runner 使用 `N−2` 或更早的协议，拒绝本次 Server 升级，报告 Host、Runner、已登记协议和目标兼容范围。窗口内的 Runner 可以带着已领取的工作跨过 Server 重启。
 
+`tend server upgrade-check <target-protocol>` 返回 `target_protocol`、`compatible_range`（含 `min` 和 `max`，两端均包含）、`allowed` 及 `blockers`。每个阻塞项包含 `host_id`、`runner_id` 和已登记的 `protocol`。例如目标 3 的兼容范围为 2–3。
+
 例如当前 Server 为 `v2`，仍有 Runner 使用 `v1`，则升到 `v3` 的请求会被拒绝。先让该 Runner 更新到 `v2` 并完成同步，再切换 Server 到 `v3`。切换后 `v2` Runner 可以继续领取、收控制和回传原工作的结果。 [旧 Tend 滚动升级](https://github.com/GhostFlying/tend/blob/6befc2b8/docs/plans/rolling-runner-generations.md#L3-L9)
 
 ## 派发与本地接收

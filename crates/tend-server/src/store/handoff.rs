@@ -3,6 +3,7 @@ use anyhow::Result;
 use protocol::{HandoffPhase, HandoffProof, RunnerProfile};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
+use std::ops::RangeInclusive;
 
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -187,13 +188,19 @@ impl Store {
         )? == 1)
     }
 
-    pub fn upgrade_blockers(&self, target: u32) -> Result<Vec<Value>> {
+    pub fn upgrade_blockers(&self, compatible: &RangeInclusive<u32>) -> Result<Vec<Value>> {
         let mut query = self.db.prepare(
-            "SELECT r.id, r.protocol FROM runners r LEFT JOIN runner_replacements p ON p.predecessor = r.id
+            "SELECT r.id, r.host_id, r.protocol FROM runners r LEFT JOIN runner_replacements p ON p.predecessor = r.id
              WHERE p.retired_at IS NULL AND (r.protocol < ?1 OR r.protocol > ?2) ORDER BY r.id",
         )?;
-        Ok(query.query_map(params![target.saturating_sub(1).max(1), target], |row| {
-            Ok(json!({"runner_id": row.get::<_, String>(0)?, "protocol": row.get::<_, u32>(1)?}))
-        })?.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(query
+            .query_map(params![compatible.start(), compatible.end()], |row| {
+                Ok(json!({
+                    "runner_id": row.get::<_, String>(0)?,
+                    "host_id": row.get::<_, String>(1)?,
+                    "protocol": row.get::<_, u32>(2)?
+                }))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
