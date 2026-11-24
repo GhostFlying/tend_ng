@@ -24,6 +24,8 @@
 - Server 和 Runner 各自运行和持久化。已领取任务可以离线推进，按原 Task、Run 和操作身份全量对账或增量同步。工具写操作先在执行实例持久受理。业务状态、操作结果与待投递记录在所属实例的同一短事务提交，响应丢失时沿原身份查证。 [同步 API](docs/server-runner.md#一期同步-api) · [写入与故障边界](docs/storage.md#写入与故障边界)
 - 按实际停妥证据归还 slot。原 Task 在 `waitfor` 期间继续独占 workspace。每一层的 `waitfor` 命中后，经负责原 Task 接续的 Runner 直接送给登记等待的 Agent。同 Host 接替时，前驱负责旧 Run 停妥，后继取得接续权后可在原 workspace 启动下一次 Run。 [等待与续跑](docs/task-lifecycle.md#命中事件与续跑) · [同机 Run 交接](docs/server-runner.md#同机接替时的-run-交接)
 
+- GitHub PR / CI 由 Server 使用自己的只读权限采集。Runner 管理本机仓库与 Git 访问。采集范围来自已关联或明确登记的对象。 [外部事实](docs/design.md#pr-和-ci-事实的采集与投递)
+
 ## 开发与验证
 
 - Server、Runner 和 CLI 用独立 Rust 构建入口，tsnet 用独立 Go 进程。Server 和每个 Runner 各用自己的 SQLite WAL 库。开发和验证在 devcontainer 中完成，Web 工具链沿用旧 Tend 的基线。 [基础选型](docs/engineering.md#基础技术栈)

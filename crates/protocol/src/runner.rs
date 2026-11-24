@@ -163,6 +163,9 @@ pub enum WorkAction {
         child_issue_id: String,
         message_id: String,
     },
+    LinkPull {
+        url: String,
+    },
     PostIssueMessage {
         text: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -256,6 +256,12 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 message_id,
             )?;
         }
+        WorkAction::LinkPull { url } => {
+            let Some(pull) = protocol::GitHubPull::parse(url) else {
+                return Ok(false);
+            };
+            super::pull::bind(db, &source_issue, &pull)?;
+        }
         WorkAction::PostIssueMessage { text, reply_to } => {
             super::issue_chat::agent_message(
                 db,

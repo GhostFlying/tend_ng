@@ -5,6 +5,24 @@ export type Artifact = {
   available: boolean;
 };
 
+export type PullLink = {
+  url: string;
+  number: number;
+  facts: { state: string; draft: boolean; ci: string | null } | null;
+  observation_error: string | null;
+};
+
+export type BoardIssue = {
+  id: string;
+  parent_issue_id: string | null;
+  title: string;
+  issue_state: string;
+  task_state: string;
+  pulls: PullLink[];
+};
+
+export type BoardPage = { issues: BoardIssue[]; next_before: number | null };
+
 export type Activity = {
   seq: number;
   issue_id: string;
@@ -108,6 +126,16 @@ export async function readMessages(
       issue: message,
     })),
   };
+}
+
+export async function readIssueBoard(
+  token: string,
+  before: number | undefined,
+  signal: AbortSignal,
+) {
+  const path = "/api/v1/chats/main/issues";
+  const url = before === undefined ? path : `${path}?before=${before}`;
+  return (await request(token, url, { signal })).json() as Promise<BoardPage>;
 }
 
 export async function readNotifications(

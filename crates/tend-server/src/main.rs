@@ -1,4 +1,5 @@
 mod artifacts;
+mod github;
 mod inspect;
 mod router;
 mod store;
@@ -22,7 +23,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--web-dir <dist-dir>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -32,6 +33,7 @@ fn main() -> Result<()> {
     let mut cwd = env::current_dir()?;
     let mut web_dir = None;
     let mut program = OsString::from("codex");
+    let mut github_cli = OsString::from("gh");
     let mut app_args = ["app-server", "--listen", "stdio://"]
         .map(OsString::from)
         .to_vec();
@@ -55,6 +57,9 @@ fn main() -> Result<()> {
                     "--web-dir needs a built Web app"
                 );
                 web_dir = Some(directory.canonicalize()?);
+            }
+            Some("--github-cli") => {
+                github_cli = args.next().context("--github-cli needs a program")?
             }
             Some("--app-server") => {
                 program = args.next().context("--app-server needs a program")?;
@@ -82,6 +87,7 @@ fn main() -> Result<()> {
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let artifact_root = db.with_extension("artifacts");
     thread::spawn(move || schedule(placement));
+    github::spawn(Store::open(&db)?, github_cli);
     router::spawn(router::Config {
         db,
         cwd,
@@ -166,6 +172,36 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
+    }
+    if let Some(chat_id) = path
+        .strip_prefix("/api/v1/chats/")
+        .and_then(|path| path.strip_suffix("/issues"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(before) = page_cursor(query) else {
+            return Ok(api_error(400, "invalid Issue cursor"));
+        };
+        return Ok((
+            200,
+            serde_json::to_value(store.issue_board(chat_id, before)?)?,
+        ));
+    }
+    if let Some(issue_id) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/pulls"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        return match request.method() {
+            Method::Get => Ok(match store.issue_pulls(issue_id)? {
+                Some(pulls) => (200, serde_json::to_value(pulls)?),
+                None => api_error(404, "Issue not found"),
+            }),
+            Method::Post => link_pull(store, &issue_id.to_owned(), request),
+            _ => Ok(api_error(405, "method not allowed")),
+        };
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")
@@ -293,6 +329,28 @@ fn handle(store: &mut Store, request: &mut Request, artifact_root: &Path) -> Res
         }
         _ => Ok(api_error(405, "method not allowed")),
     }
+}
+
+fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u16, Value)> {
+    let Some(bytes) = request_bytes(request)? else {
+        return Ok(api_error(413, "pull request association request too large"));
+    };
+    let Ok(link) = serde_json::from_slice::<protocol::LinkPull>(&bytes) else {
+        return Ok(api_error(400, "expected operation_id and url"));
+    };
+    if !protocol::valid_id(&link.operation_id) {
+        return Ok(api_error(400, "valid operation ID required"));
+    }
+    let Some(pull) = protocol::GitHubPull::parse(&link.url) else {
+        return Ok(api_error(400, "valid GitHub pull request URL required"));
+    };
+    Ok(match store.link_pull(issue, &link, &pull)? {
+        store::pull::Linked::Saved(receipt) => (200, serde_json::to_value(receipt)?),
+        store::pull::Linked::Conflict => {
+            api_error(409, "operation ID is already used for another association")
+        }
+        store::pull::Linked::Missing => api_error(404, "Issue not found"),
+    })
 }
 
 fn page_cursor(query: &str) -> Option<i64> {

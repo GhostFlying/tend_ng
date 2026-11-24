@@ -149,7 +149,9 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     command
         .args(&config.args)
         .current_dir(&config.cwd)
-        .env_remove(protocol::TOKEN_ENV);
+        .env_remove(protocol::TOKEN_ENV)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN");
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;

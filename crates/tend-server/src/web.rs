@@ -6,7 +6,7 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
         return None;
     }
     let path = request.url().split('?').next()?;
-    let (file, mime) = if path == "/"
+    let (file, mime) = if matches!(path, "/" | "/issues")
         || path
             .strip_prefix("/issues/")
             .is_some_and(protocol::valid_id)

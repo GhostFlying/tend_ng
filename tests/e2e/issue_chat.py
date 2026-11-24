@@ -29,10 +29,10 @@ def free_port():
         return f"127.0.0.1:{reservation.getsockname()[1]}"
 
 
-def prepare(root, inspect):
+def prepare(root, inspect, readme="Fixture quickstart repository.\n"):
     source = root / "source"
     subprocess.run(["git", "init", "--quiet", "-b", "main", source], check=True)
-    (source / "README.md").write_text("Fixture quickstart repository.\n")
+    (source / "README.md").write_text(readme)
     subprocess.run(["git", "-C", source, "add", "README.md"], check=True)
     subprocess.run(["git", "-C", source, "-c", "user.name=Fixture",
                     "-c", "user.email=fixture@example.invalid", "commit",

@@ -2,10 +2,12 @@ import { useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { readMessages } from "./api";
+import { IssueBoard } from "./IssueBoard";
 import { Chat } from "./Chat";
 import { Notifications } from "./Notifications";
 import "./style.css";
 
+const board = window.location.pathname === "/issues";
 const tokenKey = "tend.token.v1";
 const issue = /^\/issues\/([a-zA-Z0-9_-]+)$/.exec(
   window.location.pathname,
@@ -99,7 +101,7 @@ function App() {
           <nav aria-label="主导航">
             <a
               href="/"
-              aria-current={issue ? undefined : "page"}
+              aria-current={issue || board ? undefined : "page"}
               aria-label="对话"
             >
               <svg
@@ -113,6 +115,24 @@ function App() {
                 <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5z" />
               </svg>
               <span>对话</span>
+            </a>
+            <a
+              href="/issues"
+              aria-current={board ? "page" : undefined}
+              aria-label="看板"
+            >
+              <svg
+                aria-hidden="true"
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.5"
+                strokeLinejoin="round"
+              >
+                <rect x="3.5" y="4.5" width="13" height="11" rx="1.5" />
+                <path d="M8 5v10M12.25 5v10" />
+              </svg>
+              <span>看板</span>
             </a>
           </nav>
         </aside>
@@ -128,10 +148,16 @@ function App() {
               <h1>{title || "Issue 对话"}</h1>
             </div>
           ) : (
-            <h1>Tend</h1>
+            <h1>{board && token ? "Issue 看板" : "Tend"}</h1>
           )}
           {token && (
             <div className="header-actions">
+              <a
+                className="text-button mobile-board-link"
+                href={board ? "/" : "/issues"}
+              >
+                {board ? "对话" : "看板"}
+              </a>
               <Notifications token={token} />
               <button
                 type="button"
@@ -144,12 +170,16 @@ function App() {
           )}
         </header>
         {token ? (
-          <Chat
-            token={token}
-            issue={issue}
-            onReachable={setReachable}
-            onTitle={setTitle}
-          />
+          board ? (
+            <IssueBoard token={token} onReachable={setReachable} />
+          ) : (
+            <Chat
+              token={token}
+              issue={issue}
+              onReachable={setReachable}
+              onTitle={setTitle}
+            />
+          )
         ) : (
           <Connect onConnect={connect} />
         )}

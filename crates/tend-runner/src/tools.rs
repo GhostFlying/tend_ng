@@ -14,6 +14,7 @@ const ASK: &str = "tend_request_attention";
 const ESCALATE: &str = "tend_escalate_attention";
 const ANSWER: &str = "tend_answer_child_attention";
 const FORWARD: &str = "tend_forward_issue_message";
+const LINK_PULL: &str = "tend_link_pull_request";
 const POST: &str = "tend_post_issue_message";
 
 pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
@@ -23,6 +24,13 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
         "inputSchema":{"type":"object","properties":{
             "text":{"type":"string"},"reply_to":{"type":"string"}
         },"required":["text"],"additionalProperties":false}
+    });
+    let link_pull = json!({
+        "type": "function",
+        "name": LINK_PULL,
+        "description": "Save a GitHub pull request URL against this Issue. The receipt means the Runner accepted the link for synchronization.",
+        "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}},
+                        "required": ["url"], "additionalProperties": false}
     });
     let close = json!({
         "type": "function",
@@ -115,7 +123,7 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
         (
-            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
+            "Coordinate the Tend Issue through child Issues. End the current turn when ready to let other work run. Child results will return to the same coordination Task. Decide a child question within your authority or escalate its original ID to the Router. Use tend_request_attention for your questions, tend_report_result for agreed results, and tend_post_issue_message for visible Issue discussion. Use tend_link_pull_request to associate a relevant GitHub PR with this Issue. Reply to direct user messages with their original IDs. Use tend_forward_issue_message when a user supplement belongs to existing child work. Close the Issue when its objective is settled.",
             vec![
                 delegate, close, report, ask, escalate, answer, post, forward,
             ],
@@ -133,8 +141,8 @@ pub fn catalogue(coordinator: bool) -> (&'static str, Vec<Value>) {
             }
         });
         (
-            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries and tend_close_issue when the Issue is done.",
-            vec![close, submit, ask, post],
+            "Own this Tend work Issue. Use the assigned workspace and follow repository instructions. Use tend_request_attention when a decision exceeds your authority. Finish independent work and yield the turn when waiting. Use tend_post_issue_message with the original message ID when replying in the Issue discussion. Use tend_submit_artifact for deliveries, tend_link_pull_request for GitHub PRs, and tend_close_issue when the Issue is done.",
+            vec![close, submit, ask, post, link_pull],
         )
     }
 }
@@ -205,6 +213,13 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        LINK_PULL => {
+            let pull = call.arguments["url"]
+                .as_str()
+                .and_then(protocol::GitHubPull::parse)
+                .ok_or_else(|| anyhow::anyhow!("Use a GitHub pull request URL"))?;
+            Ok(WorkAction::LinkPull { url: pull.url() })
+        }
         POST => {
             let post: Post = serde_json::from_value(call.arguments.clone())?;
             ensure!(
