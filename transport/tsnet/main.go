@@ -53,10 +53,10 @@ func execute(ctx context.Context, config configuration) error {
 	defer cancel()
 	node := &tsnet.Server{Dir: config.dir, Hostname: config.hostname, ControlURL: config.controlURL}
 	defer node.Close()
-	startup, timeout := context.WithTimeout(ctx, time.Minute)
-	_, err := node.Up(startup)
-	timeout()
-	if err != nil {
+	if _, err := node.Up(ctx); err != nil {
+		if ctx.Err() != nil {
+			return nil
+		}
 		return fmt.Errorf("start tsnet node: %w", err)
 	}
 	proxy := make([]binding, 0, len(config.inbound)+len(config.inboundTLS)+len(config.outbound))
