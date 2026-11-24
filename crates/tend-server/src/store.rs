@@ -15,6 +15,7 @@ pub struct Store {
 
 pub struct Input {
     pub seq: i64,
+    pub message_id: String,
     pub text: String,
     pub attempt: Option<Attempt>,
 }
@@ -239,7 +240,7 @@ impl Store {
             .db
             .query_row(
                 "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
-                        a.number, a.process_pid, a.process_start
+                        a.number, a.process_pid, a.process_start, m.id
                  FROM router_inputs i
                  JOIN chat_messages m ON m.seq = i.seq
                  LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
@@ -267,6 +268,7 @@ impl Store {
                     };
                     Ok(Input {
                         seq: row.get(0)?,
+                        message_id: row.get(8)?,
                         text: row.get(1)?,
                         attempt,
                     })

@@ -236,13 +236,21 @@ def main():
                     lambda rows: rows[-1]["reply_to"] == receipt["message_id"],
                 )
                 issue_id = dispatched[-1]["text"].split()[1]
-                assert dispatched[-2]["issue_ids"] == [issue_id], dispatched[-2]
+                issues = dispatched[-2]["issue_ids"]
+                assert issues[0] == issue_id, dispatched[-2]
                 readback = cli(address, "read", issue_id, namespace="issue")
                 assert readback["source_message_id"] == receipt["message_id"], readback
                 assert readback["status"] == "awaiting_assignment"
                 assert readback["category"] == "issue-router"
                 assert readback["repo_ids"] == ["example"]
                 assert readback["required_capabilities"] == ["image_gen"]
+                if text == "Recover dispatched work.":
+                    assert len(issues) == 2, issues
+                    remaining = cli(address, "read", issues[1], namespace="issue")
+                    assert remaining["source_message_id"] == receipt["message_id"]
+                    assert remaining["title"] == "Prepare release notes"
+                else:
+                    assert issues == [issue_id], issues
 
         with sqlite3.connect(root / "app.sqlite") as database:
             turns = database.execute("SELECT COUNT(*) FROM turns").fetchone()[0]
@@ -265,7 +273,7 @@ def main():
             assert [attempt[0] for attempt in attempts] == [1, 2], attempts
             assert attempts[0][1:] != attempts[1][1:], attempts
             for table in ("issues", "tasks", "router_dispatches"):
-                assert database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 2
+                assert database.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 3
     print("PASS durable Chat receipts, bounded retries, and idempotent Router dispatch")
 
 

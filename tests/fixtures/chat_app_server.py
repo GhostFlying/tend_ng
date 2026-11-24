@@ -41,17 +41,22 @@ def missing_thread(request):
     }), flush=True)
 
 
-def dispatch(thread_id, turn_id, token):
+def dispatch(thread_id, turn_id, token, *, remaining=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
-        "threadId": thread_id, "turnId": turn_id, "callId": "create-work",
+        "threadId": thread_id, "turnId": turn_id,
+        "callId": "create-remaining-work" if remaining else "create-work",
         "tool": "tend_dispatch_issue", "namespace": None,
         "arguments": {
             "title": "Prepare a demo", "objective": "Write a small fixture document.",
             "repo_ids": ["example"], "required_capabilities": ["image_gen"],
         },
     }
+    if remaining:
+        params["arguments"].update(
+            title="Prepare release notes", objective="Summarize the separate release work."
+        )
     # The start response is lost. The native input event supplies its identity.
     print(json.dumps({"id": "first-call", "method": "item/tool/call", "params": params}), flush=True)
     notify("item/started", threadId=thread_id, turnId=turn_id, item={
@@ -64,6 +69,23 @@ def dispatch(thread_id, turn_id, token):
     replay = json.loads(sys.stdin.readline())
     assert replay["id"] == "replay-call" and replay["result"] == result["result"], replay
     return receipt
+
+
+def read_dispatch(thread_id, turn_id, token, operation_id):
+    notify("item/started", threadId=thread_id, turnId=turn_id, item={
+        "type": "userMessage", "clientId": token,
+    })
+    print(json.dumps({
+        "id": "read-receipt", "method": "item/tool/call",
+        "params": {
+            "threadId": thread_id, "turnId": turn_id, "callId": "read-work",
+            "tool": "tend_read_dispatch", "namespace": None,
+            "arguments": {"operation_id": operation_id},
+        },
+    }), flush=True)
+    result = json.loads(sys.stdin.readline())
+    assert result["id"] == "read-receipt" and result["result"]["success"], result
+    return json.loads(result["result"]["contentItems"][0]["text"])
 
 
 for line in sys.stdin:
@@ -106,6 +128,12 @@ for line in sys.stdin:
             ).fetchone()[0]
             if starts <= case.get("drop_before_start", 0):
                 sys.exit(0)
+            if starts > 1:
+                replay = json.loads(context.splitlines()[-1])
+                assert replay["kind"] == "replay" and replay["attempt_number"] == 2, replay
+                assert replay["source_message_id"]
+                if not case.get("dispatch"):
+                    assert replay["committed_dispatches"] == [], replay
             if case.get("dispatch"):
                 if starts == 1:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"])
@@ -120,7 +148,13 @@ for line in sys.stdin:
                         "SELECT receipt FROM dispatch_receipts WHERE input = ?", (text,)
                     ).fetchone()
                     receipt = json.loads(receipt)
-                    assert receipt["operation_id"] in context and receipt["issue_id"] in context
+                    assert replay["source_message_id"] == receipt["source_message_id"]
+                    assert replay["committed_dispatches"] == [receipt], replay
+                    confirmed = read_dispatch(
+                        thread_id, turn_id, params["clientUserMessageId"], receipt["operation_id"]
+                    )
+                    assert confirmed == receipt, (confirmed, receipt)
+                    dispatch(thread_id, turn_id, params["clientUserMessageId"], remaining=True)
                 answer = f"Issue {receipt['issue_id']} is waiting for assignment."
             else:
                 answer = case["answer"]

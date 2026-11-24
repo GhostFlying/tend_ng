@@ -120,21 +120,36 @@ impl Store {
             .optional()?)
     }
 
-    pub fn dispatch_context(&self, source: i64) -> Result<Option<String>> {
+    pub fn read_dispatch(
+        &self,
+        attempt_id: &str,
+        call: &ToolCall,
+        operation_id: &str,
+    ) -> Result<Option<IssueDispatch>> {
+        Ok(self
+            .db
+            .query_row(
+                &format!(
+                    "{DISPATCH_QUERY}
+                     WHERE d.operation_id = ?1 AND EXISTS (
+                         SELECT 1 FROM router_attempts a
+                         WHERE a.id = ?2 AND a.thread_id = ?3 AND a.turn_id = ?4
+                           AND a.seq = i.source_seq
+                     )"
+                ),
+                params![operation_id, attempt_id, call.thread_id, call.turn_id],
+                read_dispatch,
+            )
+            .optional()?)
+    }
+
+    pub fn dispatches_for_input(&self, source: i64) -> Result<Vec<IssueDispatch>> {
         let mut statement = self.db.prepare(&format!(
             "{DISPATCH_QUERY} WHERE i.source_seq = ?1 ORDER BY i.rowid"
         ))?;
-        let dispatches = statement
+        Ok(statement
             .query_map([source], read_dispatch)?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        if dispatches.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(format!(
-                "The following Tend dispatches have already been saved for the current request. Use their receipts and continue any remaining work.\n{}",
-                serde_json::to_string(&dispatches)?
-            )))
-        }
+            .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

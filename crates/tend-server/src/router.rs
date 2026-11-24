@@ -1,7 +1,7 @@
-use crate::store::{Attempt, Store};
+use crate::store::{Attempt, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::DispatchIssue;
+use protocol::{DispatchIssue, IssueDispatch};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
@@ -13,8 +13,15 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 1;
-const ROUTER_INSTRUCTIONS: &str = "You are the user's Tend Router. Answer ordinary chat directly. Use tend_dispatch_issue to delegate project work. The returned status tells you whether the Issue is waiting for assignment. When resuming work, use committed dispatch receipts for goals already handed off.";
+const TOOL_REVISION: i64 = 2;
+const ROUTER_INSTRUCTIONS: &str = concat!(
+    "You are the user's Tend Router. Answer ordinary chat directly. ",
+    "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
+    "Tend may supply a replay record before the request. It means the following text is the same original input. ",
+    "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
+    "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
+    "If the remaining work is unclear, explain what Tend has already saved or ask a focused question."
+);
 
 fn dispatch_tool() -> Value {
     json!({
@@ -30,6 +37,20 @@ fn dispatch_tool() -> Value {
                 "required_capabilities": { "type": "array", "items": { "type": "string" } }
             },
             "required": ["title", "objective"],
+            "additionalProperties": false
+        }
+    })
+}
+
+fn read_dispatch_tool() -> Value {
+    json!({
+        "type": "function",
+        "name": "tend_read_dispatch",
+        "description": "Read a committed dispatch from the current Chat input by its original operation ID.",
+        "inputSchema": {
+            "type": "object",
+            "properties": { "operation_id": { "type": "string" } },
+            "required": ["operation_id"],
             "additionalProperties": false
         }
     })
@@ -87,10 +108,10 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     let mut client = Client::connect(&mut command)?;
     let process = client.process_identity()?;
     let mut loaded_thread = None;
-    let tools = [dispatch_tool()];
+    let tools = [dispatch_tool(), read_dispatch_tool()];
     while let Some(input) = store.next_input(chat)? {
-        let number = if let Some(attempt) = input.attempt {
-            if let Some(turn) = recover(&mut client, &store, &attempt)? {
+        let number = if let Some(attempt) = &input.attempt {
+            if let Some(turn) = recover(&mut client, &store, attempt)? {
                 finish(&mut store, input.seq, turn)?;
                 continue;
             }
@@ -122,7 +143,9 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                 store.save_thread(chat, &id, TOOL_REVISION)?;
                 let context: Vec<_> = [
                     store.recent_context(chat, input.seq)?,
-                    store.dispatch_context(input.seq)?,
+                    (number > 1)
+                        .then(|| replay_context(&store, &input, number))
+                        .transpose()?,
                 ]
                 .into_iter()
                 .flatten()
@@ -149,6 +172,18 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
     Ok(())
 }
 
+fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<String> {
+    let record = json!({
+        "kind": "replay",
+        "source_message_id": input.message_id,
+        "attempt_number": attempt_number,
+        "committed_dispatches": store.dispatches_for_input(input.seq)?,
+    });
+    Ok(format!(
+        "Tend replay record. The next text is the original request.\n{record}"
+    ))
+}
+
 struct DispatchHandler<'a> {
     store: &'a mut Store,
     attempt_id: &'a str,
@@ -160,9 +195,31 @@ impl TurnHandler for DispatchHandler<'_> {
     }
 
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
-        if call.tool != "tend_dispatch_issue" || call.namespace.is_some() {
+        if call.namespace.is_some() {
             return Ok(tool_error("Unknown Router tool"));
         }
+        match call.tool.as_str() {
+            "tend_read_dispatch" => {
+                let Some(operation_id) = call.arguments["operation_id"]
+                    .as_str()
+                    .filter(|id| protocol::valid_id(id))
+                else {
+                    return Ok(tool_error("A valid operation ID is required"));
+                };
+                tool_receipt(
+                    self.store
+                        .read_dispatch(self.attempt_id, &call, operation_id)?,
+                    "No dispatch with that operation ID belongs to this Chat input",
+                )
+            }
+            "tend_dispatch_issue" => self.dispatch(&call),
+            _ => Ok(tool_error("Unknown Router tool")),
+        }
+    }
+}
+
+impl DispatchHandler<'_> {
+    fn dispatch(&mut self, call: &ToolCall) -> Result<ToolOutput> {
         let work: DispatchIssue = match serde_json::from_value(call.arguments.clone()) {
             Ok(work) => work,
             Err(error) => return Ok(tool_error(&format!("Invalid dispatch request ({error})"))),
@@ -179,15 +236,21 @@ impl TurnHandler for DispatchHandler<'_> {
                 "Dispatch needs a title, objective, and valid requirements",
             ));
         }
-        let receipt = self.store.dispatch_issue(self.attempt_id, &call, &work)?;
-        Ok(match receipt {
-            Some(receipt) => ToolOutput {
-                success: true,
-                body: serde_json::to_value(receipt)?,
-            },
-            None => tool_error("Dispatch call does not match its saved origin or intent"),
-        })
+        tool_receipt(
+            self.store.dispatch_issue(self.attempt_id, call, &work)?,
+            "Dispatch call does not match its saved origin or intent",
+        )
     }
+}
+
+fn tool_receipt(receipt: Option<IssueDispatch>, missing: &str) -> Result<ToolOutput> {
+    Ok(match receipt {
+        Some(receipt) => ToolOutput {
+            success: true,
+            body: serde_json::to_value(receipt)?,
+        },
+        None => tool_error(missing),
+    })
 }
 
 fn tool_error(message: &str) -> ToolOutput {

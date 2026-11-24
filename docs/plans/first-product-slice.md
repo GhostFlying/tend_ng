@@ -70,6 +70,7 @@ python3 tests/e2e/chat.py target/debug/tend-server target/debug/tend
 
 - Router 通过 App Server 注入的工具提交标题、目标和已知的仓库及能力要求。Server 从原生回合与持久尝试确定原 Chat 消息，在短事务中保存顶层 Issue、待匹配 Task 和派发回执。首次领取前可查询实际的待分配状态。
 - 工具回调沿原生调用身份返回原回执。启动响应丢失时用原生用户输入事件中的 `clientId` 确认回合归属。原消息需要换 session 接续时，带上已提交的派发引用。
+- 自动补发给 Router 单独传递原消息 ID、尝试编号和已提交的派发摘要，即使回执为空也标明是补发。Router 判断哪些目标已派发，并可用只读工具按操作 ID 核对原回执。用固定输出验证读取原回执以及继续派发原消息里尚无回执的独立工作。
 - native thread 的工具声明在创建时绑定。改动工具声明时，新 session 使用当前声明和已保存的相关上下文。已在途的原回合和历史仍按原身份查证。
 - 用固定 App Server 输出验证一次正常调用、回执重放以及已提交派发后的回合接续。Chat 消息页带原消息的 Issue 引用，`tend issue read <issue-id>` 读取实际派发及待分配状态。 [Codex 注入 Tend 工具](../agent-tools.md#codex-注入-tend-工具)
 
