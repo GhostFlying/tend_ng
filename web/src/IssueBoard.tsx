@@ -55,37 +55,42 @@ function progress(issue: BoardIssue) {
   if (issue.stage === "todo") return queuedLabels[issue.task_state];
 }
 
-function Pull({ pull }: { pull: PullLink }) {
+function Pull({ pull, showStatus }: { pull: PullLink; showStatus: boolean }) {
   const facts = pull.facts;
   return (
     <li className="board-pull">
       <a href={pull.url} target="_blank" rel="noreferrer">
         {pullLinkLabel(pull)}
       </a>
-      <div className="board-pull-status">
-        {facts && (
-          <span>
-            {facts.draft && facts.state === "open"
-              ? "草稿"
-              : pullLabels[facts.state]}
-          </span>
-        )}
-        {facts?.ci && (
-          <span data-check={facts.ci}>
-            {pull.observation_error ? "上次：" : ""}
-            {checkLabels[facts.ci]}
-          </span>
-        )}
-        {facts && !facts.ci && <span>CI 未确认</span>}
-        {pull.observation_error && <span data-check="failure">暂不可观测</span>}
-        {!facts && !pull.observation_error && <span>待观测</span>}
-      </div>
+      {showStatus && (
+        <div className="board-pull-status">
+          {facts && (
+            <span>
+              {facts.draft && facts.state === "open"
+                ? "草稿"
+                : pullLabels[facts.state]}
+            </span>
+          )}
+          {facts?.ci && (
+            <span data-check={facts.ci}>
+              {pull.observation_error ? "上次：" : ""}
+              {checkLabels[facts.ci]}
+            </span>
+          )}
+          {facts && !facts.ci && <span>CI 未确认</span>}
+          {pull.observation_error && (
+            <span data-check="failure">暂不可观测</span>
+          )}
+          {!facts && !pull.observation_error && <span>待观测</span>}
+        </div>
+      )}
     </li>
   );
 }
 
-function Card({ issue }: { issue: BoardIssue }) {
-  const detail = progress(issue);
+export function Card({ issue }: { issue: BoardIssue }) {
+  const showStatus = issue.stage !== "cancelled";
+  const detail = showStatus ? progress(issue) : undefined;
   const repositories = issue.repo_ids?.join(" · ");
   return (
     <li className="board-card">
@@ -96,7 +101,7 @@ function Card({ issue }: { issue: BoardIssue }) {
       >
         {issueTitle(issue.title, issue.short_number)}
       </a>
-      {(detail || issue.attention) && (
+      {showStatus && (detail || issue.attention) && (
         <div className="board-card-state">
           {detail && <span>{detail}</span>}
           {issue.attention && (
@@ -115,7 +120,7 @@ function Card({ issue }: { issue: BoardIssue }) {
       {issue.pulls.length > 0 && (
         <ul className="board-pulls">
           {issue.pulls.map((pull) => (
-            <Pull key={pull.url} pull={pull} />
+            <Pull key={pull.url} pull={pull} showStatus={showStatus} />
           ))}
         </ul>
       )}
