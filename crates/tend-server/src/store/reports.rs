@@ -161,40 +161,43 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
     // persisted attachment set must be covered by a completed report for this
     // Issue and original topic. The set may be a subset: attach() suppresses
     // repeat downloads in a topic. Never infer links for unattached replies.
+    // Start from this Issue's reported files to avoid scanning other topics'
+    // messages and attachments on every detail refresh.
     let mut statement = db.prepare(
         "WITH topic AS (
              SELECT i.id, source.seq, source.id AS source_id, source.chat_id
              FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
              WHERE i.id = ?1 AND source.operation_id IS NOT NULL
-         ), messages AS (
-             SELECT m.seq, m.id, m.text
-             FROM topic JOIN chat_messages m ON m.reply_to = topic.source_id
-             WHERE m.chat_id = topic.chat_id AND m.operation_id IS NULL
-             AND EXISTS (
-                 SELECT 1 FROM chat_artifacts c WHERE c.message_id = m.id
-             )
-             AND EXISTS (
-                 SELECT 1 FROM issue_reports r
-                 JOIN router_inputs input ON input.report_id = r.id
-                 WHERE r.issue_id = topic.id AND input.message_seq = topic.seq
-                   AND input.chat_id = topic.chat_id AND input.outcome = 'completed'
-                   AND NOT EXISTS (
-                       SELECT 1 FROM chat_artifacts c WHERE c.message_id = m.id
-                         AND NOT EXISTS (
-                             SELECT 1 FROM report_artifacts ra
-                             WHERE ra.report_id = r.id AND ra.artifact_id = c.artifact_id
-                         )
-                   )
-             )
+         ), completed_reports AS MATERIALIZED (
+             SELECT r.id FROM issue_reports r JOIN topic ON topic.id = r.issue_id
+             JOIN router_inputs input ON input.report_id = r.id
+             WHERE input.message_seq = topic.seq AND input.chat_id = topic.chat_id
+               AND input.outcome = 'completed'
+         ), submitted_messages AS (
+             SELECT DISTINCT link.message_id
+             FROM completed_reports r JOIN report_artifacts file ON file.report_id = r.id
+             JOIN chat_artifacts link ON link.artifact_id = file.artifact_id
          )
          SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, t.id
-         FROM messages m JOIN chat_artifacts c ON c.message_id = m.id
+         FROM submitted_messages submitted JOIN chat_messages m ON m.id = submitted.message_id
+         JOIN chat_artifacts c ON c.message_id = m.id
          JOIN artifacts a ON a.id = c.artifact_id
          JOIN issues i ON i.id = a.issue_id
          JOIN topic ON topic.seq = i.source_seq AND (i.id = topic.id OR i.parent_issue_id = topic.id)
+           AND topic.chat_id = m.chat_id AND topic.source_id = m.reply_to
          JOIN tasks t ON t.id = a.task_id AND t.issue_id = i.id
          JOIN issue_short_numbers n ON n.issue_id = i.id
-         WHERE a.published = 1
+         WHERE a.published = 1 AND m.operation_id IS NULL
+         AND EXISTS (
+             SELECT 1 FROM completed_reports r
+             WHERE NOT EXISTS (
+                 SELECT 1 FROM chat_artifacts c WHERE c.message_id = m.id
+                   AND NOT EXISTS (
+                       SELECT 1 FROM report_artifacts file
+                       WHERE file.report_id = r.id AND file.artifact_id = c.artifact_id
+                   )
+             )
+         )
          ORDER BY m.seq, c.rowid",
     )?;
     let mut rows = statement.query([issue])?;
