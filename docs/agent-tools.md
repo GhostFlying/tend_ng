@@ -67,3 +67,7 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 - 用主链 fixture 让 Router 在 Server 本地派发，Issue Agent 委派，Work Agent 回交结果。断开工作 Runner 与 Server 的连接，核对 Router 仍可提交派发，Runner 上的 Agent 仍获得本地受理回执。丢失回执并替换 session 后，用原输入、Issue 和操作 ID 接续。重连并重复递送后，派发、结果和可见状态各只结算一次。
 - 用定向工具测试核对身份作用域和回执语义，用真实 App Server 验证 Skill 可见、工具可调用及同一 thread 续跑后的归因。
+
+## 普通报告版本关系
+
+现有 `tend_report_result` 的操作 ID 是普通报告身份。操作者可以用 Server API 或 CLI 补录两个已发布报告之间的版本关系。未来如扩展 `tend_report_result` 允许显式传入前版 ID，应复用 Server 的同 Issue、普通报告、原 Chat 与发布身份、单前驱/后继、无环及原操作幂等规则。只能在两份报告及其精确发布身份均可校验后提交关系，不凭文本、时间或附件猜配，不把版本关系另行投递为消息或等待。本次不新增 Agent 工具参数、不改变 Runner 协议或 Agent 路由。 [普通报告补录](plans/report-version-backfill.md#implemented-contract)

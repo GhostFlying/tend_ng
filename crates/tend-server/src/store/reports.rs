@@ -1,10 +1,11 @@
 use anyhow::{Result, ensure};
 use protocol::{
-    Artifact, DeliverySource, IssueDeliveryReport, IssueOverviewArtifact, IssueOverviewChild,
-    WorkOperation,
+    Artifact, DeliverySource, IssueDeliveryReport, IssueDeliveryReportVersion,
+    IssueOverviewArtifact, IssueOverviewChild, WorkOperation,
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, Row, params};
 use serde_json::{Value, json};
+use std::collections::{HashMap, HashSet};
 
 pub fn migrate_queue(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -162,7 +163,7 @@ pub fn attach(db: &Connection, message: &str, input: i64) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<IssueDeliveryReport>> {
+fn legacy_reports(db: &Connection, issue: &str) -> Result<Vec<(i64, IssueDeliveryReport)>> {
     // Older rows don't have an exact Router-input-to-answer key. An answer's
     // persisted attachment set must be covered by a completed report for this
     // Issue and original topic. The set may be a subset: attach() suppresses
@@ -184,7 +185,9 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
              FROM completed_reports r JOIN report_artifacts file ON file.report_id = r.id
              JOIN chat_artifacts link ON link.artifact_id = file.artifact_id
          )
-         SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, t.id
+         SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, t.id,
+                m.seq, (SELECT p.report_id FROM issue_report_publications p
+                        JOIN issue_reports r ON r.id = p.report_id AND r.issue_id = ?1 WHERE p.message_id = m.id)
          FROM submitted_messages submitted JOIN chat_messages m ON m.id = submitted.message_id
          JOIN chat_artifacts c ON c.message_id = m.id
          JOIN artifacts a ON a.id = c.artifact_id
@@ -197,6 +200,13 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
          AND NOT EXISTS (
              SELECT 1 FROM issue_report_publications p JOIN proposal_versions v ON v.report_id = p.report_id
              WHERE p.message_id = m.id
+         )
+         AND NOT EXISTS (
+             SELECT 1 FROM issue_report_publications p JOIN issue_reports r ON r.id = p.report_id AND r.issue_id = ?1
+             WHERE p.message_id = m.id AND (
+                 EXISTS (SELECT 1 FROM report_revisions e WHERE e.previous_report_id = p.report_id)
+                 OR EXISTS (SELECT 1 FROM report_revisions e WHERE e.report_id = p.report_id)
+             )
          )
          AND EXISTS (
              SELECT 1 FROM completed_reports r
@@ -211,39 +221,134 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
          ORDER BY m.seq, c.rowid",
     )?;
     let mut rows = statement.query([issue])?;
-    let mut reports: Vec<IssueDeliveryReport> = Vec::new();
+    let mut reports: Vec<(i64, IssueDeliveryReport)> = Vec::new();
     while let Some(row) = rows.next()? {
         let id: String = row.get(0)?;
-        if reports.last().is_none_or(|report| report.message_id != id) {
-            reports.push(IssueDeliveryReport {
-                message_id: id,
-                text: row.get(1)?,
-                artifacts: Vec::new(),
-            });
+        if reports
+            .last()
+            .is_none_or(|(_, report)| report.message_id != id)
+        {
+            reports.push((
+                row.get(10)?,
+                IssueDeliveryReport {
+                    report_id: row.get(11)?,
+                    message_id: id,
+                    text: row.get(1)?,
+                    artifacts: Vec::new(),
+                    history: Vec::new(),
+                },
+            ));
         }
         reports
             .last_mut()
             .unwrap()
+            .1
             .artifacts
-            .push(IssueOverviewArtifact {
-                artifact: Artifact {
-                    id: row.get(2)?,
-                    name: row.get(3)?,
-                    bytes: row.get(4)?,
-                    available: row.get(5)?,
-                },
-                issue_title: None,
-                source: Some(DeliverySource {
-                    issue: IssueOverviewChild {
-                        id: row.get(6)?,
-                        title: row.get(7)?,
-                        short_number: row.get(8)?,
-                    },
-                    task_id: row.get(9)?,
-                }),
-            });
+            .push(delivery_file(row)?);
     }
     Ok(reports)
+}
+
+fn delivery_file(row: &Row<'_>) -> rusqlite::Result<IssueOverviewArtifact> {
+    Ok(IssueOverviewArtifact {
+        artifact: Artifact {
+            id: row.get(2)?,
+            name: row.get(3)?,
+            bytes: row.get(4)?,
+            available: row.get(5)?,
+        },
+        issue_title: None,
+        source: Some(DeliverySource {
+            issue: IssueOverviewChild {
+                id: row.get(6)?,
+                title: row.get(7)?,
+                short_number: row.get(8)?,
+            },
+            task_id: row.get(9)?,
+        }),
+    })
+}
+
+struct RevisionMember {
+    seq: i64,
+    previous: Option<String>,
+    version: IssueDeliveryReportVersion,
+}
+
+pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<IssueDeliveryReport>> {
+    let mut reports = legacy_reports(db, issue)?;
+    // Exact edges do not depend on the legacy attachment match. They can carry
+    // text-only reports and files deduplicated out of the original Chat reply.
+    let mut statement = db.prepare(
+        "SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, a.task_id,
+                m.seq, r.id, incoming.previous_report_id
+         FROM issue_reports r
+         LEFT JOIN report_revisions incoming ON incoming.report_id = r.id
+         LEFT JOIN report_revisions outgoing ON outgoing.previous_report_id = r.id
+         JOIN chat_messages m ON m.id = COALESCE(incoming.message_id, outgoing.previous_message_id)
+         LEFT JOIN report_artifacts f ON f.report_id = r.id
+         LEFT JOIN artifacts a ON a.id = f.artifact_id
+         LEFT JOIN issues i ON i.id = a.issue_id
+         LEFT JOIN issue_short_numbers n ON n.issue_id = i.id
+         WHERE r.issue_id = ?1
+           AND NOT EXISTS (SELECT 1 FROM proposal_versions v WHERE v.report_id = r.id)
+         ORDER BY f.rowid",
+    )?;
+    let mut rows = statement.query([issue])?;
+    let mut members = HashMap::new();
+    while let Some(row) = rows.next()? {
+        let id: String = row.get(11)?;
+        let member = match members.entry(id.clone()) {
+            std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),
+            std::collections::hash_map::Entry::Vacant(entry) => entry.insert(RevisionMember {
+                seq: row.get(10)?,
+                previous: row.get(12)?,
+                version: IssueDeliveryReportVersion {
+                    report_id: id,
+                    message_id: row.get(0)?,
+                    text: row.get(1)?,
+                    artifacts: Vec::new(),
+                },
+            }),
+        };
+        if row.get_ref(2)?.data_type() != rusqlite::types::Type::Null {
+            member.version.artifacts.push(delivery_file(row)?);
+        }
+    }
+
+    // If an Issue Owner later binds a report as a structured proposal, the
+    // proposal projection takes precedence and splits the ordinary chain there.
+    let historical: HashSet<_> = members
+        .values()
+        .filter_map(|m| m.previous.clone())
+        .collect();
+    let heads: Vec<_> = members
+        .keys()
+        .filter(|id| !historical.contains(*id))
+        .cloned()
+        .collect();
+    for head in heads {
+        let current = members.remove(&head).unwrap();
+        let mut history = Vec::new();
+        let mut previous = current.previous;
+        while let Some(member) = previous.and_then(|id| members.remove(&id)) {
+            history.push(member.version);
+            previous = member.previous;
+        }
+        let v = current.version;
+        reports.push((
+            current.seq,
+            IssueDeliveryReport {
+                report_id: Some(v.report_id),
+                message_id: v.message_id,
+                text: v.text,
+                artifacts: v.artifacts,
+                history,
+            },
+        ));
+    }
+    reports.sort_unstable_by_key(|(seq, _)| *seq);
+    Ok(reports.into_iter().map(|(_, report)| report).collect())
 }
 
 pub fn chat_artifacts(

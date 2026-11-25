@@ -229,6 +229,25 @@ p.issue-objective {
   margin-top: 12px;
 }
 
+.delivery-history {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.delivery-history > summary {
+  cursor: pointer;
+  width: fit-content;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--muted);
+}
+
+.delivery-history > .delivery-report {
+  margin-top: 10px;
+  background: var(--bg);
+}
+
 .delivery-report:target,
 .issue-discussion .message:target,
 .issue-discussion .run-row:target {

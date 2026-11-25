@@ -91,10 +91,14 @@ export type IssueDelivery = Artifact & {
   issue_title?: string;
   source?: { issue: IssueReference; task_id: string };
 };
-export type IssueDeliveryReport = {
+type IssueReportContent = {
   message_id: string;
   text: string;
   artifacts: IssueDelivery[];
+};
+export type IssueDeliveryReport = IssueReportContent & {
+  report_id?: string;
+  history?: (IssueReportContent & { report_id: string })[];
 };
 
 export type ApprovalDecision = {

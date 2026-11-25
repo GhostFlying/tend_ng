@@ -12,6 +12,7 @@ mod notification;
 pub(crate) mod proposals;
 pub(crate) mod pull;
 mod reclaim;
+pub(crate) mod report_revisions;
 mod reports;
 mod review;
 mod run;
@@ -67,7 +68,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 26,
+            version <= 27,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -212,7 +213,10 @@ impl Store {
         }
         if version < 26 {
             proposals::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 26)?;
+        }
+        if version < 27 {
+            report_revisions::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 27)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);

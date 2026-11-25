@@ -11,6 +11,7 @@ mod issue_chat;
 mod notification;
 mod pull;
 mod reclaim;
+mod report;
 mod review;
 pub use control::*;
 pub use external::*;
@@ -19,6 +20,7 @@ pub use issue_chat::*;
 pub use notification::*;
 pub use pull::*;
 pub use reclaim::*;
+pub use report::*;
 pub use review::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";

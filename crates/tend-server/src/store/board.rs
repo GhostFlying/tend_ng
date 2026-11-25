@@ -61,6 +61,17 @@ impl Progress {
 }
 
 impl Store {
+    pub fn issue_with_reports(&self, id: &str) -> Result<Option<serde_json::Value>> {
+        let tx = self.db.unchecked_transaction()?;
+        let Some(issue) = self.issue(id)? else {
+            return Ok(None);
+        };
+        let mut issue = serde_json::to_value(issue)?;
+        issue["reports"] = serde_json::to_value(reports::delivery_reports(&tx, id)?)?;
+        tx.commit()?;
+        Ok(Some(issue))
+    }
+
     pub fn issue_overview(&self, id: &str) -> Result<Option<IssueOverview>> {
         let tx = self.db.unchecked_transaction()?;
         let Some((mut card, objective, chat_id, source_message_id)) = tx

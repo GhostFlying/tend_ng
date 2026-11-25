@@ -285,6 +285,45 @@ function ProposalReport({
   );
 }
 
+function ReportArticle({
+  report,
+  token,
+  chat,
+}: {
+  report: IssueDeliveryReport;
+  token: string;
+  chat: string;
+}) {
+  const history = report.history ?? [];
+  return (
+    <article id={`message-${report.message_id}`} className="delivery-report">
+      <div className="delivery-report-heading">
+        <span>来自原 Chat 的交付报告</span>
+        <a href={chatLink(chat, report.message_id)}>查看原报告消息</a>
+      </div>
+      <Markdown text={report.text} />
+      <ul className="delivery-files" aria-label="报告附件">
+        {report.artifacts.map((file) => (
+          <Delivery key={file.id} token={token} file={file} />
+        ))}
+      </ul>
+      {history.length > 0 && (
+        <details className="delivery-history">
+          <summary>版本历史 ({history.length})</summary>
+          {history.map((version) => (
+            <ReportArticle
+              key={version.message_id}
+              report={version}
+              token={token}
+              chat={chat}
+            />
+          ))}
+        </details>
+      )}
+    </article>
+  );
+}
+
 function DeliveredReports({
   reports,
   token,
@@ -294,34 +333,21 @@ function DeliveredReports({
   token: string;
   chat: string;
 }) {
-  return (
-    <>
-      {reports.length === 0 ? (
-        <p className="detail-empty">
-          没有可追溯到原报告消息的交付。过程留言和其他工作交付仍可在下方查看。
-        </p>
-      ) : (
-        reports.map((report) => (
-          <article
-            key={report.message_id}
-            id={`message-${report.message_id}`}
-            className="delivery-report"
-          >
-            <div className="delivery-report-heading">
-              <span>来自原 Chat 的交付报告</span>
-              <a href={chatLink(chat, report.message_id)}>查看原报告消息</a>
-            </div>
-            <Markdown text={report.text} />
-            <ul className="delivery-files" aria-label="报告附件">
-              {report.artifacts.map((file) => (
-                <Delivery key={file.id} token={token} file={file} />
-              ))}
-            </ul>
-          </article>
-        ))
-      )}
-    </>
-  );
+  if (!reports.length) {
+    return (
+      <p className="detail-empty">
+        没有可追溯到原报告消息的交付。过程留言和其他工作交付仍可在下方查看。
+      </p>
+    );
+  }
+  return reports.map((report) => (
+    <ReportArticle
+      key={report.message_id}
+      report={report}
+      token={token}
+      chat={chat}
+    />
+  ));
 }
 
 function IssueSummary({
@@ -472,9 +498,12 @@ function WorkDeliveries({
   data: IssueOverviewData;
 }) {
   const reported = new Set([
-    ...(data.reports ?? []).flatMap((report) =>
-      report.artifacts.map(({ id }) => id),
-    ),
+    ...(data.reports ?? []).flatMap((report) => [
+      ...report.artifacts.map(({ id }) => id),
+      ...(report.history ?? []).flatMap((version) =>
+        version.artifacts.map(({ id }) => id),
+      ),
+    ]),
     ...(data.proposals ?? []).flatMap((proposal) =>
       proposal.versions.flatMap((version) => [
         version.artifact.id,

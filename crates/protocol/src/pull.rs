@@ -184,6 +184,18 @@ pub struct DeliverySource {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssueDeliveryReport {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_id: Option<String>,
+    pub message_id: String,
+    pub text: String,
+    pub artifacts: Vec<IssueOverviewArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub history: Vec<IssueDeliveryReportVersion>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueDeliveryReportVersion {
+    pub report_id: String,
     pub message_id: String,
     pub text: String,
     pub artifacts: Vec<IssueOverviewArtifact>,

@@ -235,6 +235,30 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
     if path == "/health" && request.method() == &Method::Get {
         return Ok((200, json!({ "status": "ok" })));
     }
+    if path == protocol::REPORT_REVISIONS_PATH {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let Ok(input) = serde_json::from_slice::<protocol::BackfillReportRevision>(&bytes) else {
+            return Ok(api_error(
+                400,
+                "expected operation_id, old_report_id and new_report_id",
+            ));
+        };
+        use store::report_revisions::Rejection;
+        return match store.backfill_report_revision(&input) {
+            Ok(receipt) => Ok((200, serde_json::to_value(receipt)?)),
+            Err(error) => match error.downcast::<Rejection>() {
+                Ok(Rejection::Invalid(message)) => Ok(api_error(400, message)),
+                Ok(Rejection::Missing(message)) => Ok(api_error(404, message)),
+                Ok(Rejection::Conflict(message)) => Ok(api_error(409, message)),
+                Err(error) => Err(error),
+            },
+        };
+    }
     if path == "/api/v1/agent-candidates" {
         if request.method() != &Method::Post {
             return Ok(api_error(405, "method not allowed"));
@@ -516,6 +540,12 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
     {
         if request.method() != &Method::Get {
             return Ok(api_error(405, "method not allowed"));
+        }
+        if query == "include=reports" {
+            return Ok(match store.issue_with_reports(issue_id)? {
+                Some(issue) => (200, issue),
+                None => api_error(404, "issue not found"),
+            });
         }
         return Ok(match store.issue(issue_id)? {
             Some(issue) => (200, serde_json::to_value(issue)?),

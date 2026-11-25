@@ -80,6 +80,10 @@ Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以
 
 用户明确要求当前 Issue 交付计划、报告或附件后原地等待确认或审阅时，Router 在派发的持续目标中注明这是阶段交付，等待用户决定是目标的一部分。Router 在原 Chat 回报实际结果和附件，并发布相关 Attention。交付回执不是整个 Issue 的完成条件，顶层 Issue 保持开放直到用户作答后由 Owner 决定下一步。 [工作委派与 Issue 结案](task-lifecycle.md#工作委派与-issue-结案)
 
+### 普通报告的版本历史
+
+操作者可显式登记同一 Issue 的两份已发布普通报告为旧→新。原始请求、Chat 与发布通过持久身份确定，不按文字、附件或先后顺序归并。普通链只在 Issue 详情呈现当前版本及折叠历史，未关联报告独立展示。每版仍链接自己的原 Chat 消息和交付原件。补录不会再次发布，不新增或修改 Chat/Issue 消息、Router 输入、Attention、批准、任务或唤醒。结构化方案仍由独立的 Attention 批准契约处理。 [普通报告补录](plans/report-version-backfill.md#implemented-contract)
+
 ## Issue Chat 的留言与执行过程
 
 **已确认。** Issue Chat 里的 Agent 留言由显式调用留言工具产生。用户直接在 Issue 中提问时，Owner 用同一个工具答复并关联原留言。留言按所属 Issue 与原作者持久保存并同步到 Server。派发、交付和 Issue 状态按各自的已提交事实展示。 [Agent 工具与本地受理](agent-tools.md)

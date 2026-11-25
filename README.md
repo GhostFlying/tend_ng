@@ -87,6 +87,10 @@ target/release/tend --help
 
 Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach. For parallel replacement on the same Host, give both Runners the same absolute `workspace_root` and `host_id`, plus distinct Runner IDs and database files.
 
+## Ordinary report history
+
+`tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]` explicitly links two ordinary reports already published in the same Issue's original Chat. Supply a publication message ID for each report without a saved mapping. Keep the operation ID for a retry. Check the result with `tend issue read '#123'` without changing Chat or the Issue's execution state. See the [API, idempotency and read-only verification commands](docs/plans/report-version-backfill.md#implemented-contract).
+
 ## Transport and verification
 
 Use a LAN address, the host Tailscale daemon, or the separately built tsnet process. These transports carry the same Tend HTTP API and token. Build the latter from its own Go module.

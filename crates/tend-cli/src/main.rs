@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
-    ApiError, Attention, DEFAULT_LISTEN, FindPull, IssueBoard, IssueDetail, IssueMessagePage,
-    LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLink, PullLinkReceipt, Receipt,
-    SendMessage, TOKEN_ENV,
+    ApiError, Attention, BackfillReportRevision, DEFAULT_LISTEN, FindPull, IssueBoard, IssueDetail,
+    IssueMessagePage, LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLink,
+    PullLinkReceipt, REPORT_REVISIONS_PATH, Receipt, SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend attention approve <chat-id> <attention-id> <version>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id|#number>\n  tend issue start <issue-id|#number>\n  tend issue reviews <issue-id|#number>\n  tend issue cancel <issue-id|#number> <reason> [operation-id]\n  tend issue reopen <issue-id|#number> <reason> [operation-id]\n  tend pr link <issue-id|#number> <url> [operation-id]\n  tend pr list <issue-id|#number>\n  tend pr watches <issue-id|#number>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id|#number> <task-id> [operation-id]\n  tend pr discoveries <issue-id|#number> [operation-id]\n  tend issue messages <issue-id|#number> [before]\n  tend issue message <issue-id|#number> <text> [operation-id] [--reply-to <message-id>]\n  tend agent list\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id|#number> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend attention approve <chat-id> <attention-id> <version>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id|#number>\n  tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]\n  tend issue start <issue-id|#number>\n  tend issue reviews <issue-id|#number>\n  tend issue cancel <issue-id|#number> <reason> [operation-id]\n  tend issue reopen <issue-id|#number> <reason> [operation-id]\n  tend pr link <issue-id|#number> <url> [operation-id]\n  tend pr list <issue-id|#number>\n  tend pr watches <issue-id|#number>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id|#number> <task-id> [operation-id]\n  tend pr discoveries <issue-id|#number> [operation-id]\n  tend issue messages <issue-id|#number> [before]\n  tend issue message <issue-id|#number> <text> [operation-id] [--reply-to <message-id>]\n  tend agent list\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id|#number> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
@@ -46,7 +46,8 @@ fn main() -> Result<()> {
     let base = env::var("TEND_URL").unwrap_or_else(|_| format!("http://{DEFAULT_LISTEN}"));
     let endpoint = match (namespace.as_str(), command.as_str()) {
         ("chat", _) => protocol::messages_path(id),
-        ("issue", "read") => protocol::issue_path(id),
+        ("issue", "read") => format!("{}?include=reports", protocol::issue_path(id)),
+        ("report", "backfill") => REPORT_REVISIONS_PATH.to_owned(),
         ("issue", "start") => format!("/api/v1/issues/{id}/start"),
         ("issue", "reviews") => format!("/api/v1/issues/{id}/reviews"),
         ("issue", "list") if all_issues => protocol::ISSUE_BOARD_PATH.to_owned(),
@@ -256,9 +257,44 @@ fn main() -> Result<()> {
             println!("{}", serde_json::to_string(&links)?);
         }
         ("issue", "read", []) => {
-            let issue: IssueDetail =
-                checked(http.get(&path).set("Authorization", &auth).call())?.into_json()?;
-            println!("{}", serde_json::to_string(&issue)?);
+            let response = checked(http.get(&path).set("Authorization", &auth).call())?;
+            io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
+            println!();
+        }
+        ("report", "backfill", [new, arguments @ ..]) => {
+            let (operation, flags) = match arguments {
+                [operation, flags @ ..] if !operation.starts_with("--") => {
+                    (operation.clone(), flags)
+                }
+                _ => (protocol::new_id(), arguments),
+            };
+            ensure!(protocol::valid_id(new), "invalid new report ID");
+            ensure!(protocol::valid_id(&operation), "invalid operation ID");
+            let mut input = BackfillReportRevision {
+                operation_id: operation,
+                old_report_id: id.to_owned(),
+                new_report_id: new.clone(),
+                old_message_id: None,
+                new_message_id: None,
+            };
+            let mut flags = flags;
+            while let [flag, message, rest @ ..] = flags {
+                ensure!(protocol::valid_id(message), "invalid message ID");
+                let value = match flag.as_str() {
+                    "--old-message" => &mut input.old_message_id,
+                    "--new-message" => &mut input.new_message_id,
+                    _ => bail!("{USAGE}"),
+                };
+                ensure!(value.is_none(), "duplicate {flag}");
+                *value = Some(message.clone());
+                flags = rest;
+            }
+            ensure!(flags.is_empty(), "{USAGE}");
+            let receipt: protocol::ReportRevisionReceipt =
+                send(&http, &path, &auth, &serde_json::to_value(&input)?)
+                    .with_context(|| format!("backfill operation {}", input.operation_id))?
+                    .into_json()?;
+            println!("{}", serde_json::to_string(&receipt)?);
         }
         ("issue", "start", []) => {
             let issue: IssueDetail =

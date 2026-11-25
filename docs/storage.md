@@ -59,3 +59,7 @@ Runner 按自身身份读取已分配的待投递任务。建议空查询只读�
 Server 的 Runner 同步由独立的有界队列处理，文件传输和 rollout 也各有处理入口。启用 `TEND_SQLITE_TIMING=1` 可以分别观察 Chat 收件、Attention 结算和 Runner 同步的写锁等待、事务体与提交耗时。前台连接在短事务争用期间按较短的间隔重试。 [一期补传负载结果](plans/phase-one-closeout.md#一期验收结果)
 
 如果批次有界、读查询有索引且事务已经足够短，预期负载下仍反复发生跨 Issue 写入排队并拖慢用户的 Chat 或 Attention 写操作，再用同一负载评估 Server 切换 PostgreSQL。PostgreSQL 可以并发更新互不冲突的行，Runner 的本地存储独立选型。 [PostgreSQL 行锁](https://www.postgresql.org/docs/current/explicit-locking.html#LOCKING-ROWS)
+
+### 普通报告的历史补录
+
+迁移 27 新增 `report_revisions` 和 `report_revision_receipts`。在同一个短 `IMMEDIATE` 事务中，以 Issue 的 `source_seq` 和原消息校验两份普通 `issue_reports`、可选 Router 输入（若存在须同源且已成功结算）及两个原发布消息，按需补齐 `issue_report_publications`，再保存旧→新边、锁定的发布消息身份及操作回执。已有发布映射不覆盖，已有边不重写，旧报告只允许一个后继、新报告只允许一个前驱，拒绝环和已知的结构化提案候选。重传原操作返回已结算回执。普通报告链只用于 Issue 查询，不产生任何待投递记录。 [操作与查询契约](plans/report-version-backfill.md#implemented-contract)
