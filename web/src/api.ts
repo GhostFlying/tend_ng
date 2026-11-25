@@ -136,6 +136,17 @@ export type IssueProposal = {
   versions: ProposalVersion[];
 };
 
+export type IssueDecision = {
+  message_id: string;
+  text: string;
+  reply?: { attention_id: string; answer: string | null };
+};
+
+type IssueAttentionReplyPage = {
+  decisions: IssueDecision[];
+  next_before: number | null;
+};
+
 type IssueApprovalEvent = {
   report_title: string;
   decision: ApprovalDecision;
@@ -156,7 +167,8 @@ export type IssueOverviewData = {
   pulls: PullLink[];
   artifacts: IssueDelivery[];
   reports?: IssueDeliveryReport[];
-  decisions?: { message_id: string; text: string }[];
+  decisions?: IssueDecision[];
+  decision_history_before?: number;
   proposals?: IssueProposal[];
   proposal_requires_chat?: boolean;
 };
@@ -188,11 +200,14 @@ export type Message = {
   issue_numbers?: number[];
   issue?: IssueMessage;
   approval?: IssueApprovalEvent;
-  attention?: {
-    id: string;
-    state: "pending" | "awaiting_user" | "answered" | "delivered";
-    proposal?: ProposalStatus;
-  };
+  attention?: AttentionStatus;
+};
+
+export type AttentionStatus = {
+  id: string;
+  state: "pending" | "awaiting_user" | "answered" | "delivered";
+  proposal?: ProposalStatus;
+  issue_reply?: string;
 };
 
 type IssueMessage = {
@@ -251,6 +266,13 @@ export type PendingMessage = {
   reply_to?: string;
 };
 
+export function operationId() {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
 async function request(token: string, path: string, options?: RequestInit) {
   const headers = new Headers(options?.headers);
   headers.set("Authorization", `Bearer ${token}`);
@@ -266,7 +288,7 @@ async function request(token: string, path: string, options?: RequestInit) {
   return response;
 }
 
-export async function readProposalStatus(
+export async function readAttentionStatus(
   token: string,
   chat: string,
   attention: string,
@@ -274,8 +296,16 @@ export async function readProposalStatus(
 ) {
   const path = `/api/v1/chats/${encodeURIComponent(chat)}/attentions/${encodeURIComponent(attention)}`;
   const response = await request(token, path, { signal });
-  const record: { proposal?: ProposalStatus } = await response.json();
-  return record.proposal;
+  return response.json() as Promise<AttentionStatus>;
+}
+
+export async function readProposalStatus(
+  token: string,
+  chat: string,
+  attention: string,
+  signal: AbortSignal,
+) {
+  return (await readAttentionStatus(token, chat, attention, signal)).proposal;
 }
 
 export async function approveProposal(
@@ -292,6 +322,27 @@ export async function approveProposal(
     body: JSON.stringify({ version, from_issue: fromIssue }),
   });
   return response.json() as Promise<ApprovalDecision>;
+}
+
+export type PendingAttentionReply = { operation_id: string; text: string };
+
+export async function answerIssueAttention(
+  token: string,
+  issue: string,
+  attention: string,
+  reply: PendingAttentionReply,
+) {
+  const path = `/api/v1/issues/${encodeURIComponent(issue)}/attentions/${encodeURIComponent(attention)}/answer`;
+  const response = await request(token, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(reply),
+  });
+  return response.json() as Promise<{
+    operation_id: string;
+    attention_id: string;
+    answer: string;
+  }>;
 }
 
 export async function readMessages(
@@ -377,6 +428,18 @@ export async function readIssueOverview(
   return (
     await request(token, path, { signal })
   ).json() as Promise<IssueOverviewData>;
+}
+
+export async function readIssueAttentionHistory(
+  token: string,
+  issue: string,
+  before: number,
+  signal: AbortSignal,
+) {
+  const path = `/api/v1/issues/${encodeURIComponent(issue)}/attention-replies?before=${before}`;
+  return (
+    await request(token, path, { signal })
+  ).json() as Promise<IssueAttentionReplyPage>;
 }
 
 export async function readNotifications(

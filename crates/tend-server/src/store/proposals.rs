@@ -124,11 +124,6 @@ const DECISION_COLUMNS: &str = "d.input_id, d.version, d.decided_at,
 const DECISION_RUN: &str =
     "LEFT JOIN issue_inputs input ON input.id = d.input_id AND input.task_id = a.task_id
     LEFT JOIN task_runs run ON run.id = input.run_id AND run.task_id = a.task_id";
-const CAN_APPROVE: &str = "i.state = 'open' AND t.status IN ('accepted','waiting','running')
-    AND t.current_assignment IS NOT NULL AND a.question_seq IS NOT NULL
-    AND NOT EXISTS (SELECT 1 FROM task_controls c WHERE c.assignment_id = t.current_assignment
-                    AND c.state = 'pending' AND json_extract(c.action, '$.kind') = 'stop')";
-
 fn read_decision(
     row: &rusqlite::Row<'_>,
     offset: usize,
@@ -146,10 +141,11 @@ fn read_decision(
 }
 
 pub(super) fn status(db: &Connection, id: &str) -> Result<Option<ProposalStatus>> {
+    use attention::LIVE_TARGET;
     Ok(db.query_row(
         &format!(
             "SELECT a.issue_id, v.version, v.question, v.action,
-                ({CAN_APPROVE}) AND a.answer_input_id IS NULL AND file.available = 1, {DECISION_COLUMNS}
+                ({LIVE_TARGET}) AND a.answer_input_id IS NULL AND file.available = 1, {DECISION_COLUMNS}
              FROM attentions a JOIN issues i ON i.id = a.issue_id JOIN tasks t ON t.id = a.task_id
              JOIN proposal_versions v ON v.attention_id = a.id JOIN artifacts file ON file.id = v.artifact_id
              LEFT JOIN proposal_decisions d ON d.attention_id = a.id

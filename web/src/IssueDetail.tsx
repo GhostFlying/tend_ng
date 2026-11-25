@@ -18,6 +18,7 @@ import type {
   ProposalVersion,
 } from "./api";
 import { Chat } from "./Chat";
+import { IssueAttention } from "./IssueAttention";
 import { Markdown } from "./Markdown";
 import { DecisionTime, ProposalApproval } from "./ProposalApproval";
 
@@ -469,23 +470,15 @@ function IssueSummary({
           />
         </section>
       )}
-      {decisions.length > 0 && (
-        <section className="detail-section" aria-labelledby="issue-decisions">
-          <div className="detail-section-heading">
-            <h2 id="issue-decisions">待你决定</h2>
-          </div>
-          <ul className="issue-decisions">
-            {decisions.map((decision) => (
-              <li key={decision.message_id}>
-                <Markdown text={decision.text} />
-                <a href={chatLink(data.chat_id, decision.message_id)}>
-                  在原 Chat 处理
-                </a>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
+      <IssueAttention
+        key={data.id}
+        token={token}
+        issue={data.id}
+        chat={data.chat_id}
+        decisions={decisions}
+        historyBefore={data.decision_history_before}
+        onRefresh={onRefresh}
+      />
     </>
   );
 }

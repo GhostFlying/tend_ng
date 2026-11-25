@@ -367,6 +367,10 @@ p.issue-objective {
   font-size: inherit;
 }
 
+.issue-decisions {
+  padding: 14px 16px;
+}
+
 .detail-properties li + li {
   margin-top: 5px;
 }
@@ -380,6 +384,41 @@ p.issue-objective {
 .issue-decisions a {
   display: inline-block;
   margin-top: 6px;
+}
+
+.issue-attention-reply {
+  margin-top: 8px;
+}
+
+.issue-attention-history {
+  margin-top: 8px;
+}
+
+.issue-attention-reply summary {
+  cursor: pointer;
+  width: fit-content;
+}
+
+.issue-attention-reply form {
+  display: grid;
+  gap: 8px;
+  margin: 8px 0 4px;
+}
+
+.issue-attention-reply textarea {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 10px;
+  color: inherit;
+  font: inherit;
+  background: var(--input);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  resize: vertical;
+}
+
+.issue-attention-reply button {
+  justify-self: start;
 }
 
 .work-deliveries {

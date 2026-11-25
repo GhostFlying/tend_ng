@@ -282,6 +282,21 @@ a {
   text-decoration: underline;
   text-underline-offset: 3px;
 }
+.attention-recorded {
+  max-width: 100%;
+  margin-top: 8px;
+  padding-left: 10px;
+  border-left: 2px solid var(--border);
+}
+.attention-recorded span {
+  color: var(--muted);
+  font-size: 12px;
+}
+.attention-recorded p {
+  margin: 3px 0 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .composer-reply {
   justify-content: space-between;
   min-width: 0;

@@ -95,6 +95,8 @@ Server 持久保存匹配事实，按原等待和 Task 生成直接投递。每�
 
 同一份结构化方案在修订时保留原 Attention 和历史版本。批准使用原 `AttentionAnswered` 唤醒和责任链。Issue 的批准事件取自同一决定记录，有对应输入的原生回合证据后才算接续。 [结构化方案批准](chat-routing.md#结构化方案批准)
 
+Issue 页显式提交的普通 Attention 答复同样固定在原 Task。提交时拒绝已终止或正在停止的原 Task。答复落盘后若原 Task 尚未实际接续便终止，保留答复原文和输入，不为该答复创建后继 Task，也不把答复迁入其他后继工作。只有对应输入的原生回合证据才能显示已经接续。普通 Chat 答复不改变其既有行为。 [Issue 入口](plans/ordinary-attention-issue-reply.md)
+
 ## 等待期间的用户输入
 
 **已确认。** `waitfor` 用于释放空闲期间的执行 slot。Router 转来的用户补充、工作方向变更和 Attention 答复，以及用户在 Issue Chat 的直接留言，及时沿原收件关系持久入队并请求唤醒 Owner。其他需要唤醒 Owner 的输入按各自的投递时机进入队列。

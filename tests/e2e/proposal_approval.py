@@ -162,7 +162,10 @@ def main():
                 assert http(approve, {"version": 1})[0] == 409
                 assert http(approve, {"version": 2}, token="wrong")[0] == 401
                 assert http(approve.replace("/main/", "/different/"), {"version": 2})[0] == 404
+                assert http(f"{path}/attentions/{approval_id}/answer",
+                            {"operation_id": "fixture-not-an-approval", "text": "批准 v2"})[0] == 404
                 assert sql("server", "SELECT count(*) FROM proposal_decisions") == [(0,)]
+                assert sql("server", "SELECT count(*) FROM issue_attention_replies") == [(0,)]
 
                 if args.stop_before_delivery:
                     runner.terminate()

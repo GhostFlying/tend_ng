@@ -1,5 +1,5 @@
 mod artifacts;
-mod attention;
+pub(crate) mod attention;
 mod board;
 pub(crate) mod control;
 mod coordination;
@@ -30,6 +30,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
+const SCHEMA_VERSION: i64 = 29;
 
 pub struct Store {
     db: Connection,
@@ -68,7 +69,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 28,
+            version <= SCHEMA_VERSION,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -219,7 +220,10 @@ impl Store {
         }
         if version < 28 {
             board::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 28)?;
+        }
+        if version < 29 {
+            attention::migrate_issue_replies(&tx)?;
+            tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);

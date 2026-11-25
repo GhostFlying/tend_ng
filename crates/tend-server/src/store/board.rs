@@ -1,8 +1,14 @@
-use super::{PAGE_SIZE, Store, artifacts, pull, reports, work::read_list};
+use super::{
+    PAGE_SIZE, Store, artifacts,
+    attention::{LIVE_TARGET, ORDINARY_ROUTED},
+    pull, reports,
+    work::read_list,
+};
 use anyhow::Result;
 use protocol::{
-    BoardAttention, BoardStage, BoardWait, DeliverySource, IssueBoard, IssueBoardCursor, IssueCard,
-    IssueDecision, IssueOverview, IssueOverviewArtifact, IssueOverviewChild,
+    BoardAttention, BoardStage, BoardWait, DeliverySource, IssueAttentionReply,
+    IssueAttentionReplyPage, IssueBoard, IssueBoardCursor, IssueCard, IssueDecision, IssueOverview,
+    IssueOverviewArtifact, IssueOverviewChild,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
@@ -18,6 +24,7 @@ const TREE: &str =
          UNION ALL
          SELECT tree.root, child.id FROM tree JOIN issues child ON child.parent_issue_id = tree.issue
      )";
+const REPLY_PAGE_SIZE: usize = 5;
 
 const CARD_FIELDS: &str = "i.id, i.parent_issue_id, i.title, i.state,
     COALESCE(t.status, 'backlog'),
@@ -87,7 +94,14 @@ impl Store {
                      {CARD_JOINS} WHERE i.id = ?1"
                 ),
                 [id],
-                |row| Ok((read_card(row)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+                |row| {
+                    Ok((
+                        read_card(row)?,
+                        row.get(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get(9)?,
+                    ))
+                },
             )
             .optional()?
         else {
@@ -150,12 +164,18 @@ impl Store {
             .iter()
             .any(|proposal| proposal.status.decision.is_none())
             && super::proposals::requires_chat(&tx, id)?;
-        let decisions = {
+        let mut decisions: Vec<IssueDecision> = {
             let mut query = tx.prepare(&format!(
                 "{TREE}
-                 SELECT question.id, question.text
+                 SELECT question.id, question.text,
+                   CASE WHEN ({LIVE_TARGET}) AND ({ORDINARY_ROUTED})
+                     AND question.chat_id = origin.chat_id
+                   THEN a.id END
                  FROM tree JOIN attentions a ON a.issue_id = tree.issue
                  JOIN chat_messages question ON question.seq = a.question_seq
+                 JOIN chat_messages origin ON origin.seq = a.source_seq
+                 JOIN issues i ON i.id = a.issue_id
+                 JOIN tasks t ON t.id = a.task_id AND t.issue_id = i.id
                  WHERE a.answer_input_id IS NULL AND question.chat_id = ?2
                    AND (a.issue_id != ?3 OR NOT EXISTS
                         (SELECT 1 FROM proposal_versions WHERE attention_id = a.id))
@@ -163,13 +183,23 @@ impl Store {
             ))?;
             query
                 .query_map(params![roots, chat_id, id], |row| {
+                    let reply = match row.get(2)? {
+                        Some(attention_id) => Some(IssueAttentionReply {
+                            attention_id,
+                            answer: None,
+                        }),
+                        None => None,
+                    };
                     Ok(IssueDecision {
                         message_id: row.get(0)?,
                         text: row.get(1)?,
+                        reply,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?
         };
+        let history = reply_history(&tx, &roots, &chat_id, i64::MAX)?;
+        decisions.extend(history.decisions);
         tx.commit()?;
         Ok(Some(IssueOverview {
             id: card.id,
@@ -185,9 +215,29 @@ impl Store {
             artifacts: files,
             reports,
             decisions,
+            decision_history_before: history.next_before,
             proposals,
             proposal_requires_chat,
         }))
+    }
+
+    pub fn issue_attention_history(
+        &self,
+        issue: &str,
+        before: i64,
+    ) -> Result<Option<IssueAttentionReplyPage>> {
+        let tx = self.db.unchecked_transaction()?;
+        let chat = tx.query_row(
+            "SELECT source.chat_id FROM issues i JOIN chat_messages source ON source.seq = i.source_seq
+             WHERE i.id = ?1",
+            [issue],
+            |row| row.get::<_, String>(0),
+        ).optional()?;
+        let result = chat
+            .map(|chat| reply_history(&tx, &serde_json::to_string(&[issue])?, &chat, before))
+            .transpose()?;
+        tx.commit()?;
+        Ok(result)
     }
 
     pub fn issue_board(
@@ -243,6 +293,58 @@ impl Store {
             next_before,
         })
     }
+}
+
+fn reply_history(
+    db: &Connection,
+    roots: &str,
+    chat: &str,
+    before: i64,
+) -> Result<IssueAttentionReplyPage> {
+    // Sample each owner's indexed stream before combining receipt identities.
+    // Join the full bodies only after selecting the bounded tree-wide page.
+    let mut statement = db.prepare(&format!(
+        "{TREE}, selected(seq, attention, question) AS MATERIALIZED (
+             SELECT direct.rowid, a.id, a.question_seq
+             FROM tree JOIN issue_attention_replies direct ON direct.rowid IN (
+                 SELECT rowid FROM issue_attention_replies
+                 WHERE owner_issue_id = tree.issue AND rowid < ?3
+                 ORDER BY rowid DESC LIMIT ?4
+             )
+             JOIN attentions a ON a.id = direct.attention_id
+             JOIN chat_messages q ON q.seq = a.question_seq
+             WHERE q.chat_id = ?2
+             ORDER BY direct.rowid DESC LIMIT ?4
+         )
+         SELECT selected.seq, question.id, question.text, a.id, a.answer
+         FROM selected JOIN attentions a ON a.id = selected.attention
+         JOIN chat_messages question ON question.seq = selected.question
+         ORDER BY selected.seq DESC"
+    ))?;
+    let mut rows = statement.query(params![roots, chat, before, REPLY_PAGE_SIZE + 1])?;
+    let mut decisions = Vec::new();
+    let mut last = None;
+    while let Some(row) = rows.next()? {
+        if decisions.len() == REPLY_PAGE_SIZE {
+            return Ok(IssueAttentionReplyPage {
+                decisions,
+                next_before: last,
+            });
+        }
+        last = Some(row.get(0)?);
+        decisions.push(IssueDecision {
+            message_id: row.get(1)?,
+            text: row.get(2)?,
+            reply: Some(IssueAttentionReply {
+                attention_id: row.get(3)?,
+                answer: row.get(4)?,
+            }),
+        });
+    }
+    Ok(IssueAttentionReplyPage {
+        decisions,
+        next_before: None,
+    })
 }
 
 fn read_card(row: &Row<'_>) -> rusqlite::Result<IssueCard> {

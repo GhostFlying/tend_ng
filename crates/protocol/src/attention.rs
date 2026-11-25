@@ -29,6 +29,8 @@ pub struct AttentionStatus {
     pub state: AttentionState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub proposal: Option<ProposalStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_reply: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -46,6 +48,35 @@ pub struct Attention {
 
 pub fn attentions_path(chat_id: &str) -> String {
     format!("/api/v1/chats/{chat_id}/attentions")
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AnswerIssueAttention {
+    pub operation_id: String,
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IssueAttentionReceipt {
+    pub operation_id: String,
+    pub attention_id: String,
+    pub answer: String,
+}
+
+/// Present only for a replyable question or a recorded direct reply.
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IssueAttentionReply {
+    pub attention_id: String,
+    pub answer: Option<String>,
+}
+
+pub fn answer_issue_attention_path(issue_id: &str, attention_id: &str) -> String {
+    format!("/api/v1/issues/{issue_id}/attentions/{attention_id}/answer")
+}
+
+pub fn issue_attention_replies_path(issue_id: &str) -> String {
+    format!("/api/v1/issues/{issue_id}/attention-replies")
 }
 
 /// Explicit author intent on a Runner's work operation, not part of the wake.

@@ -174,6 +174,8 @@ pub struct IssueOverview {
     pub reports: Vec<IssueDeliveryReport>,
     #[serde(default)]
     pub decisions: Vec<IssueDecision>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decision_history_before: Option<i64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub proposals: Vec<crate::IssueProposal>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -227,6 +229,14 @@ pub struct IssueDeliveryReportVersion {
 pub struct IssueDecision {
     pub message_id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<crate::IssueAttentionReply>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueAttentionReplyPage {
+    pub decisions: Vec<IssueDecision>,
+    pub next_before: Option<i64>,
 }
 
 pub fn issue_pulls_path(issue: &str) -> String {

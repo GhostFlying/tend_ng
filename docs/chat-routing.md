@@ -110,9 +110,11 @@ Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以
 
 主时间线保留直接对话、约定交付、重要变化和需要提醒的具体问题。紧迫事项由 Router 主动提问。普通待办可随用户追问或适合的汇报合并带回。一次提醒可包含多个事项，每个事项各有处理状态。常规的 CI、运行和排队变化更新原工作的摘要或 Issue 详情。
 
+Issue 详情也可逐项回答已在原 Chat 发布、仍待用户回答且原 Task 可接续的普通 Attention。显式答复用该 Attention ID 和独立操作 ID 提交原文，通过原 `AttentionAnswered` 交给原 Task。原 Chat 在同一问题下显示答复，看板沿原待决事实更新。该操作不新增 Chat 消息、Issue 留言或 Router 输入。普通 Chat 答复和普通 Issue 留言继续走各自原有路径。 [实现与验收](plans/ordinary-attention-issue-reply.md)
+
 ## 结构化方案批准
 
-正式上报的报告可以由原 Issue Owner 显式登记为版本化方案。原 Chat 发布对应 Attention，Issue 和原 Chat 共用一个按精确版本提交的批准入口。多个独立待决事项并存时，在原 Chat 逐项选择，不在 Issue 流里默选。普通 Attention 和自由文本走原答复链路。结构化批准由 Server 持久记录并直接交给原 Task，不写用户留言或触发 Router。 [实现计划](plans/inline-proposal-approval.md)
+正式上报的报告可以由原 Issue Owner 显式登记为版本化方案。原 Chat 发布对应 Attention，Issue 和原 Chat 共用一个按精确版本提交的批准入口。多个独立待决事项并存时，结构化方案在原 Chat 逐项批准，不在 Issue 流里默选。自由文本不会批准任何结构化方案。结构化批准由 Server 持久记录并直接交给原 Task，不写用户留言或触发 Router。 [实现计划](plans/inline-proposal-approval.md)
 
 ## 只读通知
 

@@ -131,6 +131,8 @@ if not worker and (root / "delegation.json").exists():
     role = "resumed"
 if worker and attention and (root / "question.json").exists():
     role = "decision"
+if worker and scenario == "issue-attention" and (root / "issue-questions.json").exists():
+    role = "issue-attention-input"
 if scenario == "stage-delivery" and not worker and (root / "stage-delivery.json").exists():
     role = "stage-decision"
 if scenario == "proposal" and not worker:
@@ -184,6 +186,8 @@ if role == "parent":
     gate("delegate-now")
     args = {"title": "Write the guide", "objective": "Add a one-line guide",
             "category": "implementation", "required_capabilities": ["image_gen"]}
+    if scenario == "issue-attention":
+        args.update(title="撰写示例指南", objective="确认篇幅和语言后整理使用说明。")
     if scenario == "pull-board":
         args.update(title="核对安装步骤", objective="准备可用的安装说明。")
     if scenario == "native-review":
@@ -250,6 +254,19 @@ elif role == "child":
         attached = tool("tend_link_pull_request", args, "attach-pr", "attach-pr")
         assert tool("tend_link_pull_request", args, "replay-pr", "attach-pr") == attached
         (root / "pull-link.json").write_text(json.dumps(attached))
+    elif scenario == "issue-attention":
+        questions = [
+            "示例指南要采用精简版还是完整版？",
+            "示例指南要用简体中文还是英文？",
+            "仅由上级处理的内部问题？",
+        ]
+        receipts = [
+            tool("tend_request_attention", {"question": question}, f"ask-{n}", f"ask-{n}")
+            for n, question in enumerate(questions)
+        ]
+        (root / "issue-questions.json").write_text(json.dumps({
+            "ids": [receipt["operation_id"] for receipt in receipts], "task_id": assignment["task_id"],
+        }))
     elif attention:
         gate("ask-now")
         question = {"question": "使用说明用精简版还是完整版？", "options": ["精简版", "完整版"],
@@ -323,6 +340,20 @@ elif role == "external-resumed":
     assert cached["action"]["fact_id"] == hit["fact_id"]
     (root / "resumed-wait.json").write_text(json.dumps(inputs))
     tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
+elif role == "issue-attention-input":
+    original = json.loads((root / "issue-questions.json").read_text())
+    inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    if assignment.get("followup"):
+        assert assignment["followup"]["previous_task_id"] == original["task_id"]
+        assert [item["kind"] for item in inputs] == ["issue_message"], inputs
+    else:
+        assert assignment["task_id"] == original["task_id"]
+    with (root / "issue-attention-inputs.jsonl").open("a") as records:
+        for item in inputs:
+            records.write(json.dumps({**item, "task_id": assignment["task_id"],
+                                      "run_id": turn["params"]["clientUserMessageId"]}) + "\n")
+    if any(item.get("attention_id") == original["ids"][1] for item in inputs):
+        tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "decision":
     original = json.loads((root / "question.json").read_text())
     assert assignment["task_id"] == original["task_id"]
@@ -447,6 +478,16 @@ else:
         }
     else:
         assert assignment["placement"]["assignment_id"] == delegated["assignment_id"]
+    if scenario == "issue-attention":
+        for n, result in enumerate(context["child_inputs"]):
+            if result["kind"] != "attention_requested" or "内部问题" in result["request"]["question"]:
+                continue
+            question = result["attention_id"]
+            tool("tend_escalate_attention", {"attention_id": question}, f"route-{n}", f"route-{question}")
+        send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": {
+            "id": turn_id, "status": "completed", "items": [],
+        }}})
+        sys.exit(0)
     [result] = context["child_inputs"]
     assert result["child_issue_id"] == delegated["action"]["issue_id"]
     assert result["child_task_id"] == delegated["action"]["task_id"]

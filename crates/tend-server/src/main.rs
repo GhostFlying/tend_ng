@@ -518,6 +518,55 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
             None => api_error(404, "Issue not found"),
         });
     }
+    if let Some((issue, attention)) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/answer"))
+        .and_then(|path| path.split_once("/attentions/"))
+        .filter(|(issue, attention)| protocol::valid_id(issue) && protocol::valid_id(attention))
+    {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let (issue, attention) = (issue.to_owned(), attention.to_owned());
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "Attention reply is too large"));
+        };
+        let Ok(input) = serde_json::from_slice::<protocol::AnswerIssueAttention>(&bytes) else {
+            return Ok(api_error(400, "expected operation_id and text"));
+        };
+        if !protocol::valid_id(&input.operation_id) || input.text.trim().is_empty() {
+            return Ok(api_error(
+                400,
+                "a valid operation ID and non-empty reply are required",
+            ));
+        }
+        use store::attention::IssueReply;
+        return Ok(
+            match store.answer_issue_attention(&issue, &attention, &input)? {
+                IssueReply::Recorded(receipt) => (200, serde_json::to_value(receipt)?),
+                IssueReply::NotFound => {
+                    api_error(404, "ordinary Attention not found on this Issue")
+                }
+                IssueReply::Conflict(message) => api_error(409, message),
+            },
+        );
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/attention-replies"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(before) = page_cursor(query) else {
+            return Ok(api_error(400, "invalid Attention reply cursor"));
+        };
+        return Ok(match store.issue_attention_history(issue, before)? {
+            Some(page) => (200, serde_json::to_value(page)?),
+            None => api_error(404, "Issue not found"),
+        });
+    }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")
         .and_then(|path| path.strip_suffix("/pulls"))

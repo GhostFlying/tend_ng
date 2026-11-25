@@ -10,6 +10,7 @@ WEB_REQUEST = "在示例仓库整理一份使用说明，完成后把文件和�
 ATTENTION_REQUEST = "请为示例仓库整理使用说明。需要我决定时就在这里问。"
 ATTENTION_QUESTION = "使用说明你想要精简版，还是完整版？"
 ATTENTION_REPLY = "用精简版。"
+ISSUE_ATTENTION_REQUEST = "请为示例指南整理两个独立问题。"
 STAGE_REQUEST = "请发一份使用说明和附件，然后原地等我确认是否结案。"
 STAGE_QUESTION = "请审阅附上的使用说明。确认结案，还是需要修改？"
 STAGE_REPLY = "确认结案。"
@@ -36,6 +37,7 @@ cases[ISSUE_CHAT_REQUEST] = {"dispatch": True}
 cases[ISSUE_CHAT_RELAY] = {"answer": "我已把补充要求交给负责指南的 Agent。"}
 cases[WEB_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REQUEST] = {"dispatch": True}
+cases[ISSUE_ATTENTION_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REPLY] = {"answer": "我已把精简版的决定交给负责的 Agent。"}
 cases[STAGE_REQUEST] = {"dispatch": True}
 cases[PROPOSAL_REQUEST] = {"dispatch": True}
@@ -89,7 +91,7 @@ def missing_thread(request):
 
 
 def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False, pinned=False,
-             stage=False, proposal=False):
+             stage=False, proposal=False, issue_attention=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
@@ -103,6 +105,8 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     }
     if guide:
         params["arguments"].update(title="示例仓库上手指南", objective="整理示例仓库的快速上手指南。")
+    if issue_attention:
+        params["arguments"].update(title="整理示例指南", objective="为示例指南确认篇幅和语言。")
     if stage:
         params["arguments"].update(title="交付使用说明并等候审阅",
                                    objective="阶段交付实际使用说明和附件，然后原地等待用户确认是否结案。")
@@ -213,6 +217,9 @@ for line in sys.stdin:
                 elif attention["original_request"] == STAGE_REQUEST:
                     assert attention["request"]["options"] == ["确认结案", "需要修改"]
                     case = {"attention": attention, "question": STAGE_QUESTION, "answer": "TEND_NO_UPDATE"}
+                elif attention["original_request"] == ISSUE_ATTENTION_REQUEST:
+                    case = {"attention": attention, "question": attention["request"]["question"],
+                            "answer": "TEND_NO_UPDATE"}
                 else:
                     assert attention["original_request"] == ATTENTION_REQUEST
                     assert attention["request"]["options"] == ["精简版", "完整版"]
@@ -363,7 +370,8 @@ for line in sys.stdin:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"],
                                        guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING,
                                        pinned=text == PINNED_REVIEW, stage=text == STAGE_REQUEST,
-                                       proposal=text == PROPOSAL_REQUEST)
+                                       proposal=text == PROPOSAL_REQUEST,
+                                       issue_attention=text == ISSUE_ATTENTION_REQUEST)
                     with database:
                         database.execute(
                             "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))
@@ -383,7 +391,7 @@ for line in sys.stdin:
                     assert confirmed == receipt, (confirmed, receipt)
                     dispatch(thread_id, turn_id, params["clientUserMessageId"], remaining=True)
                 answer = ("我已把这项工作交给负责的 Agent。整理好后，我会把文件发回这里。"
-                          if text in {WEB_REQUEST, ATTENTION_REQUEST, ISSUE_CHAT_REQUEST}
+                          if text in {WEB_REQUEST, ATTENTION_REQUEST, ISSUE_CHAT_REQUEST, ISSUE_ATTENTION_REQUEST}
                           else f"Issue {receipt['issue_id']} is waiting for assignment.")
             else:
                 answer = case["answer"]

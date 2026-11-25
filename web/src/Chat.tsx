@@ -12,12 +12,94 @@ import {
   issueLink,
   issueTitle,
   mergeMessages,
+  operationId,
+  readAttentionStatus,
   readMessages,
   readRollout,
   sendMessage,
 } from "./api";
-import type { Artifact, Message, PendingMessage } from "./api";
+import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
+
+function OrdinaryChatAttention({
+  token,
+  chat,
+  initial,
+  historical,
+  onReply,
+}: {
+  token: string;
+  chat: string;
+  initial: AttentionStatus;
+  historical: boolean;
+  onReply: () => void;
+}) {
+  const [fresh, setFresh] = useState<AttentionStatus>();
+  const [visible, setVisible] = useState(false);
+  const row = useRef<HTMLDivElement>(null);
+  const status = historical ? (fresh ?? initial) : initial;
+  const { id, state, issue_reply: issueReply } = status;
+  const watch =
+    historical && (state === "awaiting_user" || state === "answered");
+  useEffect(() => {
+    if (!watch || !row.current) return;
+    const observer = new IntersectionObserver(([entry]) =>
+      setVisible(entry.isIntersecting),
+    );
+    observer.observe(row.current);
+    return () => observer.disconnect();
+  }, [watch]);
+
+  useEffect(() => {
+    if (!watch || !visible) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    let timer: number;
+    async function update() {
+      try {
+        const current = await readAttentionStatus(token, chat, id, signal);
+        if (signal.aborted) return;
+        setFresh(current);
+        if (current.state === "delivered") return;
+      } catch {
+        // Keep the last known status while the read is unavailable.
+      }
+      if (!signal.aborted) timer = window.setTimeout(() => void update(), 5000);
+    }
+    void update();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [token, chat, id, watch, visible]);
+
+  return (
+    <div ref={row}>
+      <div className="attention-actions">
+        <span role="status">
+          {state === "delivered"
+            ? "Agent 已接续"
+            : state === "answered"
+              ? issueReply === undefined
+                ? "决定已转交"
+                : "答复已记录"
+              : "待你决定"}
+        </span>
+        {state === "awaiting_user" && (
+          <button className="text-button" type="button" onClick={onReply}>
+            回复
+          </button>
+        )}
+      </div>
+      {issueReply !== undefined && (
+        <div className="attention-recorded">
+          <span>在 Issue 页答复</span>
+          <p>{issueReply}</p>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function pendingKey(chat: string, issue?: string) {
   if (issue) return `tend.pending-issue-message.v1:${issue}`;
@@ -34,13 +116,6 @@ function savedMessage(chat: string, issue?: string): PendingMessage | null {
   } catch {
     return null;
   }
-}
-
-function operationId() {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
 }
 
 function errorText(error: unknown) {
@@ -248,24 +323,13 @@ function MessageRow({
         />
       ) : (
         message.attention && (
-          <div className="attention-actions">
-            <span role="status">
-              {message.attention.state === "delivered"
-                ? "Agent 已接续"
-                : message.attention.state === "answered"
-                  ? "决定已转交"
-                  : "待你决定"}
-            </span>
-            {message.attention.state === "awaiting_user" && (
-              <button
-                className="text-button"
-                type="button"
-                onClick={() => onReply(message)}
-              >
-                回复
-              </button>
-            )}
-          </div>
+          <OrdinaryChatAttention
+            historical={historical}
+            token={token}
+            chat={sourceChat}
+            initial={message.attention}
+            onReply={() => onReply(message)}
+          />
         )
       )}
       {pending && <span className="message-state">已收到</span>}
