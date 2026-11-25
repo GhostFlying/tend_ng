@@ -550,6 +550,19 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
             ),
         });
     }
+    if let Some((chat, attention)) = path
+        .strip_prefix("/api/v1/chats/")
+        .and_then(|path| path.split_once("/attentions/"))
+        .filter(|(chat, id)| protocol::valid_id(chat) && protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok(match store.attention(chat, attention)? {
+            Some(attention) => (200, serde_json::to_value(attention)?),
+            None => api_error(404, "Attention not found in this Chat"),
+        });
+    }
     if let Some(chat_id) = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/attentions"))

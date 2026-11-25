@@ -102,6 +102,7 @@ export type ApprovalDecision = {
   version: number;
   decided_at: number;
   continuation_run_id?: string;
+  continuation_blocked?: boolean;
 };
 
 export type ProposalStatus = {
@@ -132,6 +133,7 @@ export type IssueProposal = {
 };
 
 type IssueApprovalEvent = {
+  report_title: string;
   decision: ApprovalDecision;
   issue_id: string;
   before_message_id: string | null;
@@ -258,6 +260,18 @@ async function request(token: string, path: string, options?: RequestInit) {
     throw new Error(body.error ?? "Tend 无法完成请求");
   }
   return response;
+}
+
+export async function readProposalStatus(
+  token: string,
+  chat: string,
+  attention: string,
+  signal: AbortSignal,
+) {
+  const path = `/api/v1/chats/${encodeURIComponent(chat)}/attentions/${encodeURIComponent(attention)}`;
+  const response = await request(token, path, { signal });
+  const record: { proposal?: ProposalStatus } = await response.json();
+  return record.proposal;
 }
 
 export async function approveProposal(

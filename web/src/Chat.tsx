@@ -17,7 +17,7 @@ import {
   sendMessage,
 } from "./api";
 import type { Artifact, Message, PendingMessage } from "./api";
-import { DecisionTime, ProposalApproval } from "./ProposalApproval";
+import { ChatProposal, DecisionTime } from "./ProposalApproval";
 
 function pendingKey(chat: string, issue?: string) {
   if (issue) return `tend.pending-issue-message.v1:${issue}`;
@@ -132,6 +132,7 @@ function MessageRow({
   token,
   onReply,
   onRefresh,
+  historical,
 }: {
   message: Message;
   source?: Message;
@@ -141,6 +142,7 @@ function MessageRow({
   token: string;
   onReply: (message: Message) => void;
   onRefresh: () => void;
+  historical: boolean;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -236,12 +238,12 @@ function MessageRow({
         </button>
       ) : null}
       {message.attention?.proposal ? (
-        <ProposalApproval
-          key={message.attention.proposal.version}
+        <ChatProposal
+          historical={historical}
           token={token}
           chat={sourceChat}
           attention={message.attention.id}
-          status={message.attention.proposal}
+          initial={message.attention.proposal}
           onRefresh={onRefresh}
         />
       ) : (
@@ -434,6 +436,7 @@ export function Chat({
   };
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
+  const [latestIds, setLatestIds] = useState(() => new Set<string>());
   const [sourceChat, setSourceChat] = useState(chatId);
   const [canonicalIssue, setCanonicalIssue] = useState<string>();
   const issueLoaded = useRef(false);
@@ -496,6 +499,7 @@ export function Chat({
         );
         if (signal.aborted) return;
         setMessages((current) => mergeMessages(current, page.messages));
+        if (!issue) setLatestIds(new Set(page.messages.map(({ id }) => id)));
         setBefore((cursor) =>
           cursor === undefined ? page.next_before : cursor,
         );
@@ -635,7 +639,7 @@ export function Chat({
   let lastUser: string | null = null;
   const rows = messages.map((message) => {
     if (message.approval) {
-      const { decision, issue_id } = message.approval;
+      const { decision, issue_id, report_title } = message.approval;
       return (
         <li
           className="approval-event"
@@ -646,6 +650,7 @@ export function Chat({
             ✓
           </span>
           <strong>你批准了 v{decision.version}</strong>
+          <span className="detail-muted">{report_title}</span>
           <DecisionTime time={decision.decided_at} />
           {issue_id !== (canonicalIssue ?? issue) && (
             <a href={issueLink(issue_id)}>来源 Issue</a>
@@ -685,6 +690,7 @@ export function Chat({
         descendant={descendant}
         token={token}
         onRefresh={() => setRefresh((value) => value + 1)}
+        historical={!latestIds.has(message.id)}
         onReply={(question) => {
           setReplyId(question.id);
           textarea.current?.focus({ preventScroll: true });

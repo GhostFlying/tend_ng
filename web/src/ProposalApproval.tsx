@@ -1,5 +1,5 @@
-import { useRef, useState } from "react";
-import { approveProposal, issueLink } from "./api";
+import { useEffect, useRef, useState } from "react";
+import { approveProposal, issueLink, readProposalStatus } from "./api";
 import type { ApprovalDecision, ProposalStatus } from "./api";
 
 export function DecisionTime({ time }: { time: number }) {
@@ -90,6 +90,11 @@ export function ProposalApproval({
           <span className="detail-muted">当前不可批准</span>
         )}
       </div>
+      {decision?.continuation_blocked && (
+        <p className="detail-muted">
+          原 Task 未能开始接续。批准仍保存在原 Task，没有转交给其他 Task。
+        </p>
+      )}
       {!inIssue && !decision && (
         <a href={issueLink(status.issue_id)}>查看 v{status.version} 报告</a>
       )}
@@ -105,5 +110,58 @@ export function ProposalApproval({
         </p>
       )}
     </div>
+  );
+}
+
+export function ChatProposal({
+  token,
+  chat,
+  attention,
+  initial,
+  historical,
+  onRefresh,
+}: {
+  token: string;
+  chat: string;
+  attention: string;
+  initial: ProposalStatus;
+  historical: boolean;
+  onRefresh: () => void;
+}) {
+  const [fresh, setFresh] = useState<ProposalStatus>();
+  const [refresh, setRefresh] = useState(0);
+  useEffect(() => {
+    if (!historical) return;
+    const controller = new AbortController();
+    const { signal } = controller;
+    let timer: number;
+    async function update() {
+      try {
+        const status = await readProposalStatus(token, chat, attention, signal);
+        if (!signal.aborted) setFresh(status);
+      } catch {
+        // Keep the last saved view. The Server still validates every write.
+      }
+      if (!signal.aborted) timer = window.setTimeout(() => void update(), 5000);
+    }
+    void update();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [token, chat, attention, historical, refresh]);
+  const status = historical ? (fresh ?? initial) : initial;
+  return (
+    <ProposalApproval
+      key={status.version}
+      token={token}
+      chat={chat}
+      attention={attention}
+      status={status}
+      onRefresh={() => {
+        if (historical) setRefresh((value) => value + 1);
+        onRefresh();
+      }}
+    />
   );
 }

@@ -111,6 +111,7 @@ try {
     "table and code each have independent horizontal scrolling",
   );
   await width(mobile, 390);
+  await mobileReport.getByRole("table").scrollIntoViewIfNeeded();
   await screenshot(mobile, "inline-approval-mobile-markdown.png");
   await mobileReport.getByText("展开报告原文", { exact: true }).click();
 
@@ -119,6 +120,16 @@ try {
   await history.getByText(/任务运行摘要导出方案 · v1/).click();
   await history.getByText("summary-export-v1.md").waitFor();
   await history.locator("summary").first().click();
+
+  const historyRequest = mobile.waitForResponse(
+    (response) =>
+      /\/api\/v1\/chats\/main\/attentions\/[^/]+$/.test(
+        new URL(response.url()).pathname,
+      ) && response.ok(),
+  );
+  await mobile.goto(`${url}/#message-${question}`);
+  await mobile.getByRole("button", { name: approveName }).waitFor();
+  await historyRequest;
 
   let writes = 0;
   await desktop.route("**/attentions/*/approve", async (route) => {
@@ -133,6 +144,10 @@ try {
   });
   await desktop.getByRole("button", { name: approveName }).click();
   await desktop.getByText(approved, { exact: true }).waitFor();
+  await screenshot(
+    desktop,
+    "inline-approval-desktop-awaiting-continuation.png",
+  );
   await mobile.getByText(approved, { exact: true }).waitFor();
   assert.equal(writes, 1);
   const event = desktop.locator(".approval-event");
@@ -147,8 +162,6 @@ try {
   );
   await screenshot(desktop, "inline-approval-desktop-record.png");
 
-  await mobile.goto(`${url}/#message-${question}`);
-  await mobile.getByText(approved, { exact: true }).waitFor();
   await mobile.getByText(/你批准了 v2/).waitFor();
   assert.equal(
     await mobile.getByRole("button", { name: approveName }).count(),

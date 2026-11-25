@@ -89,6 +89,8 @@ pub struct ApprovalDecision {
     pub decided_at: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continuation_run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub continuation_blocked: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

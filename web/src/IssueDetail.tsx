@@ -229,11 +229,13 @@ function ProposalReport({
   proposal,
   chat,
   selected,
+  onRefresh,
 }: {
   token: string;
   proposal: IssueProposal;
   chat: string;
   selected: boolean;
+  onRefresh: () => void;
 }) {
   const [current, ...history] = proposal.versions;
   if (!current) return null;
@@ -251,6 +253,16 @@ function ProposalReport({
         candidate={current}
         chat={chat}
       />
+      {!selected && proposal.status.decision && (
+        <ProposalApproval
+          token={token}
+          chat={chat}
+          attention={proposal.attention_id}
+          status={proposal.status}
+          inIssue
+          onRefresh={onRefresh}
+        />
+      )}
       {history.length > 0 && (
         <details className="proposal-history">
           <summary>版本历史 ({history.length})</summary>
@@ -404,6 +416,7 @@ function IssueSummary({
           chat={data.chat_id}
           token={token}
           selected={proposal === current}
+          onRefresh={onRefresh}
         />
       ))}
       {proposals.length ? (

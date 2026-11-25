@@ -48,6 +48,7 @@ pub struct IssueMessagePage {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct IssueApprovalEvent {
     pub decision: crate::ApprovalDecision,
+    pub report_title: String,
     pub issue_id: String,
     pub before_message_id: Option<String>,
 }

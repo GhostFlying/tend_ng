@@ -25,7 +25,10 @@ def main():
     parser.add_argument("--old-runner", type=lambda path: Path(path).resolve())
     parser.add_argument("--old-cli", type=lambda path: Path(path).resolve())
     parser.add_argument("--web", action="store_true")
-    parser.add_argument("--ambiguous", action="store_true")
+    scenario = parser.add_mutually_exclusive_group()
+    scenario.add_argument("--ambiguous", action="store_true")
+    scenario.add_argument("--prestart-failure", action="store_true")
+    scenario.add_argument("--stop-before-delivery", action="store_true")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="tend-proposal-") as directory:
@@ -40,6 +43,8 @@ def main():
         (root / "delegate-now").touch()
         if args.ambiguous:
             (root / "independent-decision").touch()
+        if args.prestart_failure:
+            (root / "fail-before-native").touch()
         env = {**os.environ, "TEND_URL": f"http://{address}", "TEND_TOKEN": "proposal-fixture"}
 
         def cli(*words, binary=args.cli, override=None):
@@ -146,12 +151,39 @@ def main():
                     return [sql("server", f"SELECT count(*) FROM {table}")
                             for table in ("chat_messages", "router_inputs", "issues", "tasks")]
 
+                if args.web:
+                    # Move the original question outside the latest page without
+                    # queuing unrelated Router turns in this fixture.
+                    with sqlite3.connect(root / "server.sqlite") as db:
+                        db.executemany("INSERT INTO chat_messages(id, chat_id, text) VALUES (?, 'main', ?)",
+                                       [(f"later-fixture-{n}", f"Synthetic history {n}") for n in range(55)])
                 before = facts()
                 approve = f"/api/v1/chats/main/attentions/{approval_id}/approve"
                 assert http(approve, {"version": 1})[0] == 409
                 assert http(approve, {"version": 2}, token="wrong")[0] == 401
                 assert http(approve.replace("/main/", "/different/"), {"version": 2})[0] == 404
                 assert sql("server", "SELECT count(*) FROM proposal_decisions") == [(0,)]
+
+                if args.stop_before_delivery:
+                    runner.terminate()
+                    runner.wait(timeout=8)
+                    code, saved = http(approve, {"version": 2})
+                    assert code == 200 and "continuation_run_id" not in saved
+                    read("task", "stop", task, "stop-original")
+                    restarted = start_runner(args.runner, "runner")
+                    daemons.append(restarted)
+                    wait_for(lambda: read("control", "read", "stop-original"),
+                             lambda view: view["state"] == "stopped")
+                    restarted.terminate()
+                    restarted.wait(timeout=8)
+                    read("issue", "message", issue, "继续处理其他补充记录。")
+                    assert read("issue", "read", issue)["task_id"] != task
+                    assert sql("server", "SELECT task_id, run_id FROM issue_inputs WHERE id = ?", saved["id"]) == [(task, None)]
+                    retry = read("attention", "approve", "main", approval_id, "2")
+                    assert retry == {**saved, "continuation_blocked": True}
+                    assert not (root / "continuation-prepared").exists()
+                    print("PASS stopped original Task never transfers approval to follow-up Task")
+                    return
 
                 active_db = "runner"
                 if args.old_runner:
@@ -196,14 +228,28 @@ def main():
                 assert "continuation_run_id" not in proposal()["status"]["decision"]
                 [event] = http(f"{path}/messages")[1]["approvals"]
                 assert event["decision"] == stored and event["issue_id"] == issue
-                [posted] = [m for m in read("chat", "read", "main")["messages"] if m["id"] == question]
-                assert posted["attention"]["proposal"]["decision"] == stored
+                read_status, original = http(approve.removesuffix("/approve"))
+                assert read_status == 200 and original["question_message_id"] == question
+                assert original["proposal"]["decision"] == stored
+                if not args.web:
+                    [posted] = [m for m in read("chat", "read", "main")["messages"] if m["id"] == question]
+                    assert posted["attention"]["proposal"]["decision"] == stored
                 if args.old_cli:
                     [attention] = read("attention", "list", "main", binary=args.old_cli)
                     assert attention["id"] == approval_id and attention["state"] == "answered" and "proposal" not in attention
                     assert "messages" in read("issue", "messages", issue, binary=args.old_cli)
 
                 (root / "start-continuation").touch()
+                if args.prestart_failure:
+                    blocked = wait_for(lambda: proposal()["status"]["decision"],
+                                       lambda value: value.get("continuation_blocked"))
+                    assert blocked == {**stored, "continuation_blocked": True}
+                    [event] = http(f"{path}/messages")[1]["approvals"]
+                    assert event["decision"] == blocked
+                    assert not (root / "decision.json").exists()
+                    assert facts() == before
+                    print("PASS failed prestart is visible and never counted as a taking-over Run")
+                    return
                 decision = wait_for(lambda: proposal()["status"]["decision"],
                                     lambda value: "continuation_run_id" in value)
                 received = wait_for(lambda: (root / "decision.json").read_text()
@@ -211,6 +257,8 @@ def main():
                 received = json.loads(received)
                 assert decision == {**stored, "continuation_run_id": received["run_id"]}
                 assert received["input_id"] == stored["id"]
+                [event] = http(f"{path}/messages")[1]["approvals"]
+                assert event["before_message_id"] == received["run_id"]
                 assert sql(active_db, "SELECT id FROM local_issue_inputs "
                            "WHERE json_extract(payload, '$.kind') = 'attention_answered'") == [(stored["id"],)]
                 (root / "finish-continuation").touch()

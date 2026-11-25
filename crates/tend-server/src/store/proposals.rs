@@ -92,9 +92,10 @@ pub(super) fn register(
             request
         } else {
             fallback = AttentionRequest {
+                question: "Which report and version should we review before proceeding?".into(),
                 context: format!(
-                    "The candidate could not be bound. Clarify the exact report and version in this Chat before proceeding.\n{}",
-                    request.context
+                    "The proposed candidate could not be bound. The original request was: {}",
+                    request.question
                 ),
                 ..request.clone()
             };
@@ -117,9 +118,12 @@ pub(super) fn register(
 }
 
 const DECISION_COLUMNS: &str = "d.input_id, d.version, d.decided_at,
-    CASE WHEN json_extract(run.observation, '$.turn_id') IS NOT NULL THEN run.id END";
-const DECISION_RUN: &str = "LEFT JOIN issue_inputs input ON input.id = d.input_id
-    LEFT JOIN task_runs run ON run.id = input.run_id AND run.task_id = input.task_id";
+    CASE WHEN json_extract(run.observation, '$.turn_id') IS NOT NULL THEN run.id END,
+    json_extract(run.observation, '$.turn_id') IS NULL
+      AND (run.id IS NOT NULL OR t.status IN ('completed','failed','cancelled'))";
+const DECISION_RUN: &str =
+    "LEFT JOIN issue_inputs input ON input.id = d.input_id AND input.task_id = a.task_id
+    LEFT JOIN task_runs run ON run.id = input.run_id AND run.task_id = a.task_id";
 const CAN_APPROVE: &str = "i.state = 'open' AND t.status IN ('accepted','waiting','running')
     AND t.current_assignment IS NOT NULL AND a.question_seq IS NOT NULL
     AND NOT EXISTS (SELECT 1 FROM task_controls c WHERE c.assignment_id = t.current_assignment
@@ -137,6 +141,7 @@ fn read_decision(
         version: row.get(offset + 1)?,
         decided_at: row.get(offset + 2)?,
         continuation_run_id: row.get(offset + 3)?,
+        continuation_blocked: row.get(offset + 4)?,
     }))
 }
 
@@ -320,9 +325,11 @@ pub(super) fn issue_events(
              SELECT id FROM issues WHERE id = ?1
              UNION ALL SELECT i.id FROM issues i JOIN tree p ON i.parent_issue_id = p.id
          )
-         SELECT d.after_issue_seq, a.issue_id, {DECISION_COLUMNS}
+         SELECT d.after_issue_seq, a.issue_id, v.title, {DECISION_COLUMNS}
          FROM tree JOIN attentions a ON a.issue_id = tree.id
+         JOIN tasks t ON t.id = a.task_id
          JOIN proposal_decisions d ON d.attention_id = a.id
+         JOIN proposal_versions v ON v.attention_id = a.id AND v.version = d.version
          {DECISION_RUN}
          WHERE d.after_issue_seq >= ?2 AND d.after_issue_seq < ?3
          ORDER BY d.after_issue_seq, d.rowid"
@@ -332,7 +339,8 @@ pub(super) fn issue_events(
             Ok((
                 row.get(0)?,
                 IssueApprovalEvent {
-                    decision: read_decision(row, 2)?.expect("joined decision"),
+                    decision: read_decision(row, 3)?.expect("joined decision"),
+                    report_title: row.get(2)?,
                     issue_id: row.get(1)?,
                     before_message_id: None,
                 },

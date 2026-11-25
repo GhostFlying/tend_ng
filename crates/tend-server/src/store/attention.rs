@@ -234,6 +234,10 @@ fn router_input(db: &Connection, attempt: &str, call: &ToolCall) -> Result<Optio
 }
 
 impl Store {
+    pub fn attention(&self, chat: &str, id: &str) -> Result<Option<Attention>> {
+        lookup(&self.db, chat, id)
+    }
+
     pub fn attentions(&self, chat: &str, open_only: bool) -> Result<Vec<Attention>> {
         let mut statement = self.db.prepare(&format!(
             "{VIEW} WHERE origin.chat_id = ?1 AND (NOT ?2 OR a.answer_input_id IS NULL)
@@ -277,6 +281,11 @@ impl Store {
         if existing.status.state != AttentionState::Pending {
             return Ok(None);
         }
+        let text = existing
+            .status
+            .proposal
+            .as_ref()
+            .map_or(text, |proposal| proposal.question.as_str());
         tx.execute(
             "INSERT INTO chat_messages(id, chat_id, text, reply_to) VALUES (?1, ?2, ?3, ?4)",
             params![

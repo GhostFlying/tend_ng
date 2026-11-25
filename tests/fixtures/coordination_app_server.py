@@ -161,6 +161,8 @@ if scenario == "external-wait" and worker and assignment["work"]["title"] in {"I
 if role == "proposal-continue":
     (root / "continuation-prepared").touch()
     gate("start-continuation")
+    if (root / "fail-before-native").exists():
+        sys.exit(0)
 respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
 
 if scenario == "issue-chat":

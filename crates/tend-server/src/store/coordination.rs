@@ -536,6 +536,7 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         && db.query_row(
             "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
                 AND json_extract(payload, '$.kind') != 'review_finished'
+                AND NOT EXISTS (SELECT 1 FROM proposal_decisions d WHERE d.input_id = issue_inputs.id)
                 AND (wake_at IS NULL OR wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)))",
             [&observation.task_id],
             |row| row.get::<_, bool>(0),
@@ -634,7 +635,8 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     )?;
     db.execute(
         "UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
-           AND json_extract(payload, '$.kind') != 'review_finished'",
+           AND json_extract(payload, '$.kind') != 'review_finished'
+           AND NOT EXISTS (SELECT 1 FROM proposal_decisions d WHERE d.input_id = issue_inputs.id)",
         params![previous, task],
     )?;
     Ok(Some(task))
