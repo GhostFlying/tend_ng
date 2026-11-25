@@ -86,7 +86,7 @@ Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以
 
 ### 普通报告的版本历史
 
-操作者可显式登记同一 Issue 的两份已发布普通报告为旧→新。原始请求、Chat 与发布通过持久身份确定，不按文字、附件或先后顺序归并。普通链只在 Issue 详情呈现当前版本及折叠历史，未关联报告独立展示。每版仍链接自己的原 Chat 消息和交付原件。补录不会再次发布，不新增或修改 Chat/Issue 消息、Router 输入、Attention、批准、任务或唤醒。结构化方案仍由独立的 Attention 批准契约处理。 [普通报告补录](plans/report-version-backfill.md#implemented-contract)
+操作者可显式登记同一 Issue 的两份已发布普通报告为旧→新。原始请求、Chat 与发布通过持久身份确定，不按文字、附件或先后顺序归并。Issue 详情按精确发布关联展示普通报告，无须附件。只有没有精确关联的旧记录才按附件覆盖匹配。普通链只在 Issue 详情呈现当前版本及折叠历史，未关联报告独立展示。每版仍链接自己的原 Chat 消息及已有交付原件。补录不会再次发布，不新增或修改 Chat/Issue 消息、Router 输入、Attention、批准、任务或唤醒。结构化方案仍由独立的 Attention 批准契约处理。 [普通报告补录](plans/report-version-backfill.md#implemented-contract)
 
 ## Issue Chat 的留言与执行过程
 

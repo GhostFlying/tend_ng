@@ -342,6 +342,21 @@ try {
     await page.waitForURL(url + "/?chat=work#message-review-report");
     await centered(page, "review-report");
 
+    await page.goto(url + "/issues/1#message-text-only-report");
+    await centered(page, "text-only-report");
+    const textOnly = view.locator("#message-text-only-report");
+    assert.equal(await textOnly.count(), 1);
+    assert.equal(
+      await textOnly.getByText("纯文本核对", { exact: true }).isVisible(),
+      true,
+    );
+    assert.equal(await textOnly.getByRole("listitem").count(), 0);
+    assert.equal(await page.locator("vite-error-overlay").count(), 0);
+    await screenshot(page, `text-only-report-${width}`);
+    await textOnly.getByRole("link", { name: "查看原报告消息" }).click();
+    await page.waitForURL(url + "/?chat=work#message-text-only-report");
+    await centered(page, "text-only-report");
+
     await page.goto(url + "/issues/%231/overview#message-review-report");
     await centered(page, "review-report");
     assert.equal(
@@ -414,7 +429,7 @@ try {
     await page.close();
   }
   console.log(
-    "PASS unified Issue page at 1440×1000 and 390×844, Markdown isolation, HTML download, deep links and direct reply",
+    "PASS unified Issue page at 1440×1000 and 390×844, text-only and legacy reports, Markdown isolation, HTML download, deep links and direct reply",
   );
 } finally {
   await browser.close();

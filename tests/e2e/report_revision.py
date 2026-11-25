@@ -357,7 +357,7 @@ def main():
 
                     status, view = http(f"/api/v1/issues/{ISSUE}/overview")
                     assert status == 200
-                    current, solo = view["reports"]
+                    current, solo, *other = view["reports"]
                     assert current["report_id"] == "new" and current["message_id"] == "msg-new"
                     assert [a["id"] for a in current["artifacts"]] == ["new-md"]
                     [old] = current["history"]
@@ -366,6 +366,14 @@ def main():
                     assert [file["id"] for file in old["artifacts"]] == ["old-md", "old-html"]
                     assert old["artifacts"][0]["source"]["task_id"] == "showcase-task"
                     assert solo["report_id"] == "solo" and not solo.get("history")
+                    # These independent text-only publications are also used by
+                    # the backfill conflict cases. Show each once in Chat order.
+                    assert [(r["report_id"], r["message_id"]) for r in other] == [
+                        ("one-old", "msg-one-old"), ("other-new", "msg-other-new"),
+                        ("two-old", "msg-two-old"), ("two-new", "msg-two-new"),
+                        ("ambiguous", "ambiguous-second"),
+                    ]
+                    assert all(not r["artifacts"] and not r.get("history") for r in other)
                     assert cli("issue", "read", f"#{view['short_number']}")["reports"] == view["reports"]
                     assert cli("issue", "read", ISSUE)["reports"] == view["reports"]
                     assert http(f"/api/v1/artifacts/{old['artifacts'][0]['id']}") == (200, FILES["old-md"][1])

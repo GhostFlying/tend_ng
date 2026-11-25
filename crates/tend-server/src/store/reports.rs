@@ -164,10 +164,9 @@ pub fn attach(db: &Connection, message: &str, input: i64) -> Result<()> {
 }
 
 fn legacy_reports(db: &Connection, issue: &str) -> Result<Vec<(i64, IssueDeliveryReport)>> {
-    // Older rows don't have an exact Router-input-to-answer key. An answer's
-    // persisted attachment set must be covered by a completed report for this
-    // Issue and original topic. The set may be a subset: attach() suppresses
-    // repeat downloads in a topic. Never infer links for unattached replies.
+    // Older rows don't have an exact Router-input-to-answer key. An unmapped
+    // answer's attachments must be covered by an unmapped, completed ordinary
+    // report for this Issue and topic. Never infer links for unattached replies.
     // Start from this Issue's reported files to avoid scanning other topics'
     // messages and attachments on every detail refresh.
     let mut statement = db.prepare(
@@ -180,14 +179,19 @@ fn legacy_reports(db: &Connection, issue: &str) -> Result<Vec<(i64, IssueDeliver
              JOIN router_inputs input ON input.report_id = r.id
              WHERE input.message_seq = topic.seq AND input.chat_id = topic.chat_id
                AND input.outcome = 'completed'
+               AND NOT EXISTS (SELECT 1 FROM issue_report_publications p WHERE p.report_id = r.id)
+               AND NOT EXISTS (SELECT 1 FROM proposal_versions v WHERE v.report_id = r.id)
+               AND NOT EXISTS (
+                   SELECT 1 FROM runner_operations
+                   WHERE json_extract(operation, '$.action.kind') = 'ask_attention'
+                     AND json_extract(operation, '$.action.proposal.report_id') = r.id
+               )
          ), submitted_messages AS (
              SELECT DISTINCT link.message_id
              FROM completed_reports r JOIN report_artifacts file ON file.report_id = r.id
              JOIN chat_artifacts link ON link.artifact_id = file.artifact_id
          )
-         SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, t.id,
-                m.seq, (SELECT p.report_id FROM issue_report_publications p
-                        JOIN issue_reports r ON r.id = p.report_id AND r.issue_id = ?1 WHERE p.message_id = m.id)
+         SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, t.id, m.seq
          FROM submitted_messages submitted JOIN chat_messages m ON m.id = submitted.message_id
          JOIN chat_artifacts c ON c.message_id = m.id
          JOIN artifacts a ON a.id = c.artifact_id
@@ -197,17 +201,7 @@ fn legacy_reports(db: &Connection, issue: &str) -> Result<Vec<(i64, IssueDeliver
          JOIN tasks t ON t.id = a.task_id AND t.issue_id = i.id
          JOIN issue_short_numbers n ON n.issue_id = i.id
          WHERE a.published = 1 AND m.operation_id IS NULL
-         AND NOT EXISTS (
-             SELECT 1 FROM issue_report_publications p JOIN proposal_versions v ON v.report_id = p.report_id
-             WHERE p.message_id = m.id
-         )
-         AND NOT EXISTS (
-             SELECT 1 FROM issue_report_publications p JOIN issue_reports r ON r.id = p.report_id AND r.issue_id = ?1
-             WHERE p.message_id = m.id AND (
-                 EXISTS (SELECT 1 FROM report_revisions e WHERE e.previous_report_id = p.report_id)
-                 OR EXISTS (SELECT 1 FROM report_revisions e WHERE e.report_id = p.report_id)
-             )
-         )
+         AND NOT EXISTS (SELECT 1 FROM issue_report_publications p WHERE p.message_id = m.id)
          AND EXISTS (
              SELECT 1 FROM completed_reports r
              WHERE NOT EXISTS (
@@ -231,7 +225,7 @@ fn legacy_reports(db: &Connection, issue: &str) -> Result<Vec<(i64, IssueDeliver
             reports.push((
                 row.get(10)?,
                 IssueDeliveryReport {
-                    report_id: row.get(11)?,
+                    report_id: None,
                     message_id: id,
                     text: row.get(1)?,
                     artifacts: Vec::new(),
@@ -277,21 +271,32 @@ struct RevisionMember {
 
 pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<IssueDeliveryReport>> {
     let mut reports = legacy_reports(db, issue)?;
-    // Exact edges do not depend on the legacy attachment match. They can carry
-    // text-only reports and files deduplicated out of the original Chat reply.
+    // Exact publications do not need attachments or an edge. Use the pinned
+    // messages for revision members and the latest exact message otherwise.
     let mut statement = db.prepare(
         "SELECT m.id, m.text, a.id, a.name, a.bytes, a.available, i.id, i.title, n.number, a.task_id,
                 m.seq, r.id, incoming.previous_report_id
          FROM issue_reports r
          LEFT JOIN report_revisions incoming ON incoming.report_id = r.id
          LEFT JOIN report_revisions outgoing ON outgoing.previous_report_id = r.id
-         JOIN chat_messages m ON m.id = COALESCE(incoming.message_id, outgoing.previous_message_id)
+         JOIN chat_messages m ON m.id = (
+             SELECT p.message_id FROM issue_report_publications p
+             JOIN chat_messages published ON published.id = p.message_id
+             WHERE p.report_id = r.id
+               AND p.message_id = COALESCE(incoming.message_id, outgoing.previous_message_id, p.message_id)
+             ORDER BY published.seq DESC LIMIT 1
+         )
          LEFT JOIN report_artifacts f ON f.report_id = r.id
          LEFT JOIN artifacts a ON a.id = f.artifact_id
          LEFT JOIN issues i ON i.id = a.issue_id
          LEFT JOIN issue_short_numbers n ON n.issue_id = i.id
          WHERE r.issue_id = ?1
            AND NOT EXISTS (SELECT 1 FROM proposal_versions v WHERE v.report_id = r.id)
+           AND NOT EXISTS (
+               SELECT 1 FROM runner_operations
+               WHERE json_extract(operation, '$.action.kind') = 'ask_attention'
+                 AND json_extract(operation, '$.action.proposal.report_id') = r.id
+           )
          ORDER BY f.rowid",
     )?;
     let mut rows = statement.query([issue])?;
@@ -316,8 +321,8 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
         }
     }
 
-    // If an Issue Owner later binds a report as a structured proposal, the
-    // proposal projection takes precedence and splits the ordinary chain there.
+    // If a member later becomes a structured proposal candidate, exclude it
+    // from the ordinary projection and split the chain there.
     let historical: HashSet<_> = members
         .values()
         .filter_map(|m| m.previous.clone())
@@ -413,7 +418,8 @@ mod tests {
              INSERT INTO runner_operations (id, runner_id, operation) VALUES
                  ('md', 'runner', '{}'), ('html', 'runner', '{}'), ('draft', 'runner', '{}'),
                  ('sibling-file', 'runner', '{}'), ('other-file', 'runner', '{}'),
-                 ('report', 'runner', '{}'), ('repeat', 'runner', '{}'),
+                 ('report', 'runner', '{}'), ('repeat', 'runner', '{}'), ('text', 'runner', '{}'),
+                 ('legacy', 'runner', '{}'), ('unpublished', 'runner', '{}'),
                  ('sibling-report', 'runner', '{}'), ('other-report', 'runner', '{}');
              INSERT INTO artifacts (id, issue_id, task_id, runner_id, name, bytes, published, available) VALUES
                  ('md', 'plan', 'plan-task', 'runner', 'plan.md', 10, 1, 1),
@@ -424,10 +430,14 @@ mod tests {
              INSERT INTO issue_reports VALUES
                  ('report', 'parent', 'Final files scoped to this Issue'),
                  ('repeat', 'parent', 'The same files can be mentioned again'),
+                 ('text', 'parent', 'No files needed'),
+                 ('legacy', 'parent', 'Published before exact mappings'),
+                 ('unpublished', 'parent', 'Still pending'),
                  ('sibling-report', 'sibling', 'Same topic, separate Issue'),
                  ('other-report', 'other-chat', 'Separate Chat');
              INSERT INTO report_artifacts VALUES
                  ('report', 'md'), ('report', 'html'), ('repeat', 'md'),
+                 ('legacy', 'draft'), ('unpublished', 'md'),
                  ('sibling-report', 'sibling-file'), ('other-report', 'other-file');
              INSERT INTO router_inputs (chat_id, message_seq, report_id) VALUES
                  ('main', 1, 'report'), ('main', 1, 'repeat'),
@@ -437,7 +447,13 @@ mod tests {
              INSERT INTO router_attempts (seq, number, id, thread_id) VALUES
                  (5, 1, 'dispatch-attempt', 'router-thread');
              INSERT INTO router_dispatches (operation_id, issue_id, task_id, attempt_id, call_id, request)
-                 VALUES ('dispatched', 'parent', 'parent-task', 'dispatch-attempt', 'call', '{}');",
+                 VALUES ('dispatched', 'parent', 'parent-task', 'dispatch-attempt', 'call', '{}');
+             INSERT INTO router_inputs (chat_id, message_seq, report_id, outcome) VALUES
+                 ('main', 1, 'legacy', 'completed'), ('main', 1, 'unpublished', NULL),
+                 ('main', 1, 'text', NULL);
+             INSERT INTO chat_messages (id, chat_id, reply_to, text) VALUES
+                 ('legacy-reply', 'main', 'request', 'Original legacy report');
+             INSERT INTO chat_artifacts VALUES ('legacy-reply', 'draft');",
         )?;
         for (seq, item_id, text) in [
             (1, "report-item", "This is the published review message."),
@@ -448,6 +464,7 @@ mod tests {
             ),
             (3, "sibling-item", "Sibling report in same topic."),
             (4, "another-chat-item", "Report in another chat."),
+            (8, "text-item", "Text-only publication."),
         ] {
             store.finish(seq, &[Answer { item_id, text }], None)?;
         }
@@ -456,9 +473,12 @@ mod tests {
         store.db.execute_batch(
             "INSERT INTO chat_messages (id, chat_id, reply_to, text) VALUES
                  ('wrong-chat', 'private', 'request', 'Wrong Chat'),
-                 ('mixed-message', 'main', 'request', 'Unproven attachment set');
+                 ('mixed-message', 'main', 'request', 'Unproven attachment set'),
+                 ('ordinary', 'main', 'request', 'Ordinary progress'),
+                 ('ordinary-with-file', 'main', 'request', 'A file used by an exactly mapped report');
              INSERT INTO chat_artifacts VALUES
-                 ('wrong-chat', 'md'), ('mixed-message', 'md'), ('mixed-message', 'sibling-file');",
+                 ('wrong-chat', 'draft'), ('mixed-message', 'draft'), ('mixed-message', 'sibling-file'),
+                 ('ordinary-with-file', 'md');",
         )?;
 
         let Some(protocol::IssueDetail::Dispatched(direct)) = store.issue("parent")? else {
@@ -468,8 +488,16 @@ mod tests {
         let view = store.issue_overview("parent")?.unwrap();
         assert!(matches!(view.stage, protocol::BoardStage::Done));
         assert_eq!(view.artifacts.len(), 3);
-        assert_eq!(view.reports.len(), 1);
-        let report = &view.reports[0];
+        let [legacy, report, repeat, text] = view.reports.as_slice() else {
+            panic!(
+                "expected exactly four reports in Chat order: {:?}",
+                view.reports
+            );
+        };
+        assert_eq!(legacy.report_id, None);
+        assert_eq!(legacy.message_id, "legacy-reply");
+        assert_eq!(legacy.artifacts[0].artifact.id, "draft");
+        assert_eq!(report.report_id.as_deref(), Some("report"));
         let published_id: String = store.db.query_row(
             "SELECT id FROM chat_messages WHERE native_item_id = 'report-item'",
             [],
@@ -478,13 +506,12 @@ mod tests {
         assert_eq!(report.message_id, published_id);
         assert_eq!(report.text, "This is the published review message.");
         assert_eq!(report.artifacts.len(), 2);
-        let mut files = report
+        let files = report
             .artifacts
             .iter()
             .map(|file| file.artifact.id.as_str())
             .collect::<Vec<_>>();
-        files.sort_unstable();
-        assert_eq!(files, ["html", "md"]);
+        assert_eq!(files, ["md", "html"]);
         let original = report
             .artifacts
             .iter()
@@ -495,11 +522,96 @@ mod tests {
         assert_eq!(html.task_id, "design-task");
         assert_eq!(html.issue.id, "design");
         assert_eq!(html.issue.short_number, Some(3));
+        assert_eq!(repeat.report_id.as_deref(), Some("repeat"));
+        assert_eq!(repeat.artifacts[0].artifact.id, "md");
+        assert_eq!(text.report_id.as_deref(), Some("text"));
+        assert_eq!(text.text, "Text-only publication.");
+        assert!(text.artifacts.is_empty());
+        assert!(view.reports.iter().all(|report| report.history.is_empty()));
         for issue in ["plan", "no-report"] {
             let empty = store.issue_overview(issue)?.unwrap();
             assert!(empty.reports.is_empty());
             assert!(empty.decisions.is_empty());
         }
+        Ok(())
+    }
+
+    #[test]
+    fn issue_reports_keep_backfilled_versions_and_exclude_proposal_candidates() -> Result<()> {
+        let mut store = Store::initialize(Path::new(":memory:"))?;
+        store.db.execute_batch(
+            "INSERT INTO chat_messages (seq, id, chat_id, text, operation_id) VALUES
+                 (1, 'request', 'main', 'Review request', 'send');
+             INSERT INTO issues (id, source_seq, title, objective, state) VALUES
+                 ('issue', 1, 'Review', '', 'open');
+             INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                 VALUES ('task', 'issue', 'implementation', 'waiting', '[]', '[]');
+             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host', '{}', 0);
+             INSERT INTO runner_operations (id, runner_id, operation) VALUES
+                 ('old', 'runner', '{}'), ('middle', 'runner', '{}'), ('new', 'runner', '{}'),
+                 ('candidate', 'runner', '{}'), ('attention', 'runner', '{}'), ('md', 'runner', '{}'),
+                 ('declaration', 'runner', '{\"action\":{\"kind\":\"ask_attention\",\"proposal\":{\"report_id\":\"candidate\"}}}');
+             INSERT INTO issue_reports VALUES
+                 ('old', 'issue', 'Old report'), ('middle', 'issue', 'Middle report'),
+                 ('new', 'issue', 'New report'), ('candidate', 'issue', 'Unbound proposal');
+             INSERT INTO chat_messages (id, chat_id, reply_to, text) VALUES
+                 ('old-reply', 'main', 'request', 'Old version'),
+                 ('middle-reply', 'main', 'request', 'Middle version'),
+                 ('new-reply', 'main', 'request', 'New version'),
+                 ('candidate-reply', 'main', 'request', 'Declared but not bound');
+             INSERT INTO issue_report_publications VALUES
+                 ('middle-reply', 'middle'), ('new-reply', 'new'), ('candidate-reply', 'candidate');
+             INSERT INTO artifacts (id, issue_id, task_id, runner_id, name, bytes, published, available)
+                 VALUES ('md', 'issue', 'task', 'runner', 'proposal.md', 20, 1, 1);
+             INSERT INTO report_artifacts VALUES ('middle', 'md');",
+        )?;
+        for (operation, old, new, message) in [
+            ("first-edge", "old", "middle", Some("old-reply")),
+            ("second-edge", "middle", "new", None),
+        ] {
+            let receipt = store.backfill_report_revision(&protocol::BackfillReportRevision {
+                operation_id: operation.into(),
+                old_report_id: old.into(),
+                new_report_id: new.into(),
+                old_message_id: message.map(str::to_owned),
+                new_message_id: None,
+            })?;
+            assert!(receipt.created);
+        }
+        let view = store.issue_overview("issue")?.unwrap();
+        let [head] = view.reports.as_slice() else {
+            panic!("expected only the head of the chain: {:?}", view.reports);
+        };
+        assert_eq!(head.message_id, "new-reply");
+        assert!(head.artifacts.is_empty());
+        let [middle, old] = head.history.as_slice() else {
+            panic!("expected both historical versions: {:?}", head.history);
+        };
+        assert_eq!(middle.message_id, "middle-reply");
+        assert_eq!(middle.artifacts[0].artifact.id, "md");
+        assert_eq!(old.message_id, "old-reply");
+        assert!(old.artifacts.is_empty());
+
+        store.db.execute_batch(
+            "INSERT INTO chat_messages (seq, id, chat_id, reply_to, text) VALUES
+                 (6, 'question', 'main', 'request', 'Approve the middle version?');
+             INSERT INTO attentions (id, issue_id, task_id, source_seq, question_seq, request)
+                 VALUES ('attention', 'issue', 'task', 1, 6, '{\"question\":\"Approve?\"}');
+             INSERT INTO proposal_versions
+                 (attention_id, version, operation_id, report_id, artifact_id, question, title, highlights, action)
+                 VALUES ('attention', 1, 'attention', 'middle', 'md', 'Approve?', 'Proposal', '[]', 'Continue');",
+        )?;
+        let view = store.issue_overview("issue")?.unwrap();
+        let [old, new] = view.reports.as_slice() else {
+            panic!(
+                "expected the proposal to split the ordinary chain: {:?}",
+                view.reports
+            );
+        };
+        assert_eq!(old.message_id, "old-reply");
+        assert_eq!(new.message_id, "new-reply");
+        assert!(old.history.is_empty() && new.history.is_empty());
+        assert_eq!(view.proposals[0].versions[0].report_id, "middle");
         Ok(())
     }
 }

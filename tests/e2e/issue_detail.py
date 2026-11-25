@@ -22,6 +22,7 @@ REPORT = """已交付 **两份评审原件**。请确认是否采用推荐方案
 5. 用卡片展示缺口。
 6. 先做只读验证。
 """
+TEXT_ONLY_REPORT = "已完成 **纯文本核对**。结论直接写在报告正文中，无需附加文件。"
 MARKDOWN = """# 用量方案原件
 
 - 原始记录按工作归属。
@@ -65,8 +66,10 @@ def seed(root):
             INSERT INTO runner_operations (id, runner_id, operation) VALUES
                 ('md-original', 'runner', '{}'), ('md-draft', 'runner', '{}'),
                 ('html-original', 'runner', '{}'), ('real-report', 'runner', '{}'),
-                ('real-attention', 'runner', '{}');
-            INSERT INTO issue_reports VALUES ('real-report', 'historical-parent', '发布评审原件');
+                ('real-attention', 'runner', '{}'), ('text-only', 'runner', '{}');
+            INSERT INTO issue_reports VALUES
+                ('real-report', 'historical-parent', '发布评审原件'),
+                ('text-only', 'historical-parent', '回传纯文本核对结论');
             INSERT INTO router_inputs (chat_id, message_seq, report_id, outcome)
                 VALUES ('work', 1, 'real-report', 'completed');
             INSERT INTO router_inputs (seq, chat_id, message_seq, outcome) VALUES
@@ -80,7 +83,14 @@ def seed(root):
                 (3, 'review-decision', 'work', 'review-request', '是否按推荐方案进入实现？');
             INSERT INTO attentions (id, issue_id, task_id, source_seq, question_seq, request)
                 VALUES ('real-attention', 'design-child', 'design-task', 1, 3, '{"question":"是否按推荐方案进入实现？"}');
+            INSERT INTO router_inputs (chat_id, message_seq, report_id, outcome)
+                VALUES ('work', 1, 'text-only', 'completed');
         """)
+        db.execute(
+            "INSERT INTO chat_messages (id, chat_id, reply_to, text) VALUES ('text-only-report', 'work', 'review-request', ?)",
+            (TEXT_ONLY_REPORT,),
+        )
+        db.execute("INSERT INTO issue_report_publications VALUES ('text-only-report', 'text-only')")
         files = [
             ("md-original", "plan-child", "plan-task", "usage-plan.md", MARKDOWN.encode()),
             ("html-original", "design-child", "design-task", "usage-design.html", HTML),
@@ -142,10 +152,12 @@ def main():
             assert status == 200
             view = json.loads(overview)
             assert view["stage"] == "done"
-            [report] = view["reports"]
-            assert report["message_id"] == "review-report"
+            report, text_only = view["reports"]
+            assert report["message_id"] == "review-report" and report.get("report_id") is None
             assert [a["id"] for a in report["artifacts"]] == ["md-original", "html-original"]
             assert report["artifacts"][1]["source"]["task_id"] == "design-task"
+            assert text_only["message_id"] == "text-only-report" and text_only["report_id"] == "text-only"
+            assert text_only["text"] == TEXT_ONLY_REPORT and text_only["artifacts"] == []
             assert view["decisions"][0]["message_id"] == "review-decision"
             assert json.loads(get("/api/v1/issues/4/overview")[1])["reports"] == []
             subprocess.run(
@@ -158,7 +170,7 @@ def main():
                 ).fetchall()
                 assert rows == [("plan-child", "historical-parent", "old-note")] * 2, rows
                 assert db.execute("SELECT state FROM issues WHERE id='historical-parent'").fetchone() == ("closed",)
-    print("PASS authenticated, historical SQLite report links, decisions, downloads and reply destinations")
+    print("PASS exact text-only and legacy reports, authenticated downloads, decisions and reply destinations")
 
 
 if __name__ == "__main__":
