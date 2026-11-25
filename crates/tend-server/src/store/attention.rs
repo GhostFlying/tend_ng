@@ -300,7 +300,7 @@ impl Store {
             params![id, tx.last_insert_rowid()],
         )?;
         let result = lookup(&tx, &input.chat, id)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(result)
     }
 
@@ -349,6 +349,7 @@ impl Store {
             Some(&user),
         )?;
         let result = lookup(&tx, &input.chat, id)?;
+        super::board::refresh(&tx)?;
         super::timing::commit(tx, timing)?;
         Ok(result)
     }

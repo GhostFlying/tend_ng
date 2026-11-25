@@ -1,12 +1,12 @@
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
-    ApiError, Attention, BackfillReportRevision, DEFAULT_LISTEN, FindPull, IssueBoard, IssueDetail,
+    ApiError, Attention, BackfillReportRevision, DEFAULT_LISTEN, FindPull, IssueDetail,
     IssueMessagePage, LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLink,
     PullLinkReceipt, REPORT_REVISIONS_PATH, Receipt, SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
-const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend attention approve <chat-id> <attention-id> <version>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [before]\n  tend issue list <chat-id> [before]\n  tend issue read <issue-id|#number>\n  tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]\n  tend issue start <issue-id|#number>\n  tend issue reviews <issue-id|#number>\n  tend issue cancel <issue-id|#number> <reason> [operation-id]\n  tend issue reopen <issue-id|#number> <reason> [operation-id]\n  tend pr link <issue-id|#number> <url> [operation-id]\n  tend pr list <issue-id|#number>\n  tend pr watches <issue-id|#number>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id|#number> <task-id> [operation-id]\n  tend pr discoveries <issue-id|#number> [operation-id]\n  tend issue messages <issue-id|#number> [before]\n  tend issue message <issue-id|#number> <text> [operation-id] [--reply-to <message-id>]\n  tend agent list\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id|#number> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
+const USAGE: &str = "Usage:\n  tend chat send <chat-id> <text> [operation-id] [--reply-to <message-id>]\n  tend chat read <chat-id> [before]\n  tend attention list <chat-id>\n  tend attention approve <chat-id> <attention-id> <version>\n  tend notification list <chat-id> [before]\n  tend issue list\n  tend issue list --scope=all|--scope=roots [board-cursor]\n  tend issue list <chat-id> [board-cursor]\n  tend issue read <issue-id|#number>\n  tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]\n  tend issue start <issue-id|#number>\n  tend issue reviews <issue-id|#number>\n  tend issue cancel <issue-id|#number> <reason> [operation-id]\n  tend issue reopen <issue-id|#number> <reason> [operation-id]\n  tend pr link <issue-id|#number> <url> [operation-id]\n  tend pr list <issue-id|#number>\n  tend pr watches <issue-id|#number>\n  tend pr require <message-id> <condition-json> [operation-id]\n  tend pr find <issue-id|#number> <task-id> [operation-id]\n  tend pr discoveries <issue-id|#number> [operation-id]\n  tend issue messages <issue-id|#number> [before]\n  tend issue message <issue-id|#number> <text> [operation-id] [--reply-to <message-id>]\n  tend agent list\n  tend agent candidates <category> [requirements-json]\n  tend runner list\n  tend runner replace <predecessor-id> <successor-id>\n  tend runner retire <runner-id>\n  tend server upgrade-check <target-protocol>\n  tend workspace reclaim <issue-id|#number> [operation-id]\n  tend workspace status <operation-id>\n  tend task stop <task-id> [operation-id]\n  tend run steer <run-id> <text> [operation-id]\n  tend control read <operation-id>\n  tend control queue <operation-id>\n  tend run rollout <run-id>\n  tend artifact download <file-id>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates the request.";
 
 fn main() -> Result<()> {
     let mut args: Vec<_> = env::args().skip(1).collect();
@@ -114,13 +114,24 @@ fn main() -> Result<()> {
         | ("notification", "list", [] | [_]) => {
             let mut request = http.get(&path).set("Authorization", &auth);
             if let Some(before) = rest.first() {
-                request = request.query("before", &before.parse::<i64>()?.to_string());
+                if issue_scope {
+                    // Also pass through legacy numeric cursors when talking to an older Server.
+                    ensure!(
+                        protocol::IssueBoardCursor::decode(before).is_some()
+                            || before.parse::<i64>().is_ok_and(|value| value > 0),
+                        "invalid Issue board cursor"
+                    );
+                    request = request.query("before", before);
+                } else {
+                    request = request.query("before", &before.parse::<i64>()?.to_string());
+                }
             }
             let response = checked(request.call())?;
             let page = match command.as_str() {
                 "messages" => serde_json::to_string(&response.into_json::<IssueMessagePage>()?)?,
                 "list" if namespace == "issue" => {
-                    serde_json::to_string(&response.into_json::<IssueBoard>()?)?
+                    // Preserve the Server's page shape across a client-only upgrade.
+                    serde_json::to_string(&response.into_json::<serde_json::Value>()?)?
                 }
                 "list" => serde_json::to_string(&response.into_json::<NotificationPage>()?)?,
                 _ => serde_json::to_string(&response.into_json::<MessagePage>()?)?,

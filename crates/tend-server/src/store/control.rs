@@ -299,7 +299,7 @@ impl Store {
             }
         };
         let result = submit(&tx, id, &task, run, action)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(result)
     }
 
@@ -337,7 +337,7 @@ impl Store {
                 submit(&tx, &protocol::new_id(), &task, None, &ControlAction::Stop)?;
             }
         }
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(result)
     }
 
@@ -375,7 +375,7 @@ impl Store {
             [id],
         )?;
         view.state = "queued".to_owned();
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(ResultState::Found(view))
     }
 }

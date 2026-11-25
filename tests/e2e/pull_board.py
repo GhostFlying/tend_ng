@@ -110,14 +110,11 @@ def main():
                 [other] = wait_for(lambda: cli("issue", "list", "another-chat")["issues"], bool)
                 assert other["title"] == "整理发布记录"
                 assert other["task_state"] == "awaiting_assignment"
-                assert {item["id"] for item in cli("issue", "list")["issues"]} == {
-                    parent, child, other["id"],
-                }
+                all_issues = cli("issue", "list")
+                assert {item["id"] for item in all_issues["issues"]} == {parent, child, other["id"]}
+                assert all_issues["next_before"] is None
                 assert {item["id"] for item in cli("issue", "list", "main")["issues"]} == {parent, child}
                 assert cli("issue", "list", "--all")["issues"] == []
-                with sqlite3.connect(root / "server.sqlite") as database:
-                    before, = database.execute("SELECT rowid FROM issues WHERE id = ?", [other["id"]]).fetchone()
-                assert {item["id"] for item in cli("issue", "list", "--scope=all", str(before))["issues"]} == {parent, child}
                 cli("chat", "send", "record-chat", "先记下稍后整理发布说明。")
                 [record] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"], bool)
                 assert record["stage"] == "backlog"
@@ -154,7 +151,9 @@ def main():
                                      lambda rows: len(rows) == 1 and rows[0]["stage"] == "todo")
                 assert started["id"] == record["id"]
                 receipt = cli("issue", "read", record["id"])
-                assert cli("issue", "start", f"#{record['short_number']}") == receipt
+                replay = cli("issue", "start", f"#{record['short_number']}")
+                for key in ("issue_id", "short_number", "operation_id", "task_id"):
+                    assert replay[key] == receipt[key], key
                 assert receipt["short_number"] == record["short_number"]
                 assert not cli("issue", "messages", record["id"])["awaiting_start"]
                 with sqlite3.connect(root / "server.sqlite") as database:

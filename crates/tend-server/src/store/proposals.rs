@@ -285,6 +285,7 @@ impl Store {
             params![id, version, input],
         )?;
         let decision = status_decision(&tx, id)?;
+        super::board::refresh(&tx)?;
         super::timing::commit(tx, timing)?;
         Ok(Approval::Recorded(decision))
     }

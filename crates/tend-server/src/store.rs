@@ -63,12 +63,12 @@ pub enum Accepted {
 
 impl Store {
     pub fn initialize(path: &Path) -> Result<Self> {
-        let mut store = Self::open(path)?;
+        let mut store = Self::connect(path)?;
         store.db.pragma_update(None, "journal_mode", "WAL")?;
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 27,
+            version <= 28,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -216,7 +216,10 @@ impl Store {
         }
         if version < 27 {
             report_revisions::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 27)?;
+        }
+        if version < 28 {
+            board::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 28)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
@@ -225,10 +228,17 @@ impl Store {
              CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",
         )?;
         tx.commit()?;
+        board::install_tracking(&store.db)?;
         Ok(store)
     }
 
     pub fn open(path: &Path) -> Result<Self> {
+        let store = Self::connect(path)?;
+        board::install_tracking(&store.db)?;
+        Ok(store)
+    }
+
+    fn connect(path: &Path) -> Result<Self> {
         let db = Connection::open(path)?;
         db.busy_timeout(Duration::from_secs(5))?;
         db.pragma_update(None, "foreign_keys", true)?;

@@ -135,7 +135,7 @@ export function IssueBoard({
   token: string;
   onReachable: (value: boolean) => void;
 }) {
-  const [cursors, setCursors] = useState<number[]>([]);
+  const [cursors, setCursors] = useState<string[]>([]);
   const [page, setPage] = useState<BoardPage | null>(null);
   const [error, setError] = useState("");
   const [mobileStage, setMobileStage] = useState<BoardStage>();
@@ -191,7 +191,7 @@ export function IssueBoard({
       ?.scrollIntoView({ block: "nearest", inline: "nearest" });
   }, [loaded, mobileStage]);
 
-  function turnPage(next?: number) {
+  function turnPage(next?: string) {
     setPage(null);
     setCursors((saved) =>
       next === undefined ? saved.slice(0, -1) : [...saved, next],
@@ -211,6 +211,7 @@ export function IssueBoard({
   const byStage = new Map<BoardStage, BoardIssue[]>(
     columns.map(([id]) => [id, []]),
   );
+  // Preserve the server’s keyset order within each column.
   for (const issue of page?.issues ?? []) byStage.get(issue.stage)?.push(issue);
 
   return (

@@ -43,7 +43,7 @@ Server 可先在短事务里保存 Task 结算、停妥证明、完整留言及�
 ## 读取边界
 
 - **Chat 和 Issue 讨论。** 主 Chat 按会话在数据库取一页完整消息。父 Issue Chat 按父 Issue 与下属子 Issue 的合并时间线在数据库取一页原留言，保留每条消息的身份与归属。再按本页 ID 批量查引用、附件信息和处理状态。执行引用用于显示折叠入口，点击后再读取对应原件。日常刷新读取新增消息和已展示消息所需的状态，历史可继续按页查阅。 [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示) · [旧 Tend 消息页读取放大](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/web-messaging-read-amplification.md#L3-L10)
-- **看板。** 按可查询的当前字段分页读 Issue 当前状态，并从 Server 数据库批量读取本页的 PR 关联和已保存的状态摘要。卡片直接展示链接及状态。详情按所选 Issue 分页读取执行和历史。已回传的评审材料只读原话题消息、该 Issue 的持久报告和交付关联。未被确认关联的过程附件不混入报告。原件按引用通过现有鉴权打开，已结案的历史记录不需要回填或重写。
+- **看板。** 按当前阶段入口时间及 Issue ID 截页，再读取本页 Issue 树、PR 关联和已保存的状态摘要。入口证据随影响阶段的业务事务保存，仅对受影响的 Issue 与其父链计算。迁移 28 只初始化对比基线，未知的历史入口不补时，读取不写回。 [排序与分页契约](plans/issue-board-phases.md#入列顺序与分页)卡片直接展示链接及状态。详情按所选 Issue 分页读取执行和历史。已回传的评审材料只读原话题消息、该 Issue 的持久报告和交付关联。未被确认关联的过程附件不混入报告。原件按引用通过现有鉴权打开，已结案的历史记录不需要回填或重写。 [排序与分页契约](plans/issue-board-phases.md#入列顺序与分页)
 - **交付文件与 rollout。** 已同步的交付文件从 Server 的文件存储读取。打开或刷新 rollout 详情时，Web 通过共用 API 读取实际执行实例上当前可用的原件。 [按需读取 rollout](server-runner.md#按需读取-rollout)
 
 Runner 按自身身份读取已分配的待投递任务。建议空查询只读返回，实际分配和接收按各自的持久记录确认。心跳可合并保存最新观察。Runner 持久保存本机 Repo 登记，Server 保存可用于派发的 repo 标识与 Runner 对应关系。 [分配与投递](server-runner.md#分配与投递) · [Repo 注册](server-runner.md#repo-注册) · [旧 Tend 空领取对照](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/findings/issue-lifecycle-efficiency-performance.md#L27-L43)

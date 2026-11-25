@@ -157,7 +157,7 @@ impl Store {
             start_first_task(&tx, &issue_id, &operation_id, work)?;
         }
         let result = receipt(&tx, &operation_id)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(Some(result))
     }
 
@@ -196,7 +196,7 @@ impl Store {
             start_first_task(&tx, id, &operation, &serde_json::from_str(&raw)?)?;
         }
         let result = receipt(&tx, &operation)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(Some(result))
     }
 

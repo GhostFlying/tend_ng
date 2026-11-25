@@ -80,7 +80,7 @@ export type BoardIssue = {
   pulls: PullLink[];
 };
 
-export type BoardPage = { issues: BoardIssue[]; next_before: number | null };
+export type BoardPage = { issues: BoardIssue[]; next_before: string | null };
 
 export type IssueReference = {
   id: string;
@@ -357,11 +357,14 @@ export async function readMessages(
 
 export async function readIssueBoard(
   token: string,
-  before: number | undefined,
+  before: string | undefined,
   signal: AbortSignal,
 ) {
   const path = "/api/v1/issue-board";
-  const url = before === undefined ? path : `${path}?before=${before}`;
+  const url =
+    before === undefined
+      ? path
+      : `${path}?before=${encodeURIComponent(before)}`;
   return (await request(token, url, { signal })).json() as Promise<BoardPage>;
 }
 

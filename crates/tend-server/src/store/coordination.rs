@@ -691,7 +691,7 @@ impl super::Store {
                 .db
                 .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
             release_terminal_windows(&tx)?;
-            tx.commit()?;
+            super::board::commit(tx)?;
         }
         Ok(())
     }

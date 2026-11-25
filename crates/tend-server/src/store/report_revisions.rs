@@ -334,6 +334,7 @@ mod tests {
         let path = dir.join("server.sqlite");
         let original = Store::initialize(&path)?;
         // Restore the pre-feature schema and seed an existing v26 publication.
+        super::super::board::remove_projection_schema(&original.db)?;
         original.db.execute_batch(
             "DROP TABLE report_revision_receipts;
              DROP TABLE report_revisions;

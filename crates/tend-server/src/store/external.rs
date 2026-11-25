@@ -389,7 +389,7 @@ impl Store {
             )?;
         }
         tx.execute("DELETE FROM external_batches WHERE task_id = ?1", [&task])?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(())
     }
 

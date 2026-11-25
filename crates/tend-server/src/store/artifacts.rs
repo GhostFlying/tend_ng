@@ -131,7 +131,7 @@ impl Store {
                 )?;
             }
         }
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(())
     }
 }

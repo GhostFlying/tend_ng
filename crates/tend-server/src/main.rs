@@ -453,12 +453,23 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
         if request.method() != &Method::Get {
             return Ok(api_error(405, "method not allowed"));
         }
-        let Some(before) = page_cursor(query) else {
-            return Ok(api_error(400, "invalid Issue cursor"));
+        let before = if query.is_empty() {
+            None
+        } else {
+            let Some(cursor) = query
+                .strip_prefix("before=")
+                .and_then(protocol::IssueBoardCursor::decode)
+            else {
+                return Ok(api_error(
+                    400,
+                    "invalid Issue board cursor; restart at the first page",
+                ));
+            };
+            Some(cursor)
         };
         return Ok((
             200,
-            serde_json::to_value(store.issue_board(issue_chat, before, roots_only)?)?,
+            serde_json::to_value(store.issue_board(issue_chat, before.as_ref(), roots_only)?)?,
         ));
     }
     if let Some(issue) = path

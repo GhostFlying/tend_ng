@@ -146,7 +146,7 @@ impl Store {
             [old],
         )?;
         tx.execute("UPDATE runner_assignments SET state = 'revoked' WHERE runner_id = ?1 AND state = 'reserved'", [old])?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(Some(json!({"predecessor":old,"successor":new})))
     }
 

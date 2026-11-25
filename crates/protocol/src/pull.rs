@@ -80,7 +80,7 @@ pub struct PullLink {
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-#[derive(Default, Clone, Copy)]
+#[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub enum BoardStage {
     Backlog,
     #[default]
@@ -131,7 +131,29 @@ pub struct IssueCard {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct IssueBoard {
     pub issues: Vec<IssueCard>,
-    pub next_before: Option<i64>,
+    pub next_before: Option<String>,
+}
+
+/// The versioned board keyset cursor. Zero represents an unknown entry time.
+#[derive(Debug, PartialEq, Eq)]
+pub struct IssueBoardCursor {
+    pub entry_ms: i64,
+    pub issue_id: String,
+}
+
+impl IssueBoardCursor {
+    pub fn encode(&self) -> String {
+        format!("v1.{}.{}", self.entry_ms, self.issue_id)
+    }
+
+    pub fn decode(cursor: &str) -> Option<Self> {
+        let (time, issue_id) = cursor.strip_prefix("v1.")?.split_once('.')?;
+        let entry_ms = time.parse::<i64>().ok()?;
+        (entry_ms >= 0 && time == entry_ms.to_string() && crate::valid_id(issue_id)).then(|| Self {
+            entry_ms,
+            issue_id: issue_id.to_owned(),
+        })
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -262,4 +284,33 @@ pub struct PullDiscovery {
 
 pub fn pull_discoveries_path(issue: &str) -> String {
     format!("/api/v1/issues/{issue}/pull-discoveries")
+}
+
+#[cfg(test)]
+mod board_cursor_tests {
+    use super::IssueBoardCursor;
+
+    #[test]
+    fn board_cursors_are_canonical_url_safe_keysets() {
+        for ms in [0, 1_795_608_826_101] {
+            let cursor = IssueBoardCursor {
+                entry_ms: ms,
+                issue_id: "7c183af5-6c6b-4f04-99d7-e6268eac8251".into(),
+            };
+            assert_eq!(IssueBoardCursor::decode(&cursor.encode()), Some(cursor));
+        }
+        for invalid in [
+            "42",
+            "v1.01.id",
+            "v1.+1.id",
+            "v1.-1.id",
+            "v1.0.",
+            "v1.0.id.part",
+            "v1.0.id&scope=all",
+            "v2.0.id",
+            "v1.9223372036854775808.id",
+        ] {
+            assert_eq!(IssueBoardCursor::decode(invalid), None, "{invalid}");
+        }
+    }
 }

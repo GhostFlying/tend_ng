@@ -255,7 +255,7 @@ impl Store {
                 .db
                 .transaction_with_behavior(TransactionBehavior::Immediate)?;
             expire(&tx)?;
-            tx.commit()?;
+            super::board::commit(tx)?;
         }
 
         let runners = available_runners(&self.db)?;
@@ -304,7 +304,7 @@ impl Store {
                     .transaction_with_behavior(TransactionBehavior::Immediate)?;
                 let current = tx.query_row(&query, [&id], read_dispatch)?;
                 assign(&tx, current)?;
-                tx.commit()?;
+                super::board::commit(tx)?;
             }
         }
         Ok(())
@@ -525,6 +525,7 @@ impl Store {
         if request.drained {
             super::handoff::note_drained(&tx, &profile.runner_id)?;
         }
+        super::board::refresh(&tx)?;
         super::timing::commit(tx, timing)?;
         Ok(Some(RunnerSyncReply {
             proposal_approval: true,

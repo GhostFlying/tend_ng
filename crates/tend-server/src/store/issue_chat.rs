@@ -269,7 +269,7 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let result = post_message(&tx, issue, request)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(result)
     }
 
@@ -313,7 +313,7 @@ impl Store {
         )?;
         let saved = message(&tx, &id)?;
         enqueue(&tx, &task, &task, &saved)?;
-        tx.commit()?;
+        super::board::commit(tx)?;
         Ok(Some(saved))
     }
 }
