@@ -57,7 +57,7 @@ async function width(page, expected) {
 try {
   const desktop = await open({ width: 1440, height: 1000 });
   const mobile = await open({ width: 390, height: 844 });
-  const approved = "Approved, waiting for continuation";
+  const approved = "已批准，等待接续";
   const approveName = "批准按 v2 实现";
   const regional = desktop.locator(".proposal-section").first();
   await regional.getByText("版本历史 (1)", { exact: true }).waitFor();

@@ -28,3 +28,17 @@ Present an explicitly versioned proposal, its report, and the original Issue dis
 
 - If the original Task stops before a native Run starts with the approval input, keep the approved version and input on that Task. Surface the blocked takeover without inventing a native Run or letting unrelated follow-up work consume the approval.
 - A proposal in an older page of the original Chat refreshes by its stable Attention ID. Its current version and decision do not depend on the question remaining among the latest messages.
+
+## Rendered verification
+
+The final synthetic Chromium captures exercise the approval document at 1440×1000 and 390×844, the expanded Markdown boundary, and the linked approval event in the Issue timeline.
+
+![Desktop approval document with the actionable waiting strip](images/inline-proposal-desktop.png)
+
+![Desktop approval document after the decision, before Run takeover](images/inline-proposal-desktop-awaiting-continuation.png)
+
+![Mobile approval document](images/inline-proposal-mobile.png)
+
+![Mobile expanded report with a horizontally scrollable table](images/inline-proposal-mobile-markdown.png)
+
+![Desktop Issue timeline with the non-message approval event](images/inline-proposal-desktop-record.png)

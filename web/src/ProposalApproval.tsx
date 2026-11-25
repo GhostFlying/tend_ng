@@ -66,7 +66,7 @@ export function ProposalApproval({
             <span role="status">
               {decision.continuation_run_id
                 ? "Agent 已接续"
-                : "Approved, waiting for continuation"}
+                : "已批准，等待接续"}
             </span>
           ) : (
             <>
