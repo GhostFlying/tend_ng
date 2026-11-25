@@ -193,7 +193,12 @@ impl Store {
                     repositories,
                     serde_json::to_string(&decision)?,
                     state,
-                    state == "waiting_external",
+                    state == "waiting_external"
+                        || assignment.handoff.as_ref().is_some_and(|handoff| {
+                            handoff.operations.iter().any(|op| {
+                                matches!(op.action, protocol::WorkAction::RequestReview { .. })
+                            })
+                        }),
                     app_server
                 ],
             )?;

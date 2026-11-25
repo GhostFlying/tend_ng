@@ -99,7 +99,7 @@ def main():
                     visible = wait_for(lambda: cli("runner", "list"), lambda records: len(records) == 2)
                     assert {record["profile"]["host_id"] for record in visible} == {"demo-host"}
                     assert cli("server", "upgrade-check", "2")["allowed"]
-                    assert len(cli("server", "upgrade-check", "3")["blockers"]) == 2
+                    assert len(cli("server", "upgrade-check", "4")["blockers"]) == 2
                     cli("runner", "replace", "demo-runner", "next-runner")
                     moved = wait_for(lambda: cli("issue", "read", issue),
                                      lambda view: view["status"] == "waiting" and
@@ -107,7 +107,7 @@ def main():
                     assert moved["task_id"] == task
                     assert runner.wait(timeout=10) == 0
                     assert cli("runner", "retire", "demo-runner")["state"] == "retired"
-                    assert [entry["runner_id"] for entry in cli("server", "upgrade-check", "3")["blockers"]] == ["next-runner"]
+                    assert [entry["runner_id"] for entry in cli("server", "upgrade-check", "4")["blockers"]] == ["next-runner"]
                     assert sql("runner", "SELECT execution_state FROM received_assignments WHERE task_id = ?", task) == [("handed_off",)]
                     assert sql("next", "SELECT execution_state, retains_workspace FROM received_assignments WHERE task_id = ?", task) == [
                         ("waiting_external", 1)]

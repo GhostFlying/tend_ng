@@ -116,6 +116,12 @@ if scenario == "issue-chat" and start["method"] == "thread/turns/list":
     saved = history_home / f"{thread}.json"
     respond(start, {"data": [json.loads(saved.read_text())] if saved.exists() else [], "nextCursor": None})
     sys.exit(0)
+if start["method"] == "thread/resume":
+    # This legacy fixture does not preserve a resumable native session.
+    thread = start["params"]["threadId"]
+    send({"id": start["id"], "error": {
+        "code": -32600, "message": f"no rollout found for thread id {thread}"}})
+    start = request("thread/start")
 assert start["method"] == "thread/start", start
 model = start["params"]["model"]
 worker = model == "fixture-worker"

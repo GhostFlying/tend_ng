@@ -4,7 +4,7 @@
 
 ## 工作委派与 Issue 结案
 
-Issue Agent 管理顶层 Issue 的目标、约束和跟进。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。Work Agent 决定技术计划、实施和验证，范围和实际交付保存在工作子 Issue。
+Issue Agent 管理顶层 Issue 的目标、约束和跟进。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。只有工作确可独立并行、或关键结论改变而值得独立重新判断时才拆分或复审。是否拆分、如何审阅由责任 Agent 按目标和仓库约定决定。
 
 **已确认。** 子 Issue 之间的先后顺序、代码起点与交付衔接由 Issue Agent 协调。后续子项需要前一项改动时，Issue Agent 可以安排它在共用 workspace 接着做，也可以为独立 worktree 指定前一项交付的分支或提交。需要整合多项交付并验证时，Issue Agent 可以把这项工作交给合适的工作子 Issue。 [新 worktree 的起点](server-runner.md#新-worktree-的起点)
 
@@ -28,7 +28,7 @@ Issue Agent 已持久委派子项后，如果这轮 Run 因 API 等原因失败�
 
 上级 Issue 已结案时仍按必送规则唤醒。顶层 Issue Agent 读到原结案状态和新的子项事实，并显式决定是否重开。子 Issue 的晚到事实和结果始终留在来源子 Issue。纯进展、回执和已有记录或原件的补传只补齐来源事实。新交付以实际发生的交付行为为准。 [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示)
 
-普通留言先按上述规则试跑。同一上级排队期间，把新输入追加到待处理队列，由实际启动的一轮读到当时已入队的事实。试跑沿原输入核对实际启动和处理结果，重点看只由普通留言唤醒的回合。 [子 Issue 留言唤醒试跑](plans/child-issue-wake.md)
+同一父 Task 的普通输入按固定五分钟窗口调度。第一条普通事实入账时固定截止，窗口内追加不延长。普通包括 Agent 子项留言、新文件首次可读、子 Issue 结案和仍开放的子项成功停妥。所有事实立即持久化并可按原来源查看，到期组内一起投递；父 Task 正忙时由后续 Run 读取。用户留言或转发、Attention 请求和答复、取消与停止控制、失败停妥和派发无可用候选属于即时路径。即时输入可以先唤醒，不会提前放行普通窗口。过期重传与现有原件补回不再计新事实。已终结的父 Task 在普通窗口到期前不因该窗创建后继 Task。
 
 ## 执行失败后的接手
 
@@ -68,7 +68,7 @@ Runner 通过 App Server 观察实际执行，记录发起线程和子线程的�
 
 Work Agent 显式登记候选提交或产物、审阅范围及结论，引用 Runner 观察到的子线程和本次审阅结果。记录随原工作子 Issue 持久保存，通过现有 Runner 与 Server 同步回传，Issue 详情按需读取。
 
-由 Tend 委派的审阅在来源审阅子 Issue 保存所审候选、范围、结论与证据。交付沿原委派送达发起审阅的 Owner，并按父子 Issue 规则逐级上报。Work Agent 处理自己发起的实现审阅，顶层 Issue Agent 接收自己发起的整体审阅，并协调相关 Work Agent。要求修改也是有效的审阅交付。发起方依据结论和证据决定修复、记录已知风险、上报或定向复审。顶层交付由 Issue Agent 决定何时结案。 [父子 Issue 的等待与唤醒](#父子-issue-的等待与唤醒)
+确需由 Tend 单独安排时，发起方用 `tend_request_review` 绑定候选、范围、原作者 Issue/Task 和审阅 Issue/Task。若作者是工作子项，审阅作为同一协调父 Issue 的子项单独归属。审阅使用独立 workspace，无原作者 workspace 的写入准入。作者结束本轮后，在确认停妥的基础上归还 slot，并保留原 workspace 独占。审阅方用 `tend_deliver_review` 保存结论和证据，Server 沿绑定立即直接回传原作者 Task，同时普通结案和留言仍按父级窗口送达。审阅不能改变任何 Owner 或授权，已经终结的原作者 Task 不自动重开。终结无结论以原审阅 Task 的停止事实回报。要求修改也是有效结论，普通修订在原作者 Task 内完成。用户确认仍走原 Chat 的 Attention。
 
 审阅 Task 和 Run 按通用规则结算。Run 正常结束且实际停妥时，可以在零份交付的情况下结算 Task。执行失败时保留原错误，确认停妥后归还 slot。审阅结论以实际登记的记录为准，发起方按结论或原执行结果决定后续。 [Task 结算](#run-正常结束时的-task-结算) · [执行失败后的接手](#执行失败后的接手)
 
@@ -83,7 +83,7 @@ Runner 本地已有从 Server 同步的符合本次条件的证据时，`waitfor
 
 ## 命中事件与续跑
 
-Server 持久保存匹配事实，按原等待和 Task 生成直接投递。每一层登记等待的 Agent 都通过当前负责该 Task 接续的 Runner 收到命中事实。同一命中在外部事实批次中按原身份请求一次唤醒。待续跑期间目录占用仍属于原 Task。Runner 确认原占用并取得 slot 后，为原 Task 启动新 Run，在原目录继续。可用的 session 可以复用，新 session 从原 Issue、Task、输入、回执和 workspace 恢复。 [PR 和 CI 事实的采集与投递](design.md#pr-和-ci-事实的采集与投递) · [同机 Run 交接](server-runner.md#同机接替时的-run-交接)
+Server 持久保存匹配事实，按原等待和 Task 生成直接投递。每一层登记等待的 Agent 都通过当前负责该 Task 接续的 Runner 收到命中事实。同一命中在外部事实批次中按原身份请求一次唤醒。待续跑期间目录占用仍属于原 Task。Runner 确认原占用并取得 slot 后，为原 Task 启动新 Run，在原目录继续。在同一 Runner、兼容配置及原 workspace 内，前一 Run 已停妥时优先恢复同一 Task 的原生 thread。已知不兼容或原 thread 不可用时，从原 Issue、Task、输入、回执和 workspace 新开 session。前次执行未知时不得另启动。若恢复返回旧 thread 仍 active，Runner 持久保留本次预备 Run、未确认消费的输入及原目录独占，重新探测同一 thread，直到可以确认接续。此时丢失 rollout 或更换启动配置不视为停妥证据。 [PR 和 CI 事实的采集与投递](design.md#pr-和-ci-事实的采集与投递) · [同机 Run 交接](server-runner.md#同机接替时的-run-交接)
 
 如果匹配事实先到，Server 仍可在收到等待意图后用该事实匹配。旧执行尚未停妥时先保存已命中事实，待可续跑后调度。条件命中依据所等待对象及对应版本的实际证据记录。
 

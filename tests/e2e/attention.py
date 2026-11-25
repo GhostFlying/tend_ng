@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 
+from child_windows import expire_child_window
 from chat import server, wait_for
 
 RUNNER_FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
@@ -29,6 +30,10 @@ def stage_delivery(root, read, cli, sql):
     [request] = [row for row in messages if row["id"] == source]
     [parent] = request["issue_ids"]
     task = read("issue", "read", parent)["task_id"]
+    # Mature the window after both original facts are durable.
+    wait_for(lambda: sql("server", "SELECT count(*) FROM issue_inputs WHERE task_id = ?", task),
+             lambda rows: rows == [(2,)])
+    expire_child_window(root, "artifact_available", task=task)
     # Let the child finish only when both inputs can be consumed by one parent Run.
     wait_for(lambda: sql("runner", "SELECT json_extract(i.payload, '$.kind') FROM local_issue_inputs i "
                                    "JOIN received_assignments a ON i.assignment_id = a.id "
@@ -225,6 +230,7 @@ def main():
                 assert finished["issue_state"] == "closed"
                 assert finished["task_id"] == initial["task_id"]
                 assert finished["run"]["run_id"] != initial["run"]["run_id"]
+                expire_child_window(root, "issue_closed")
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")
                 assert (root / "runner.runs" / "workspaces" / parent
                         / "repos" / "example" / "guide.txt").read_text() == "Compact guide selected.\n"

@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 
+from child_windows import expire_child_window
 from chat import server, wait_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
@@ -180,10 +181,12 @@ def main():
                 assert cli("artifact", "download", file_id).returncode != 0
                 read("chat", "send", "other", "Hello, Tend.")
                 wait_for(lambda: read("chat", "read", "other")["messages"], lambda rows: len(rows) == 2)
+                expire_child_window(root, "issue_closed")
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")
                 read("chat", "send", "main", hold)
                 wait_for(lambda: sql("app", "SELECT 1 FROM start_requests WHERE input = ?", hold), bool)
                 release.set()
+                expire_child_window(root, "artifact_available")
                 wait_for(lambda: (root / "read-delivery").exists(), bool)
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")
                 wait_for(lambda: sql("server", "SELECT seq FROM router_inputs "

@@ -56,7 +56,7 @@ Router 空闲时按这个顺序选取已到达的输入。一轮可处理多条�
 | 同一条消息交代多个独立目标 | Router 可以分别委派。每项工作都有自己的归属，仍能从同一条原消息看到进度和结果。 |
 | 确有歧义，选择不同归属会改变目标或授权 | Router 在原 Chat 提一个具体问题，收到答复后接着完成原分发。 |
 
-同一目标的细化或后续要求优先沿原 Issue 推进。Issue Agent 保留原输入，把影响实现的补充送给已有工作子 Issue，技术步骤由 Work Agent 自主安排。复用依据可以是明确引用、实际回复关系或能核实的工作上下文。一次路由结果保存原消息、实际派发内容和目标 Issue，重复请求沿原关联恢复。
+同一明确交付的细化、审阅反馈和局部修订优先沿原 Issue、原作者 Task 推进。阶段交付、测试或普通返工不独立派发。Issue Agent 保留原输入，把影响实现的补充送给已有工作子 Issue，技术步骤由 Work Agent 自主安排。复用依据可以是明确引用、实际回复关系或能核实的工作上下文。一次路由结果保存原消息、实际派发内容和目标 Issue，重复请求沿原关联恢复。
 
 用户入口和 CLI 支持用 `#N` 或 `N` 查询和操作 Issue。Router 在当前 Chat 内可用编号或 UUID 读取、开始已记录的 Issue，或向其 Owner 转达消息。Server 在入口解析到原 UUID，保存原消息及 Issue 关联。
 
@@ -74,7 +74,7 @@ Router 空闲时按这个顺序选取已到达的输入。一轮可处理多条�
 
 ## 结果怎样回来
 
-Work Agent 将交付、证据和剩余事项保存在来源子 Issue。业务状态改变、Agent 留言及新交付沿委派关系从各级上级的持久队列送达，直到顶层 Issue Agent。各顶层 Issue Agent 对照原承诺，将结果和交付引用分别上报给 Router。Server 持久入队并保留来源 Issue 和原话题。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒)
+Work Agent 将交付、证据和剩余事项保存在来源子 Issue。业务状态改变、Agent 留言及新交付沿委派关系从各级上级的持久队列送达，直到顶层 Issue Agent。普通子项事实立即可读，但父 Task 的调度以首条普通事实后的固定五分钟窗口合并。直接用户输入、Attention、控制和明确阻塞及时处理。绑定的 Tend 审阅结论直接进入原作者 Task，不能代替原 Chat 的用户确认。各顶层 Issue Agent 对照原承诺，将结果和交付引用分别上报给 Router。Server 持久入队并保留来源 Issue 和原话题。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒)
 
 Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以重新组织成一条汇总。回报保留原话题及各项结果的引用，后续追问由 Router 沿回复关系接续。候选更新、CI 等待和普通进展保留在工作记录，用户主动问时可以得到当前状态。 同一原话题里，多份报告可以引用同一份原件。各份正文保留，下载入口按原文件身份只显示一次。
 
@@ -86,7 +86,7 @@ Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以
 
 过程说明、工具调用与执行输出保留在原 rollout。Issue Chat 在对应的执行位置显示「查看执行过程」入口，默认收起。打开消息页只从 Server 读取本页需要的消息和执行引用。用户点开入口时，Web 通过共用 API 向原 Run 所属 Runner 读取这段执行过程。已加载内容可收起，展开时也可以按需刷新。原 Runner 暂不可达时，在对应入口显示读取状态，已同步的留言和交付仍可正常阅读。 [按需读取 rollout](server-runner.md#按需读取-rollout)
 
-查看执行过程是只读操作。上级 Agent 依据持久提交的留言、业务状态变化和新交付收到唤醒。普通阶段进展沿原 Issue 保存。旧 Tend 提供默认折叠的执行步骤；一期明确把原件查询放在用户展开时。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒) · [旧执行步骤界面](https://github.com/GhostFlying/tend/blob/83bc15ae/web/src/rollout/RunRollout.tsx#L96-L102)
+查看执行过程是只读操作。上级 Agent 依据持久提交的普通留言、业务状态变化和新交付，在固定窗口到期时收到合并唤醒。普通阶段进展沿原 Issue 保存。旧 Tend 提供默认折叠的执行步骤；一期明确把原件查询放在用户展开时。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒) · [旧执行步骤界面](https://github.com/GhostFlying/tend/blob/83bc15ae/web/src/rollout/RunRollout.tsx#L96-L102)
 
 ## 逐级上报与用户决策
 

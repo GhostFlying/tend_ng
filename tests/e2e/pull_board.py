@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 
+from child_windows import expire_child_window
 from chat import server, wait_for
 from issue_chat import free_port, prepare, REQUEST, TESTS, WEB
 
@@ -126,6 +127,7 @@ def main():
                 assert {item["id"] for item in cli("issue", "list", "--scope=roots")["issues"]} == {
                     parent, other["id"], record["id"],
                 }
+                expire_child_window(root, "issue_closed")
                 wait_for(lambda: cli("issue", "list", "--scope=roots")["issues"],
                          lambda rows: any(row["id"] == parent and row["stage"] == "done" for row in rows))
                 if args.web:

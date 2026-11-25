@@ -111,7 +111,7 @@ impl Store {
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )?;
             if let Some(parent) = parent
-                && let Some(target) = coordination::target_task(&tx, &parent)?
+                && let Some(target) = coordination::latest_task(&tx, &parent)?
             {
                 coordination::enqueue(
                     &tx,

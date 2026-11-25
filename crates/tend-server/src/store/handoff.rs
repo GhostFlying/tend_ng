@@ -106,25 +106,30 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let profile = |id: &str| -> Result<Option<RunnerProfile>> {
-            let profile: Option<String> = tx
+        let profile = |id: &str| -> Result<Option<(RunnerProfile, u32)>> {
+            let profile: Option<(String, u32)> = tx
                 .query_row(
-                    "SELECT profile FROM runners WHERE id = ?1 AND last_seen > unixepoch() - 15",
+                    "SELECT profile, protocol FROM runners WHERE id = ?1 AND last_seen > unixepoch() - 15",
                     [id],
-                    |row| row.get(0),
+                    |row| Ok((row.get(0)?, row.get(1)?)),
                 )
                 .optional()?;
-            Ok(profile.as_deref().map(serde_json::from_str).transpose()?)
+            profile
+                .map(|(raw, protocol)| Ok((serde_json::from_str(&raw)?, protocol)))
+                .transpose()
         };
         let existing = drain_target(&tx, old)?;
         if existing.is_some() {
             return Ok((existing.as_deref() == Some(new))
                 .then(|| json!({"predecessor":old,"successor":new})));
         }
-        let (Some(predecessor), Some(successor)) = (profile(old)?, profile(new)?) else {
+        let (Some((predecessor, old_protocol)), Some((successor, new_protocol))) =
+            (profile(old)?, profile(new)?)
+        else {
             return Ok(None);
         };
-        if predecessor.host_id != successor.host_id
+        if new_protocol < old_protocol
+            || predecessor.host_id != successor.host_id
             || predecessor.workspace_root.is_none()
             || predecessor.workspace_root != successor.workspace_root
             || drain_target(&tx, new)?.is_some()

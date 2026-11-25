@@ -13,6 +13,8 @@
 - **取消转达。** Agent 依据原取消范围向自己委派的子项传达取消，使用工具向明确的 Task 提交停止控制，并按原操作查询受理、送达及实际停妥证据。 [取消与逐级停止](task-lifecycle.md#取消与逐级停止)
 - **审阅记录。** Work Agent 在当前工作子 Issue 登记原生 subagent 审阅的候选、范围和结论，并关联 Runner 观察到的子 thread 和结果。Runner 依据 App Server 的原生终态或历史确认执行状态。 [独立审阅](task-lifecycle.md#独立审阅)
 
+`tend_request_review` 由原作者提交候选和范围。Git 挂载只接受作者已分配 repo 的完整提交 SHA。提交文件可用 `artifact:<file_id>` 引用作者 Task 自己的原件。Runner 持久受理后，作者结束当前 turn 才能依据实际停妥归还 slot。指定审阅用 `tend_deliver_review` 回传结论、证据与真实审阅来源。Runner 和 Server 核对原绑定，重复调用不产生新的作者输入。普通讨论或结案不替代结构化审阅证据，用户授权也不走该工具。
+
 派发方可以直接提交工作要求，也可以用本机工具查询合格候选再指名。候选信息来自已同步的清单，Server 应用时按当前事实确认。 [具名 Agent 与任务分配](agent-selection.md)
 
 ## 角色 Skill 与仓库约定
@@ -49,7 +51,7 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 ## Session 接续
 
-**已确认。** 新 session 收到本轮输入和接续所需的工作摘要。摘要从持久的 Chat、Issue、Task 和操作记录读取。Agent 通过工具把会影响后续行动的事实写入 Issue。复用 session 用于提高上下文缓存命中率，默认只补本轮输入和相关变化。
+**已确认。** 新 session 收到本轮输入和接续所需的工作摘要。摘要从持久的 Chat、Issue、Task 和操作记录读取。Agent 通过工具把会影响后续行动的事实写入 Issue。同一 Task 的兼容且已停妥的原生 thread 优先续用，默认只补本轮输入和相关变化。缺失或已知不兼容时，新 session 带原工作契约、当前输入与近期已持久化原输入和受理回执。线程是执行上下文，不能代替 Issue、Task 或业务回执。
 
 - Router 从原 Chat 输入和相关工作摘要接续，可以查询该输入已提交的派发和回复。
 - Issue Agent 的摘要可额外带上子 Issue 的当前状态、交付概况和待协调事项。具体子项按引用查询。

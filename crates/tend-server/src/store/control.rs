@@ -201,6 +201,14 @@ pub fn acknowledge(db: &Connection, runner: &str, ack: &ControlAck) -> Result<bo
 }
 
 fn report_unstarted_stop(db: &Connection, task: &str, control: &str) -> Result<()> {
+    super::tend_review::finish(
+        db,
+        task,
+        control,
+        None,
+        None,
+        "Review Task stopped before another execution could start.",
+    )?;
     let parent: Option<(String, String)> = db
         .query_row(
             "SELECT i.id, i.parent_issue_id FROM tasks t JOIN issues i ON i.id = t.issue_id

@@ -94,6 +94,10 @@ impl Store {
                     "SELECT o.operation FROM local_task_intents o
                      WHERE o.assignment_id = ?1 AND (
                        json_extract(o.operation, '$.action.kind') = 'delegate'
+                       OR (json_extract(o.operation, '$.action.kind') = 'request_review'
+                         AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
+                           AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'review_finished'
+                           AND json_extract(i.payload, '$.review.request_id') = o.id))
                        OR (json_extract(o.operation, '$.action.kind') = 'ask_attention'
                          AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1 AND i.run_id IS NOT NULL
                            AND json_extract(i.payload, '$.kind') = 'attention_answered' AND json_extract(i.payload, '$.attention_id') = o.id))

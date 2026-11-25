@@ -7,6 +7,8 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
 const DELEGATE: &str = "tend_delegate_work";
+const REQUEST_REVIEW: &str = "tend_request_review";
+const DELIVER_REVIEW: &str = "tend_deliver_review";
 const CLOSE: &str = "tend_close_issue";
 const SUBMIT: &str = "tend_submit_artifact";
 const REPORT: &str = "tend_report_result";
@@ -66,7 +68,7 @@ pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
     });
     let stop_task = json!({
         "type":"function", "name":"tend_stop_task",
-        "description":"Request stop for a Task in your own Issue tree, confirmed separately by its Runner.",
+        "description":"Request stop for a Task in your own Issue tree or an independent review requested by this Task. Its Runner confirms actual stop.",
         "inputSchema":{"type":"object","properties":{"task_id":{"type":"string"}},
                        "required":["task_id"],"additionalProperties":false}
     });
@@ -112,6 +114,25 @@ pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
             "additionalProperties": false
         }
     });
+    let review_handoff = if category == "review" {
+        json!({
+            "type": "function", "name": DELIVER_REVIEW,
+            "description": "Return the conclusion and evidence for this bound review to the exact author Task.",
+            "inputSchema": {"type":"object", "properties":{
+                "conclusion":{"type":"string"}, "evidence":{"type":"string"}
+            }, "required":["conclusion","evidence"], "additionalProperties":false}
+        })
+    } else {
+        json!({
+            "type": "function", "name": REQUEST_REVIEW,
+            "description": "Request optional independent Tend review of an immutable candidate. End the turn when ready to yield; the result resumes this exact author Task. Use artifact:<file_id> for a submitted file, or exact Git commit base_refs to mount code in a separate workspace.",
+            "inputSchema": {"type":"object", "properties":{
+                "candidate":{"type":"string"}, "scope":{"type":"string"},
+                "agent_id":{"type":"string"},
+                "base_refs":{"type":"object","additionalProperties":{"type":"string"}}
+            }, "required":["candidate","scope"], "additionalProperties":false}
+        })
+    };
     if category == "issue-router" {
         let delegate = json!({
             "type": "function",
@@ -206,6 +227,7 @@ pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
                 stop_task,
                 issue_state,
                 record_review,
+                review_handoff,
             ],
         )
     } else {
@@ -239,9 +261,20 @@ pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
                 stop_task,
                 issue_state,
                 record_review,
+                review_handoff,
             ],
         )
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReviewRequest {
+    candidate: String,
+    scope: String,
+    agent_id: Option<String>,
+    #[serde(default)]
+    base_refs: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Deserialize)]
@@ -315,6 +348,50 @@ pub fn action(
     operation: &str,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
+        REQUEST_REVIEW if run.assignment.placement.agent.category != "review" => {
+            let args: ReviewRequest = serde_json::from_value(call.arguments.clone())?;
+            let work = DispatchIssue {
+                title: format!("Independent review of {}", run.assignment.work.title),
+                objective: format!(
+                    "Independently review this immutable candidate: {}. Scope: {}. Deliver findings to the author Task with tend_deliver_review.",
+                    args.candidate, args.scope,
+                ),
+                repo_ids: args.base_refs.keys().cloned().collect(),
+                base_refs: args.base_refs,
+                required_capabilities: Vec::new(),
+                agent: args.agent_id.map(|id| protocol::AgentPin {
+                    id,
+                    runner_id: None,
+                }),
+            };
+            ensure!(
+                protocol::valid_tend_review(&args.candidate, &args.scope, &work)
+                    && work
+                        .repo_ids
+                        .iter()
+                        .all(|id| run.assignment.work.repo_ids.contains(id)),
+                "Supply the candidate and scope, and pin any assigned repositories by exact commit"
+            );
+            Ok(WorkAction::RequestReview {
+                issue_id: protocol::new_id(),
+                task_id: protocol::new_id(),
+                candidate: args.candidate,
+                scope: args.scope,
+                work,
+            })
+        }
+        DELIVER_REVIEW
+            if run.assignment.placement.agent.category == "review"
+                && run.assignment.review.is_some() =>
+        {
+            let result: protocol::TendReviewConclusion =
+                serde_json::from_value(call.arguments.clone())?;
+            ensure!(
+                result.valid(),
+                "Provide the actual conclusion and associated evidence"
+            );
+            Ok(WorkAction::DeliverReview { result })
+        }
         "tend_record_review" => {
             let review: protocol::ReviewConclusion =
                 serde_json::from_value(call.arguments.clone())?;

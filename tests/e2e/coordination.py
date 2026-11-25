@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 
+from child_windows import expire_child_window
 from chat import lose_first_response, server, wait_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
@@ -97,6 +98,8 @@ def main():
                         runner.terminate()
                         runner.wait(timeout=7)
                         runner = start_runner(target, stderr)
+                    if args.scenario != "no-candidate":
+                        expire_child_window(root, "issue_closed" if child_closes else "task_stopped")
                     final = wait_for(lambda: cli("issue", "read", parent),
                                      lambda view: view["status"] == "completed"
                                      and (view["task_id"] != first["task_id"] if late else True))

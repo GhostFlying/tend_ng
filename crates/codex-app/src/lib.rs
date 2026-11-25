@@ -17,6 +17,13 @@ use std::{
 
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
+#[derive(Debug, PartialEq, Eq)]
+pub enum WorkThreadResume {
+    Ready,
+    Unavailable,
+    Active,
+}
+
 pub struct Client {
     child: Child,
     stdin: Option<ChildStdin>,
@@ -216,6 +223,49 @@ impl Client {
             Ok(_) => Ok(true),
             Err(error) if missing_thread(&error, thread_id) => Ok(false),
             Err(error) => Err(error),
+        }
+    }
+
+    /// Resume a previously stopped work thread before submitting any turn.
+    pub fn resume_work_thread(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+        model: Option<&str>,
+        require_idle: bool,
+    ) -> Result<WorkThreadResume> {
+        let response = match self.call(
+            "thread/resume",
+            json!({
+                "threadId": thread_id, "excludeTurns": true, "cwd": cwd, "model": model,
+                "sandbox": "danger-full-access", "approvalPolicy": "never"
+            }),
+        ) {
+            Ok(response) => response,
+            Err(error) if error.downcast_ref::<RpcError>().is_some() => {
+                return Ok(WorkThreadResume::Unavailable);
+            }
+            Err(error) => return Err(error),
+        };
+        let status = response["thread"]["status"]["type"].as_str();
+        if status == Some("active") {
+            return Ok(WorkThreadResume::Active);
+        }
+        if (!require_idle || status == Some("idle"))
+            && status != Some("systemError")
+            && response["thread"]["id"] == thread_id
+            && response["cwd"]
+                .as_str()
+                .is_none_or(|path| Path::new(path) == cwd)
+            && model.is_none_or(|expected| {
+                response["model"]
+                    .as_str()
+                    .is_none_or(|model| model == expected)
+            })
+        {
+            Ok(WorkThreadResume::Ready)
+        } else {
+            Ok(WorkThreadResume::Unavailable)
         }
     }
 

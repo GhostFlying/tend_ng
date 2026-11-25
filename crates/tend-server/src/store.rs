@@ -16,6 +16,7 @@ mod review;
 mod run;
 mod runner;
 mod short_numbers;
+mod tend_review;
 mod timing;
 mod work;
 
@@ -65,7 +66,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 24,
+            version <= 25,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -203,7 +204,11 @@ impl Store {
         }
         if version < 24 {
             short_numbers::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 24)?;
+        }
+        if version < 25 {
+            coordination::migrate_continuity(&tx)?;
+            tend_review::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 25)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);

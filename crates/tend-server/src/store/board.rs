@@ -259,7 +259,8 @@ fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progres
                 MAX(
                     (w.status IN ('awaiting_assignment','awaiting_receipt','accepted') OR (
                         w.status = 'waiting' AND (
-                            EXISTS (SELECT 1 FROM issue_inputs WHERE task_id = w.id AND run_id IS NULL)
+                            EXISTS (SELECT 1 FROM issue_inputs WHERE task_id = w.id AND run_id IS NULL
+                                   AND (wake_at IS NULL OR wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)))
                             OR w.queued
                         )
                     )) AND NOT EXISTS (

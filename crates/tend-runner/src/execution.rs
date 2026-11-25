@@ -4,17 +4,20 @@ use crate::{
 };
 use crate::{tools, workspace};
 use anyhow::{Context, Result, bail};
-use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
+use codex_app::{
+    Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus, WorkThreadResume,
+};
 use protocol::{ControlAction, ControlState, RunOutcome, TOKEN_ENV};
 use serde_json::json;
 use std::{
     collections::HashMap,
     ffi::OsString,
+    hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone)]
@@ -35,12 +38,14 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
             for id in &active {
                 if !workers.contains_key(id) {
                     let run = store.load_run(id)?;
-                    if run
-                        .process
-                        .as_ref()
-                        .map(|process| process.is_stopped())
-                        .transpose()?
-                        .unwrap_or(true)
+                    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64;
+                    if run.resume_retry_at <= now
+                        && run
+                            .process
+                            .as_ref()
+                            .map(|process| process.is_stopped())
+                            .transpose()?
+                            .unwrap_or(true)
                     {
                         candidates.push(run);
                     }
@@ -81,7 +86,10 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
 
 fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let cwd = workspace::directory(&runtime.root, run);
-    if run.process.is_none() && store.has_stop(&run.assignment.placement.assignment_id)? {
+    if run.process.is_none()
+        && run.resume_guard.is_none()
+        && store.has_stop(&run.assignment.placement.assignment_id)?
+    {
         return settle(
             &mut store,
             run,
@@ -137,28 +145,181 @@ fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
     Ok(turn)
 }
 
+fn native_context(
+    runtime: &Runtime,
+    run: &LocalRun,
+    agent: &protocol::AgentProfile,
+    app_server: Option<&AppServer>,
+    cwd: &Path,
+    instructions: &str,
+    tools: &[serde_json::Value],
+) -> Result<String> {
+    // Compare the resolved execution configuration without adding cleartext
+    // invocation arguments to the Run ledger.
+    let (program, args, home) = match app_server {
+        Some(app) => (
+            OsString::from(&app.program),
+            app.args.iter().map(OsString::from).collect::<Vec<_>>(),
+            app.codex_home.clone(),
+        ),
+        None => (runtime.program.clone(), runtime.args.clone(), None),
+    };
+    let executable = if Path::new(&program).components().count() > 1 {
+        cwd.join(&program).canonicalize().ok()
+    } else {
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .find_map(|dir| cwd.join(dir).join(&program).canonicalize().ok())
+        })
+    };
+    let binary = executable
+        .as_ref()
+        .and_then(|path| std::fs::metadata(path).ok())
+        .map(|metadata| (metadata.len(), metadata.modified().ok()));
+    let home = home
+        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".codex")));
+    let home_config = home
+        .as_ref()
+        .and_then(|home| std::fs::metadata(home.join("config.toml")).ok())
+        .map(|metadata| (metadata.len(), metadata.modified().ok()));
+    let configuration = serde_json::to_string(&json!({
+        "runner": run.assignment.placement.runner_id,
+        "binding": run.assignment.workspace_key.as_ref().or(run.assignment.parent_issue_id.as_ref()),
+        "cwd": cwd,
+        "agent": agent,
+        "program": program,
+        "executable": executable,
+        "binary": binary,
+        "args": args,
+        "home": home,
+        "home_config": home_config,
+        "instructions": instructions,
+        "tools": tools,
+    }))?;
+    let mut hash = DefaultHasher::new();
+    configuration.hash(&mut hash);
+    Ok(format!("{:016x}", hash.finish()))
+}
+
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
-    let started = workspace::prepare(&runtime.root, run)
-        .context("prepare Tend workspace")
-        .and_then(|directory| {
+    let started = config
+        .native_agent(&run.assignment)
+        .and_then(|agent| {
+            let app_server = agent.app_server.as_ref().map(|id| &config.app_servers[id]);
+            let directory =
+                workspace::prepare(&runtime.root, run).context("prepare Tend workspace")?;
+            Ok((agent, app_server, directory))
+        })
+        .and_then(|(agent, app_server, directory)| {
+            if let Some(file) = run
+                .assignment
+                .review
+                .as_ref()
+                .and_then(|review| review.candidate.strip_prefix("artifact:"))
+            {
+                anyhow::ensure!(protocol::valid_id(file), "invalid review artifact");
+                let review_dir = directory.join("review-input");
+                std::fs::create_dir_all(&review_dir)?;
+                let destination = review_dir.join(file);
+                // Never use the author's workspace to stage the candidate.
+                let staged = review_dir.join(format!("{file}.staging"));
+                std::fs::copy(runtime.artifacts.join(file), &staged)
+                    .context("immutable review artifact is missing from this Runner")?;
+                std::fs::rename(staged, destination)?;
+            }
             Ok((
-                client(runtime, &directory, run.app_server.as_ref())?,
+                client(runtime, &directory, app_server)?,
                 directory,
+                agent,
+                app_server,
             ))
         });
-    let (mut app, cwd) = match started {
+    let (mut app, cwd, agent, app_server) = match started {
         Ok(started) => started,
-        Err(error) => return settle(store, run, &planned_cwd, Err(error), false),
+        Err(error) => {
+            if let Some(thread) = &run.resume_guard {
+                return store.defer_active_resume(&run.id, thread);
+            }
+            return settle(store, run, &planned_cwd, Err(error), false);
+        }
     };
     let branches = workspace::branches(run, &cwd);
+    let (instructions, tools) = tools::catalogue(&agent.category);
+    let native_context =
+        native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;
+    let previous = store.reusable_thread(run, &native_context)?;
+    if let Some(guarded) = &run.resume_guard
+        && previous.as_ref() != Some(guarded)
+    {
+        // Configuration drift cannot clear an unresolved active-thread fence.
+        app.stop()?;
+        return store.defer_active_resume(&run.id, guarded);
+    }
+    let reused = if let Some(thread) = &previous {
+        match app.resume_work_thread(
+            thread,
+            &cwd,
+            agent.model.as_deref(),
+            run.resume_guard.is_some(),
+        ) {
+            Ok(WorkThreadResume::Ready) => true,
+            Ok(WorkThreadResume::Active) => {
+                store.defer_active_resume(&run.id, thread)?;
+                app.stop()?;
+                if run.resume_guard.is_none() {
+                    eprintln!(
+                        "Task {} still has an active native thread; holding the same Run and workspace",
+                        run.assignment.task_id
+                    );
+                }
+                return Ok(());
+            }
+            _ if run.resume_guard.is_some() => {
+                // Neither loss of the rollout nor a transport error proves a
+                // previously reported active turn has exited.
+                app.stop()?;
+                return store.defer_active_resume(&run.id, thread);
+            }
+            Ok(WorkThreadResume::Unavailable) => false,
+            Err(error) => {
+                // Resume has not submitted any turn. Fence this App Server
+                // before trying a fresh session, unlike an unknown turn/start.
+                app.stop()
+                    .context("confirm stopped App Server after resume error")?;
+                eprintln!(
+                    "Cannot load native thread for Task {}: {error:#}",
+                    run.assignment.task_id
+                );
+                match client(runtime, &cwd, app_server) {
+                    Ok(fresh) => app = fresh,
+                    Err(error) => return settle(store, run, &cwd, Err(error), false),
+                }
+                false
+            }
+        }
+    } else {
+        false
+    };
     let result = (|| {
-        let agent = &run.assignment.placement.agent;
-        let (instructions, tools) = tools::catalogue(&agent.category);
-        let thread_id = app.start_thread(&cwd, instructions, &tools, agent.model.as_deref())?;
-        store.attach_process(&run.id, &thread_id, &app.process_identity()?)?;
+        if store.has_stop(&run.assignment.placement.assignment_id)? {
+            bail!("Task cancelled before launch");
+        }
+        let thread_id = if reused {
+            previous.expect("reused thread was selected")
+        } else {
+            app.start_thread(&cwd, instructions, &tools, agent.model.as_deref())?
+        };
+        store.attach_process(
+            &run.id,
+            &thread_id,
+            &app.process_identity()?,
+            &native_context,
+            app_server,
+        )?;
         let input = serde_json::to_string(&run.assignment)?;
-        let context = store.coordination_context(run)?;
+        let context = store.coordination_context(run, reused)?;
         app.run_turn(
             TurnInput {
                 thread_id: &thread_id,

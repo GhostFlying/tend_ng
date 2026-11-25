@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 
+from child_windows import expire_child_window
 from chat import lose_first_response, server, wait_for
 
 TESTS = Path(__file__).resolve().parents[1]
@@ -147,6 +148,7 @@ def main():
                              lambda issue: issue["status"] == "completed")
                     assert cli("issue", "read", child)["issue_state"] == "closed"
                     assert not (root / "inspection.jsonl").exists()
+                    expire_child_window(root, "issue_closed")
 
                     notices = cli("notification", "list", "main")["activities"]
                     child_activity = [item for item in notices if item["issue_id"] == child]

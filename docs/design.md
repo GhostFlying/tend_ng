@@ -53,7 +53,7 @@ Issue Owner 表示当前 Issue 的负责人。Server 为顶层 Issue 和各子 I
 
 通过 Tend 委派工作统一走子 Issue。顶层 Issue 的实际工作由工作子 Issue 承接，简单工作也走这条路径。父子各自保存目标、Owner 和结果。
 
-Issue Agent 取得本地委派回执并处理完手头工作后可结束本轮，停妥后归还 slot。子 Issue 的业务状态改变、Agent 留言及新交付必达每一级上级，直到顶层 Issue Agent。顶层结案后同样收到这些输入并唤醒 Issue Agent，由它决定是否重开。晚到的原记录及结果保存在来源子 Issue。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒)
+Issue Agent 取得本地委派回执并处理完手头工作后可结束本轮，停妥后归还 slot。普通子 Issue 状态变化、Agent 留言及新交付立即入账，经每个父 Task 的固定五分钟窗口合并唤醒。用户输入、控制请求和明确阻塞及时送达。顶层结案后同样收到这些输入并唤醒 Issue Agent，由它决定是否重开。晚到的原记录及结果保存在来源子 Issue。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒)
 
 Work Agent 可在任意阶段提交产物。各 Issue 的 Owner 显式决定自己负责的 Issue 何时结案。父 Issue 可在子 Issue 仍在推进时由 Issue Agent 结案，子 Issue 继续按各自的实际状态记录。Work Agent 决定实现范围内的审阅安排，复杂任务的预置 prompt 要求寻求独立审阅。Codex 原生 subagent 的审阅记录保存在当前工作子 Issue，委派给 Review Agent 则创建 `review` 子 Issue。 [工作委派与结案](task-lifecycle.md#工作委派与-issue-结案) · [独立审阅](task-lifecycle.md#独立审阅)
 

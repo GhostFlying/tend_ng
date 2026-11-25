@@ -1,4 +1,4 @@
-"""Check the real v1 sync path and the upgrade window for simulated generations."""
+"""Check the real v2 sync path and the upgrade window for simulated generations."""
 
 import argparse
 from contextlib import closing
@@ -48,12 +48,12 @@ def exercise(args, root, address, env):
     [registration] = runners().values()
     assert registration["profile"]["runner_id"] == v1, registration
     assert registration["profile"]["host_id"] == host_id, registration
-    assert registration["protocol"] == 1, registration
-    check_upgrade(1, 1, [])
+    assert registration["protocol"] == 2, registration
+    check_upgrade(1, 1, [{"host_id": host_id, "runner_id": v1, "protocol": 2}])
     check_upgrade(2, 1, [])
-    print("PASS real v1 Runner registration and target 1 and 2 upgrade preflight")
+    print("PASS real v2 Runner registration and target 1 and 2 upgrade preflight")
 
-    for protocol, expected in [(1, 200), (0, 426), (2, 426)]:
+    for protocol, expected in [(1, 200), (2, 200), (0, 426), (3, 426)]:
         payload = {"protocol": protocol, "profile": registration["profile"],
                    "receipts": [], "records": []}
         with closing(HTTPConnection(address, timeout=5)) as connection:
@@ -66,16 +66,16 @@ def exercise(args, root, address, env):
             assert response.status == expected, (protocol, response.status, body)
             if expected == 426:
                 assert body["error"] == "unsupported Runner protocol", body
-    print("PASS current Server sync accepts protocol 1 and rejects 0 and 2")
+    print("PASS current Server sync accepts protocols 1 and 2 and rejects 0 and 3")
 
-    # Register valid records with the v1 binary. Only the temporary Server database
+    # Register valid records with the v2 binary. Only the temporary Server database
     # supplies the simulated v2 and v3 declarations used by upgrade preflight.
     register(v2, host_id)
     register(v3, second_host_id)
     with closing(sqlite3.connect(root / "server.sqlite")) as ledger:
         with ledger:
             ledger.executemany(
-                "UPDATE runners SET protocol = ? WHERE id = ?", [(2, v2), (3, v3)],
+                "UPDATE runners SET protocol = ? WHERE id = ?", [(1, v1), (2, v2), (3, v3)],
             )
 
         blocked_v1 = {"host_id": host_id, "runner_id": v1, "protocol": 1}
@@ -86,6 +86,11 @@ def exercise(args, root, address, env):
         check_upgrade(4, 3, [blocked_v1, blocked_v2])
         print("PASS simulated matrix: v3 blocks target 2, v1 blocks target 3, v1/v2 block target 4")
 
+        downgrade = subprocess.run([args.cli, "runner", "replace", v2, v1],
+                                   env=env, text=True, capture_output=True, timeout=10)
+        assert downgrade.returncode and "HTTP 409" in downgrade.stderr, downgrade.stderr
+        assert runners()[v2]["successor"] is None
+        print("PASS newer Runner cannot drain into an older protocol")
         cli("runner", "replace", v1, v2)
         replacing = runners()[v1]
         assert replacing["successor"] == v2 and replacing["drained_at"] is None, replacing

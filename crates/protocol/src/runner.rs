@@ -1,7 +1,7 @@
 use crate::{AttentionRequest, DispatchIssue, IssueMessage};
 use serde::{Deserialize, Serialize};
 
-pub const RUNNER_PROTOCOL: u32 = 1;
+pub const RUNNER_PROTOCOL: u32 = 2;
 pub const RUNNER_SYNC_BATCH: usize = 32;
 pub const WORK_CATEGORIES: &[&str] = &[
     "implementation",
@@ -120,6 +120,8 @@ pub struct TaskAssignment {
     pub handoff: Option<crate::HandoffContext>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub followup: Option<CoordinationFollowup>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<crate::TendReview>,
     pub work: DispatchIssue,
 }
 
@@ -212,6 +214,16 @@ pub enum WorkAction {
         #[serde(default, skip_serializing_if = "std::ops::Not::not")]
         isolated_workspace: bool,
         work: DispatchIssue,
+    },
+    RequestReview {
+        issue_id: String,
+        task_id: String,
+        candidate: String,
+        scope: String,
+        work: DispatchIssue,
+    },
+    DeliverReview {
+        result: crate::TendReviewConclusion,
     },
     StopTask {
         task_id: String,
@@ -319,6 +331,14 @@ pub enum IssueInputCause {
         required_capabilities: Vec<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         agent_id: Option<String>,
+    },
+    ReviewFinished {
+        review: crate::TendReview,
+        source_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result: Option<crate::TendReviewConclusion>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        run_id: Option<String>,
     },
     TaskCancelled {
         control_id: String,

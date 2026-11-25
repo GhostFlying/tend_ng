@@ -31,15 +31,15 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
 }
 
 impl Store {
-    pub fn coordination_context(&self, run: &LocalRun) -> Result<Option<String>> {
-        if run.inputs.is_empty() {
+    pub fn coordination_context(&self, run: &LocalRun, resumed: bool) -> Result<Option<String>> {
+        if run.inputs.is_empty() && run.assignment.followup.is_none() && resumed {
             return Ok(None);
         }
         let mut statement = self.0.prepare(
             "SELECT operation FROM local_task_intents
              WHERE (assignment_id = ?1 OR assignment_id IN (
                 SELECT id FROM received_assignments WHERE task_id = ?2
-             )) AND json_extract(operation, '$.action.kind') = 'delegate'
+             )) AND json_extract(operation, '$.action.kind') IN ('delegate', 'request_review')
              ORDER BY rowid",
         )?;
         let followup = run.assignment.followup.as_ref();
@@ -54,10 +54,47 @@ impl Store {
             )?
             .map(|value| Ok(serde_json::from_str::<WorkOperation>(&value?)?))
             .collect::<Result<Vec<_>>>()?;
+        // A replacement session also needs the previous inputs and accepted
+        // operations, without repeating large histories on native reuse.
+        let recovery = if !resumed {
+            let mut query = self.0.prepare(
+                "SELECT payload FROM local_issue_inputs
+                 WHERE assignment_id = ?1 AND run_id IS NOT NULL AND run_id != ?2
+                 ORDER BY rowid DESC LIMIT 32",
+            )?;
+            let prior = query
+                .query_map([&run.assignment.placement.assignment_id, &run.id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .map(|raw| Ok(serde_json::from_str::<IssueInput>(&raw?)?))
+                .collect::<Result<Vec<_>>>()?;
+            let mut query = self.0.prepare(
+                "SELECT operation FROM local_task_intents WHERE assignment_id = ?1 AND
+                 json_extract(operation, '$.action.kind') != 'observe_subagent'
+                 ORDER BY rowid DESC LIMIT 32",
+            )?;
+            let receipts = query
+                .query_map([&run.assignment.placement.assignment_id], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .map(|raw| Ok(serde_json::from_str::<WorkOperation>(&raw?)?))
+                .collect::<Result<Vec<_>>>()?;
+            (!prior.is_empty() || !receipts.is_empty()).then(|| {
+                serde_json::json!({
+                    "prior_inputs_recent_first": prior, "prior_receipts_recent_first": receipts,
+                })
+            })
+        } else {
+            None
+        };
+        if run.inputs.is_empty() && followup.is_none() && recovery.is_none() {
+            return Ok(None);
+        }
         let records = serde_json::json!({
             "child_inputs": run.inputs,
             "previous_delegations": delegations,
             "followup": followup,
+            "recovery": recovery,
         });
         Ok(Some(format!(
             "Read these durable coordination records, including any previous Task and current Issue state.\n{records}"
@@ -86,6 +123,15 @@ impl Store {
 
         let operation_id = protocol::new_id();
         let mut action = build(&operation_id)?;
+        if let WorkAction::RequestReview { candidate, .. } = &action
+            && let Some(id) = candidate.strip_prefix("artifact:")
+        {
+            ensure!(protocol::valid_id(id) && self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_task_intents o JOIN received_assignments a ON a.id = o.assignment_id
+                   WHERE o.id = ?1 AND a.task_id = ?2 AND json_extract(o.operation, '$.action.kind') = 'submit_artifact')",
+                params![id, run.assignment.task_id], |row| row.get::<_, bool>(0),
+            )?, "Select an immutable artifact submitted by this Task");
+        }
         if let WorkAction::WatchExternal {
             condition,
             mode: protocol::WatchMode::Wait,
@@ -321,6 +367,19 @@ pub(super) fn has_followup(db: &Connection, assignment: &str) -> Result<bool> {
                AND json_extract(i.payload, '$.kind') IN ('issue_closed', 'task_stopped', 'task_cancelled')))",
         [assignment],
         |row| row.get(0),
+    )?)
+}
+
+pub(super) fn waiting_for_review(db: &Connection, assignment: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_task_intents o
+         WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'request_review'
+           AND NOT EXISTS(SELECT 1 FROM local_work_operations c WHERE c.assignment_id = ?1
+                 AND c.rowid > o.rowid AND json_extract(c.operation, '$.action.kind') = 'close_issue')
+           AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
+                 AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'review_finished'
+                 AND json_extract(i.payload, '$.review.request_id') = o.id))",
+        [assignment], |row| row.get(0),
     )?)
 }
 

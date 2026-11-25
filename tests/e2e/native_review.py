@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 
+from child_windows import expire_child_window
 from chat import server, wait_for
 from issue_chat import TESTS, free_port, prepare
 
@@ -72,6 +73,7 @@ def main():
                 assert rows[-1] == json.loads((root / "review.json").read_text())
                 assert rows[-1]["action"]["review"]["candidate"] == "guide-v1"
                 parent = issue["parent_issue_id"]
+                expire_child_window(root, "issue_closed")
                 wait_for(lambda: cli("issue", "read", parent),
                          lambda current: current["status"] == "completed" and current["issue_state"] == "closed")
                 query = cli("chat", "send", "main", "Check the finished fixture Issue.")["message_id"]

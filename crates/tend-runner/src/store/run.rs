@@ -17,12 +17,14 @@ pub struct LocalRun {
     pub inputs: Vec<IssueInput>,
     pub repos: Vec<Repo>,
     pub app_server: Option<AppServer>,
+    pub resume_guard: Option<String>,
+    pub resume_retry_at: i64,
 }
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 6,
+        version <= 7,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -40,6 +42,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 6 {
             migrate_app_servers(db)?;
+        }
+        if version < 7 {
+            migrate_native_context(db)?;
         }
         return Ok(());
     }
@@ -100,6 +105,19 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     super::handoff::migrate(db)?;
     super::reclaim::migrate(db)?;
     migrate_app_servers(db)?;
+    migrate_native_context(db)?;
+    Ok(())
+}
+
+fn migrate_native_context(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE local_runs ADD COLUMN native_context TEXT;
+        ALTER TABLE local_runs ADD COLUMN app_server TEXT;
+        ALTER TABLE local_runs ADD COLUMN resume_guard TEXT;
+        ALTER TABLE local_runs ADD COLUMN resume_retry_at INTEGER NOT NULL DEFAULT 0;
+        CREATE INDEX local_runs_by_assignment ON local_runs(assignment_id);",
+    )?;
+    db.pragma_update(None, "user_version", 7)?;
     Ok(())
 }
 
@@ -121,7 +139,8 @@ impl Store {
     pub fn native_turn(&self, run: &str) -> Result<Option<(String, String, Option<AppServer>)>> {
         self.0
             .query_row(
-                "SELECT r.thread_id, r.turn_id, a.app_server FROM local_runs r
+                "SELECT r.thread_id, r.turn_id,
+                        CASE WHEN r.native_context IS NULL THEN a.app_server ELSE r.app_server END FROM local_runs r
                  JOIN received_assignments a ON a.id = r.assignment_id
                  WHERE r.id = ?1 AND r.thread_id IS NOT NULL AND r.turn_id IS NOT NULL",
                 [run],
@@ -182,17 +201,18 @@ impl Store {
         tx.execute(
             "UPDATE local_issue_inputs SET run_id = ?1 WHERE id IN (
                  SELECT id FROM local_issue_inputs WHERE assignment_id = ?2 AND run_id IS NULL
-                 ORDER BY rowid LIMIT ?3
              )",
-            params![id, assignment_id, RUNNER_SYNC_BATCH],
+            params![id, assignment_id],
         )?;
         tx.commit()?;
         self.load_run(&id).map(Some)
     }
 
     pub fn load_run(&self, id: &str) -> Result<LocalRun> {
-        let (contract, repositories, thread_id, turn_id, process, app) = self.0.query_row(
-            "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start, a.app_server
+        let (contract, repositories, thread_id, turn_id, process, app, resume_guard, resume_retry_at) = self.0.query_row(
+            "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start,
+                    CASE WHEN r.native_context IS NULL THEN a.app_server ELSE r.app_server END,
+                    r.resume_guard, r.resume_retry_at
              FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
              WHERE r.id = ?1", [id],
             |row| {
@@ -201,7 +221,7 @@ impl Store {
                     None => None,
                 };
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, process,
-                    row.get::<_, Option<String>>(6)?))
+                    row.get::<_, Option<String>>(6)?, row.get(7)?, row.get(8)?))
             },
         )?;
         Ok(LocalRun {
@@ -213,7 +233,48 @@ impl Store {
             process,
             app_server: app.as_deref().map(serde_json::from_str).transpose()?,
             inputs: coordination::run_inputs(&self.0, id)?,
+            resume_guard,
+            resume_retry_at,
         })
+    }
+
+    pub fn reusable_thread(&self, run: &LocalRun, native_context: &str) -> Result<Option<String>> {
+        // Only the immediately preceding execution of this assignment can
+        // supply a candidate, and only with a recorded stop and turn.
+        let previous = self
+            .0
+            .query_row(
+                "SELECT state, thread_id, turn_id, native_context FROM local_runs
+             WHERE assignment_id = ?1 AND id != ?2 ORDER BY rowid DESC LIMIT 1",
+                params![run.assignment.placement.assignment_id, run.id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                        row.get::<_, Option<String>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        Ok(previous.and_then(|(state, thread, turn, context)| {
+            (state == "stopped" && turn.is_some() && context.as_deref() == Some(native_context))
+                .then_some(thread)
+                .flatten()
+        }))
+    }
+
+    pub fn defer_active_resume(&self, run_id: &str, thread: &str) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET resume_guard = ?2, resume_retry_at = unixepoch() + 5
+                 WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL
+                   AND (resume_guard IS NULL OR resume_guard = ?2)",
+                params![run_id, thread],
+            )? == 1,
+            "cannot defer the original prepared Run"
+        );
+        Ok(())
     }
 
     pub fn attach_process(
@@ -221,12 +282,15 @@ impl Store {
         run_id: &str,
         thread_id: &str,
         process: &ProcessIdentity,
+        native_context: &str,
+        app_server: Option<&AppServer>,
     ) -> Result<()> {
         ensure!(
             self.0.execute(
-                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4
+                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4, native_context = ?5, app_server = ?6, resume_guard = NULL, resume_retry_at = 0
              WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL",
-                params![run_id, thread_id, process.pid, process.started_at],
+                params![run_id, thread_id, process.pid, process.started_at, native_context,
+                    app_server.map(serde_json::to_string).transpose()?],
             )? == 1,
             "original Run is already attached"
         );
@@ -300,10 +364,12 @@ impl Store {
             !cancelled && coordination::waiting_for_attention(&tx, assignment_id)?;
         let has_unread = coordination::has_unread_input(&tx, assignment_id)?;
         let queued_input = outcome == RunOutcome::Completed && has_unread;
+        let waiting_for_review =
+            !cancelled && coordination::waiting_for_review(&tx, assignment_id)?;
         let waiting_for_children = !cancelled
             && !waiting_for_attention
             && !queued_input
-            && coordination::has_followup(&tx, assignment_id)?;
+            && (waiting_for_review || coordination::has_followup(&tx, assignment_id)?);
         let next_state = if cancelled {
             "cancelled"
         } else if queued_input
@@ -319,7 +385,7 @@ impl Store {
         };
         tx.execute(
             "UPDATE received_assignments SET execution_state = ?2, retains_workspace = ?3 WHERE id = ?1",
-            params![assignment_id, next_state, waiting_for_external],
+            params![assignment_id, next_state, waiting_for_external || waiting_for_review],
         )?;
         save_event(
             &tx,

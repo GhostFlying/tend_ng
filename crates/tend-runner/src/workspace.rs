@@ -17,7 +17,7 @@ struct Mount {
 pub fn directory(root: &Path, run: &LocalRun) -> PathBuf {
     match workspace_key(run) {
         Some(issue) => root.join("workspaces").join(issue),
-        None => root.join(&run.id),
+        None => root.join("tasks").join(&run.assignment.task_id),
     }
 }
 
@@ -54,6 +54,7 @@ pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
                 .base_refs
                 .get(&repo.id)
                 .map(String::as_str),
+            run.assignment.review.is_some(),
         )?;
         if !mounts.iter().any(|mount| mount.repo_id == repo.id) {
             mounts.push(Mount {
@@ -125,6 +126,7 @@ fn prepare_repository(
     target: &Path,
     issue: &str,
     reference: Option<&str>,
+    exact: bool,
 ) -> Result<String> {
     if target.exists() {
         let origin = git(
@@ -139,10 +141,27 @@ fn prepare_repository(
             existing == origin && target.join(".git").is_file(),
             "workspace has a different Git registration"
         );
-        return git(target, &["rev-parse", "HEAD"]);
+        let head = git(target, &["rev-parse", "HEAD"])?;
+        ensure!(
+            !exact || reference.is_some_and(|sha| sha.eq_ignore_ascii_case(&head)),
+            "review workspace HEAD no longer matches the bound candidate"
+        );
+        return Ok(head);
     }
     git(&repo.path, &["fetch", "origin"])?;
-    let base = if let Some(reference) = reference {
+    let base = if exact {
+        let sha = reference.context("review mount needs a bound commit")?;
+        let object = format!("{sha}^{{commit}}");
+        let base = git(
+            &repo.path,
+            &["rev-parse", "--verify", "--end-of-options", &object],
+        )?;
+        ensure!(
+            sha.eq_ignore_ascii_case(&base),
+            "review reference did not resolve to the exact commit"
+        );
+        base
+    } else if let Some(reference) = reference {
         let fetched = format!("refs/remotes/origin/{reference}^{{commit}}");
         let explicit = format!("{reference}^{{commit}}");
         git(
@@ -178,8 +197,21 @@ fn prepare_repository(
             })
             .with_context(|| format!("resolve fetched default branch for {}", repo.id))?
     };
-    let name = format!("tend/{issue}/{}", component(&repo.id));
     let target_path = target.to_str().context("workspace path must be UTF-8")?;
+    if exact {
+        // A durable review must never follow an older mutable work branch.
+        git(
+            &repo.path,
+            &["worktree", "add", "--detach", target_path, &base],
+        )?;
+        let head = git(target, &["rev-parse", "HEAD"])?;
+        ensure!(
+            head == base,
+            "prepared review HEAD does not match the bound candidate"
+        );
+        return Ok(head);
+    }
+    let name = format!("tend/{issue}/{}", component(&repo.id));
     if git(
         &repo.path,
         &[

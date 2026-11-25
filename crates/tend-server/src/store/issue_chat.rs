@@ -146,7 +146,7 @@ pub fn agent_message(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     for issue in ancestors {
-        if let Some(target) = coordination::target_task(db, &issue)? {
+        if let Some(target) = coordination::latest_task(db, &issue)? {
             enqueue(db, &target, task, &saved)?;
         }
     }

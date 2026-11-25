@@ -24,7 +24,7 @@ pub struct Config {
     pub standby: bool,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppServer {
     pub program: String,
     #[serde(default = "stdio_args")]
@@ -165,6 +165,23 @@ impl Config {
                 reason: "the assigned Agent revision, repositories, or required capabilities are unavailable".to_owned(),
             }
         }
+    }
+
+    pub fn native_agent(&self, assignment: &TaskAssignment) -> Result<&AgentProfile> {
+        let assigned = &assignment.placement.agent;
+        self.agents
+            .iter()
+            .find(|agent| {
+                agent.id == assigned.id
+                    && agent.category == assigned.category
+                    && (agent.category == "issue-router"
+                        || assignment
+                            .work
+                            .required_capabilities
+                            .iter()
+                            .all(|capability| agent.capabilities.contains(capability)))
+            })
+            .context("original named Agent or its required capabilities are unavailable")
     }
 
     pub fn repositories_for(&self, assignment: &TaskAssignment) -> Result<String> {

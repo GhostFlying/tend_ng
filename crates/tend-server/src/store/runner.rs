@@ -43,11 +43,12 @@ pub fn create_tables(db: &Connection) -> Result<()> {
 struct AvailableRunner {
     profile: RunnerProfile,
     last_seen: i64,
+    protocol: u32,
 }
 
 fn available_runners(db: &Connection) -> Result<Vec<AvailableRunner>> {
     let mut statement = db.prepare(
-        "SELECT r.profile, r.last_seen FROM runners r
+        "SELECT r.profile, r.last_seen, r.protocol FROM runners r
          WHERE r.last_seen > unixepoch() - ?1
            AND NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
            AND (coalesce(json_extract(r.profile, '$.standby'), 0) = 0 OR
@@ -59,13 +60,18 @@ fn available_runners(db: &Connection) -> Result<Vec<AvailableRunner>> {
          ORDER BY r.id",
     )?;
     let rows = statement.query_map([FRESH_SECONDS], |row| {
-        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, u32>(2)?,
+        ))
     })?;
     rows.map(|row| {
-        let (profile, last_seen) = row?;
+        let (profile, last_seen, protocol) = row?;
         Ok(AvailableRunner {
             profile: serde_json::from_str(&profile)?,
             last_seen,
+            protocol,
         })
     })
     .collect()
@@ -90,7 +96,16 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
         |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?,
                   row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)),
     )?;
+    let review = super::tend_review::binding(db, &dispatch.task_id)?;
+    let bound_author = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tend_reviews WHERE author_task_id = ?1)",
+        [&dispatch.task_id],
+        |row| row.get::<_, bool>(0),
+    )?;
     for available in available_runners(db)? {
+        if available.protocol < 2 && (review.is_some() || bound_author) {
+            continue;
+        }
         let profile = available.profile;
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
@@ -106,8 +121,10 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
                  AND coalesce(holder.workspace_key, i.parent_issue_id) = coalesce(candidate.workspace_key, c.parent_issue_id)
                  AND holder.status NOT IN ('completed','failed','cancelled')
                  AND (a.runner_id IS NULL OR a.runner_id != ?2 OR a.state != 'accepted')
-                 AND (SELECT json_extract(r.observation, '$.phase.waiting_for_external')
+                 AND ((SELECT json_extract(r.observation, '$.phase.waiting_for_external')
                       FROM task_runs r WHERE r.task_id = holder.id ORDER BY r.rowid DESC LIMIT 1) = 1
+                     OR EXISTS(SELECT 1 FROM tend_reviews v LEFT JOIN issue_inputs p ON p.id = v.result_input_id
+                               WHERE v.author_task_id = holder.id AND p.run_id IS NULL))
             )",
             params![dispatch.task_id, profile.runner_id], |row| row.get::<_, bool>(0),
         )? { continue; }
@@ -142,6 +159,7 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
                 previous_task_id,
                 issue_state: dispatch.issue_state,
             }),
+            review,
             work: dispatch.work,
         };
         let contract = serde_json::to_string(&assignment)?;
@@ -302,25 +320,28 @@ impl Store {
         let stored = self
             .db
             .query_row(
-                "SELECT host_id, profile, last_seen + ?2 > unixepoch() FROM runners WHERE id = ?1",
+                "SELECT host_id, profile, last_seen + ?2 > unixepoch(), protocol FROM runners WHERE id = ?1",
                 params![profile.runner_id, HEARTBEAT_WRITE_SECONDS],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, bool>(2)?,
+                        row.get::<_, u32>(3)?,
                     ))
                 },
             )
             .optional()?;
         if stored
             .as_ref()
-            .is_some_and(|(host, _, _)| host != &profile.host_id)
+            .is_some_and(|(host, _, _, _)| host != &profile.host_id)
         {
             return Ok(None);
         }
         let refresh = task.is_none()
-            && !stored.is_some_and(|(_, previous, recent)| recent && previous == profile_json);
+            && !stored.is_some_and(|(_, previous, recent, version)| {
+                recent && previous == profile_json && version == request.protocol
+            });
         let reserved = task.is_none()
             && self.db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runner_assignments
@@ -351,7 +372,12 @@ impl Store {
                 confirmed_receipts: Vec::new(),
                 confirmed_runs: Vec::new(),
                 confirmed_operations: Vec::new(),
-                inputs: coordination::pending_inputs(&self.db, &profile.runner_id, task)?,
+                inputs: coordination::pending_inputs(
+                    &self.db,
+                    &profile.runner_id,
+                    task,
+                    request.protocol,
+                )?,
                 controls: super::control::pending(&self.db, &profile.runner_id, task)?,
                 drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
                 uploads: super::artifacts::pending(&self.db, &profile.runner_id, task)?,
@@ -491,7 +517,7 @@ impl Store {
                 )?;
             }
         }
-        let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task)?;
+        let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task, request.protocol)?;
         let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
         let controls = super::control::pending(&tx, &profile.runner_id, task)?;
         let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;

@@ -187,6 +187,9 @@ fn schedule(mut store: Store) {
         if let Err(error) = store.release_external_routes() {
             eprintln!("Release routed external facts: {error:#}");
         }
+        if let Err(error) = store.release_child_windows() {
+            eprintln!("Release child update windows: {error:#}");
+        }
         if let Err(error) = store.schedule_assignments(&mut after) {
             eprintln!("Schedule Runner assignments: {error:#}");
         }
