@@ -35,7 +35,7 @@ CLI 覆盖全部公开用户能力。Web 提供其中一部分，两者直接调
 | 名称 | 职责 |
 | --- | --- |
 | **Router Agent（Router）** | 由 Server 托管并直接绑定主 Chat 的具名 Agent。接收主 Chat 的用户输入、Issue 上报和归属未定的事实，负责判断、路由、跨 Issue 协调和回复用户。 [Router 托管与恢复](chat-routing.md#router-托管与恢复) |
-| **Issue Agent** | 顶层 Issue 的协调 Owner，使用专属的 `issue-router`。职责限于保留用户目标和约束、委派子 Issue、跟进结果、汇总交付与决定顶层 Issue 何时结案。 |
+| **Issue Agent** | 顶层 Issue 的协调 Owner，使用专属的 `issue-router`。按用户的原目标、授权和停点委派与验收子 Issue，跟进并汇总交付，决定顶层 Issue 何时结案。 |
 | **Work Agent** | 工作子 Issue 的 Owner，负责技术计划、调查、实际执行、验证、产物和子 Issue 结案。按具体工作要求选择具名配置。 |
 | **Review Agent** | 通过 `review` 分配的具名 Agent，担任审阅子 Issue 的 Owner 并交付独立审阅结果。 |
 
@@ -55,7 +55,7 @@ Issue Owner 表示当前 Issue 的负责人。Server 为顶层 Issue 和各子 I
 
 Issue Agent 取得本地委派回执并处理完手头工作后可结束本轮，停妥后归还 slot。普通子 Issue 状态变化、Agent 留言及新交付立即入账，经每个父 Task 的固定五分钟窗口合并唤醒。用户输入、控制请求和明确阻塞及时送达。顶层结案后同样收到这些输入并唤醒 Issue Agent，由它决定是否重开。晚到的原记录及结果保存在来源子 Issue。 [父子 Issue 的等待与唤醒](task-lifecycle.md#父子-issue-的等待与唤醒)
 
-Work Agent 可在任意阶段提交产物。各 Issue 的 Owner 显式决定自己负责的 Issue 何时结案。父 Issue 可在子 Issue 仍在推进时由 Issue Agent 结案，子 Issue 继续按各自的实际状态记录。Work Agent 决定实现范围内的审阅安排，复杂任务的预置 prompt 要求寻求独立审阅。Codex 原生 subagent 的审阅记录保存在当前工作子 Issue，委派给 Review Agent 则创建 `review` 子 Issue。 [工作委派与结案](task-lifecycle.md#工作委派与-issue-结案) · [独立审阅](task-lifecycle.md#独立审阅)
+Work Agent 可在任意阶段提交产物。各 Issue 的 Owner 显式决定自己负责的 Issue 何时结案。父 Issue 可在子 Issue 仍在推进时由 Issue Agent 结案，子 Issue 继续按各自的实际状态记录。调查默认直接交付，复杂实现的预置 prompt 指引 Work Agent 寻求对实际候选的独立审阅。Codex 原生 subagent 的审阅记录保存在当前工作子 Issue，委派给 Review Agent 则创建 `review` 子 Issue。 [工作委派与结案](task-lifecycle.md#工作委派与-issue-结案) · [独立审阅](task-lifecycle.md#独立审阅)
 
 由 Tend 委派的审阅将所审候选、结论和证据回传发起方，并按原委派关系逐级上报。发起方按实际发现决定后续修复或复审。审阅执行按通用 Task 规则结算，审阅结论以实际交付的记录为准。 [独立审阅](task-lifecycle.md#独立审阅)
 

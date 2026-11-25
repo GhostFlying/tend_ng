@@ -169,7 +169,10 @@ for line in sys.stdin:
         case "initialized":
             pass
         case "thread/start":
-            assert "publish the report with its files and the related Attention" in params["developerInstructions"]
+            instructions = params["developerInstructions"]
+            assert "Keep read-only investigations and recommendations pending confirmation read-only." in instructions
+            assert "not a fresh user request or authorization to implement" in instructions
+            assert "publish the report with its files and the related Attention" in instructions
             thread_id = str(uuid.uuid4())
             with database:
                 database.execute(

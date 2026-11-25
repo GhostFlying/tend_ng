@@ -4,7 +4,9 @@
 
 ## 工作委派与 Issue 结案
 
-Issue Agent 管理顶层 Issue 的目标、约束和跟进。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。只有工作确可独立并行、或关键结论改变而值得独立重新判断时才拆分或复审。是否拆分、如何审阅由责任 Agent 按目标和仓库约定决定。
+Issue Agent 按用户原目标、授权和停点委派与验收。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。
+
+只读调查或待确认建议以一份主报告说明根因证据、推荐以及会影响决定的取舍或未知，备查证据按需提供。需要用户作决定时沿现有 Attention 等待，保持原停点。已直接授权的实现按授权完成，不另设调查或审批阶段。
 
 **已确认。** 子 Issue 之间的先后顺序、代码起点与交付衔接由 Issue Agent 协调。后续子项需要前一项改动时，Issue Agent 可以安排它在共用 workspace 接着做，也可以为独立 worktree 指定前一项交付的分支或提交。需要整合多项交付并验证时，Issue Agent 可以把这项工作交给合适的工作子 Issue。 [新 worktree 的起点](server-runner.md#新-worktree-的起点)
 
@@ -63,6 +65,8 @@ Issue Agent 按原取消范围发出停止控制后，可以显式将父 Issue �
 ## 独立审阅
 
 **已确认。** Work Agent 可以在当前工作子 Issue 内调用未参与该范围实现的 Codex 原生 subagent 完成自选独审。由 Tend 单独分配审阅时，创建 `review` 子 Issue，由 Review Agent 承担。用户、仓库或平台明确要求的审阅方式仍作用于相应操作。
+
+调查通常直接交付，用户明确要求复核或新证据可能改变关键结论时，只复核有必要的点。复杂实现建议审阅实际候选。
 
 Runner 通过 App Server 观察实际执行，记录发起线程和子线程的关联。创建回执记录 subagent 已创建。子回合终态或 `wait` 返回的该子 Agent 状态提供实际完成、失败或中断证据。已持久保存的线程历史按原 thread ID 补读，缺少终态证据时保持待确认。 [原生创建与等待事件](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/event_mapping.rs#L97-L134) · [等待结果的状态](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/event_mapping.rs#L224-L258)
 

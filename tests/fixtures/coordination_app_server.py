@@ -150,8 +150,14 @@ thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
 assert Path(start["params"]["cwd"]) == Path.cwd()
 tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
+instructions = start["params"]["developerInstructions"]
 if "tend_delegate_work" in tools:
-    assert "A report or attachment receipt is not Issue completion." in start["params"]["developerInstructions"]
+    assert "Deliver one readable main report" in instructions
+    assert "When implementation is directly authorized, carry it through within scope" in instructions
+    assert "A report or attachment receipt is not Issue completion." in instructions
+elif worker:
+    assert "Deliver investigations directly by default." in instructions
+    assert "only if the user explicitly asks for it or new evidence could change a key conclusion" in instructions
 respond(start, {"thread": {"id": thread_id}})
 turn = request("turn/start")
 items = turn["params"]["input"]
@@ -208,7 +214,7 @@ elif role == "child":
     assert (Path("repos/example") / "README.md").read_text() == "A fixed repository.\n"
     (Path("repos/example") / "guide.txt").write_text("A fixture guide.\n")
     if scenario == "native-review":
-        assert "seek independent review" in start["params"]["developerInstructions"]
+        assert "For complex implementation, seek independent review of the actual candidate" in instructions
         receiver = "native-review-child"
         history = [
             {"id": "spawn", "tool": "spawnAgent", "status": "completed", "agentsStates": {receiver: {"status": "running"}}},
