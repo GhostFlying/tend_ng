@@ -100,21 +100,25 @@ try {
     const cardLink = card.getByRole("link", { name: parent, exact: true });
     assert.equal(
       await cardLink.getAttribute("href"),
-      `/issues/${parentNumber}/overview`,
+      `/issues/${parentNumber}`,
     );
     await cardLink.click();
     await page.getByRole("heading", { name: parent, exact: true }).waitFor();
     const overview = page.getByRole("main");
-    await overview.getByText("已完成 · example", { exact: true }).waitFor();
+    await overview
+      .locator(".detail-stage")
+      .getByText("已完成", { exact: true })
+      .waitFor();
+    await overview
+      .getByRole("complementary", { name: "工作属性" })
+      .getByText("example", { exact: true })
+      .waitFor();
     const child = overview.getByRole("link", {
       name: `#${childNumber} 核对安装步骤`,
       exact: true,
     });
     await child.waitFor();
-    assert.equal(
-      await child.getAttribute("href"),
-      `/issues/${childNumber}/overview`,
-    );
+    assert.equal(await child.getAttribute("href"), `/issues/${childNumber}`);
     assert.equal(await page.title(), "Tend");
     assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth),
@@ -133,11 +137,12 @@ try {
       await overview.getByRole("link", { name: "example/guide #73" }).count(),
       1,
     );
-    const chat = overview.getByRole("link", { name: "进入 Issue 对话" });
-    const ownerPath = await chat.getAttribute("href");
-    assert.equal(ownerPath, `/issues/${parentNumber}`);
-    assert.equal(new URL(page.url()).pathname, ownerPath + "/overview");
-    assert.equal(await page.getByLabel("发消息给 Issue Owner").count(), 0);
+    const ownerPath = `/issues/${parentNumber}`;
+    assert.equal(new URL(page.url()).pathname, ownerPath);
+    await page.getByLabel("发消息给 Issue Owner").waitFor();
+    await overview
+      .getByRole("heading", { name: "Issue 对话与工作记录" })
+      .waitFor();
     await overview.getByRole("link", { name: "查看原消息" }).click();
     await page.waitForURL(`${url}/#message-${source}`);
     await waitForVisibleMessage(page, source);
@@ -147,8 +152,7 @@ try {
       );
     assert.equal(olderReads("/api/v1/chats/main/messages").length, 2);
 
-    await page.goBack();
-    await chat.click();
+    await page.goto(url + ownerPath);
     const discussionHeading = page.getByRole("heading", {
       name: parent,
       exact: true,
@@ -185,17 +189,17 @@ try {
     await page.goto(`${url}/issues/${parentId}#message-${issueMessage}`);
     await discussionHeading.waitFor();
     await waitForVisibleMessage(page, issueMessage);
-    const overviewLink = page.getByRole("link", {
-      name: "Issue 概览",
-      exact: true,
-    });
-    assert.equal(
-      await overviewLink.getAttribute("href"),
-      `${ownerPath}/overview`,
+    await page.goto(
+      `${url}/issues/${parentId}/overview#message-${issueMessage}`,
     );
-    await page.goto(`${url}/issues/${parentId}/overview`);
     await discussionHeading.waitFor();
-    assert.equal(await chat.getAttribute("href"), ownerPath);
+    await waitForVisibleMessage(page, issueMessage);
+    assert.equal(
+      await overview
+        .getByRole("link", { name: "跳到 Issue 对话" })
+        .getAttribute("href"),
+      "#issue-discussion",
+    );
     await page.getByRole("link", { name: "返回看板" }).click();
     if (width === 390) {
       await page.getByRole("button", { name: /^已取消/ }).click();
@@ -253,10 +257,16 @@ try {
     }
     await page.getByRole("link", { name: "稍后整理发布说明" }).click();
     await overview
-      .getByText("待安排 · release-notes", { exact: true })
+      .locator(".detail-stage")
+      .getByText("待安排", { exact: true })
       .waitFor();
-    assert.equal(await overview.getByRole("list").count(), 0);
-    await chat.click();
+    await overview
+      .getByRole("complementary", { name: "工作属性" })
+      .getByText("release-notes", { exact: true })
+      .waitFor();
+    await overview
+      .getByText("没有可追溯到原报告消息的交付。", { exact: false })
+      .waitFor();
     await page.getByText("暂无 Issue Owner。", { exact: false }).waitFor();
     await page.route("**/api/v1/issue-board", (route) =>
       route.fulfill({ json: { issues: [], next_before: null } }),
@@ -273,7 +283,7 @@ try {
     await page.close();
   }
   console.log(
-    "PASS Issue overview, PR links, and third-page message anchors in desktop and mobile Chromium",
+    "PASS unified Issue details, PR links, and third-page message anchors in desktop and mobile Chromium",
   );
 } finally {
   await browser.close();

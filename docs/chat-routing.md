@@ -66,7 +66,7 @@ Router 空闲时按这个顺序选取已到达的输入。一轮可处理多条�
 
 ## Issue Chat 合并展示
 
-父 Issue Chat 参考 Multica 的交互，把父 Issue 和下属各级子 Issue 的留言按时间合并到一条时间线。每条留言显示原作者、所属 Issue，并保留原留言身份。合并时间线按页读取原留言。
+父 Issue Chat 参考 Multica 的交互，把父 Issue 和下属各级子 Issue 的留言按时间合并到一条时间线。每条留言显示原作者、所属 Issue，并保留原留言身份。合并时间线在同一 Issue 详情页展现并按页读取原留言。没有锚点时加载最新一页，消息锚点沿分页游标定位旧留言。原 Chat 的报告可从详情回到原消息，不改变回复的目标会话。
 
 在父 Issue 发布的新留言发给父 Issue 的 Owner。回复某条子 Issue 留言时，沿被回复留言的归属写入该子 Issue，并送给该 Issue 的 Owner。
 

@@ -22,7 +22,7 @@ CLI 覆盖全部公开用户能力。Web 提供其中一部分，两者直接调
 
 看板以顶层 Issue 为入口。待安排记录允许稍后启动，待推进工作可进入分配或续跑，树上有实际 Run 时显示进行中，全部工作依赖已登记的条件或回复时显示等待中。已完成和已取消跟随业务结算。需要用户检查的事项通过原 Chat 的 Attention 处理，卡片显示待你决定。 [看板阶段](plans/issue-board-phases.md)
 
-每个 Issue 共用一个全局递增且永久保留的正整数编号，覆盖父项、子项及已完成或已取消的 Issue。看板、概览、讨论、主 Chat 和通知显示 `#N`。讨论和概览分别使用 `/issues/N` 和 `/issues/N/overview`，原 UUID 链接继续有效，UUID 保持为协议及持久关联的身份。
+每个 Issue 共用一个全局递增且永久保留的正整数编号，覆盖父项、子项及已完成或已取消的 Issue。看板、Issue 详情、主 Chat 和通知显示 `#N`。详情与讨论共用 `/issues/N`，旧 `/issues/N/overview` 和 UUID 链接继续打开同一页，UUID 保持为协议及持久关联的身份。
 
 用户在 Chat 和 CLI 看到同一条 Attention 及处理状态。后台结果更新对应的消息，保留用户当前的输入焦点、草稿和阅读位置。通知独立展示 Issue 状态流转等只读动态，包含时间、工作和详情链接。首期通知采用无未读标记的呈现。
 
@@ -81,7 +81,7 @@ Agent 在 Skill 指引下使用本机注入的 Tend 工具。Router 直接在 Se
 
 ## 4. 消息投递、外部事件与等待
 
-看板卡片打开 Issue 概览，显示标题、看板阶段、工作目标和已登记的关联。用户可从概览进入原 Issue 对话或打开原 Chat 消息。Issue 对话显示近期讨论、当前 Owner 和轻量输入框。父 Issue Chat 将自身和下属各级子 Issue 的留言按时间合并展示，保留原作者和所属 Issue。派发和新输入保存在各自的目标 Issue，回复沿原留言归属送达。 [Issue 看板概览](plans/issue-overview.md) · [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示)
+看板卡片打开 Issue 详情，标题、阶段、工作目标、可追溯的评审报告和原 Issue 对话在同一页。用户可直接回复或回到原 Chat 消息。父 Issue Chat 将自身和下属各级子 Issue 的留言按时间合并展示，保留原作者和所属 Issue。派发和新输入保存在各自的目标 Issue，回复沿原留言归属送达。 [Issue 详情与原讨论同页](plans/issue-detail.md) · [Issue Chat 合并展示](chat-routing.md#issue-chat-合并展示)
 
 Agent 通过显式留言工具把正文写入 Issue Chat。执行过程在同一时间线默认收起，用户点击后按原 Run 从实际执行实例加载。 [Issue Chat 的留言与执行过程](chat-routing.md#issue-chat-的留言与执行过程)
 

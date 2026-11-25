@@ -1,8 +1,8 @@
-use super::{PAGE_SIZE, Store, artifacts, pull, work::read_list};
+use super::{PAGE_SIZE, Store, artifacts, pull, reports, work::read_list};
 use anyhow::Result;
 use protocol::{
-    BoardAttention, BoardStage, BoardWait, IssueBoard, IssueCard, IssueOverview,
-    IssueOverviewArtifact, IssueOverviewChild,
+    BoardAttention, BoardStage, BoardWait, DeliverySource, IssueBoard, IssueCard, IssueDecision,
+    IssueOverview, IssueOverviewArtifact, IssueOverviewChild,
 };
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use std::collections::HashMap;
@@ -96,9 +96,12 @@ impl Store {
         let files = {
             let mut query = tx.prepare(&format!(
                 "{TREE}
-                 SELECT a.id, a.name, a.bytes, a.available, CASE WHEN i.id != tree.root THEN i.title END
+                 SELECT a.id, a.name, a.bytes, a.available, CASE WHEN i.id != tree.root THEN i.title END,
+                        i.id, i.title, n.number, a.task_id
                  FROM tree JOIN artifacts a ON a.issue_id = tree.issue
                  JOIN issues i ON i.id = a.issue_id
+                 JOIN issue_short_numbers n ON n.issue_id = i.id
+                 JOIN issues root ON root.id = tree.root AND root.source_seq = i.source_seq
                  ORDER BY a.rowid"
             ))?;
             query
@@ -106,6 +109,33 @@ impl Store {
                     Ok(IssueOverviewArtifact {
                         artifact: artifacts::artifact(row)?,
                         issue_title: row.get(4)?,
+                        source: Some(DeliverySource {
+                            issue: IssueOverviewChild {
+                                id: row.get(5)?,
+                                title: row.get(6)?,
+                                short_number: row.get(7)?,
+                            },
+                            task_id: row.get(8)?,
+                        }),
+                    })
+                })?
+                .collect::<rusqlite::Result<_>>()?
+        };
+        let reports = reports::delivery_reports(&tx, id)?;
+        let decisions = {
+            let mut query = tx.prepare(&format!(
+                "{TREE}
+                 SELECT question.id, question.text
+                 FROM tree JOIN attentions a ON a.issue_id = tree.issue
+                 JOIN chat_messages question ON question.seq = a.question_seq
+                 WHERE a.answer_input_id IS NULL AND question.chat_id = ?2
+                 ORDER BY a.rowid"
+            ))?;
+            query
+                .query_map(params![roots, chat_id], |row| {
+                    Ok(IssueDecision {
+                        message_id: row.get(0)?,
+                        text: row.get(1)?,
                     })
                 })?
                 .collect::<rusqlite::Result<_>>()?
@@ -124,6 +154,8 @@ impl Store {
             children,
             pulls: card.pulls,
             artifacts: files,
+            reports,
+            decisions,
         }))
     }
 

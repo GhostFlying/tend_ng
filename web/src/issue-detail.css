@@ -1,0 +1,501 @@
+.content[data-issue="true"] {
+  --detail-width: 1120px;
+  --detail-edge: clamp(24px, 4%, 48px);
+  --detail-properties: 220px;
+  --detail-gap: clamp(24px, 4%, 48px);
+}
+
+.issue-detail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--detail-properties);
+  column-gap: var(--detail-gap);
+  width: 100%;
+  max-width: var(--detail-width);
+  margin-inline: auto;
+  padding: 32px var(--detail-edge);
+  overflow-wrap: anywhere;
+}
+
+.issue-detail-summary,
+.issue-discussion {
+  grid-column: 1;
+  min-width: 0;
+}
+
+.issue-properties {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  min-width: 0;
+  align-self: start;
+}
+
+.content[data-issue="true"] > .dock {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--detail-properties);
+  column-gap: var(--detail-gap);
+  width: 100%;
+  max-width: var(--detail-width);
+  margin-inline: auto;
+  padding-inline: var(--detail-edge);
+  padding-top: 5px;
+}
+
+.content[data-issue="true"] > .dock > .lane {
+  grid-column: 1;
+  max-width: none;
+}
+
+.content[data-issue="true"] .composer {
+  min-height: 96px;
+  padding: 8px 12px;
+}
+
+.content[data-issue="true"] .composer textarea {
+  min-height: 32px;
+}
+
+.content[data-issue="true"] .compose-actions {
+  margin-top: 4px;
+}
+
+.issue-crumb {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.issue-crumb > :last-child {
+  color: var(--label);
+  font-weight: 600;
+}
+
+.detail-heading h1 {
+  margin: 10px 0 8px;
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 1.22;
+  font-weight: 680;
+  letter-spacing: -0.015em;
+}
+
+.detail-kicker,
+.detail-jumps,
+.detail-section-heading,
+.delivery-report-heading,
+.delivery-file-heading,
+.delivery-file-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+}
+
+.detail-kicker {
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.detail-stage {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 1px 8px;
+  letter-spacing: 0;
+}
+
+.detail-stage::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 100%;
+  background: currentColor;
+}
+
+.detail-stage[data-stage="done"]::before,
+.detail-stage[data-stage="in_progress"]::before {
+  background: #22a06b;
+}
+
+.detail-stage[data-stage="waiting"]::before {
+  background: var(--warning);
+}
+
+.detail-jumps,
+.detail-muted,
+.detail-empty,
+.detail-section-heading > span,
+.delivery-report-heading,
+.delivery-file-actions,
+.delivery-identity,
+.delivery-kind {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.issue-detail a {
+  text-underline-offset: 3px;
+}
+
+.issue-objective {
+  margin-top: 16px;
+  font-size: 14px;
+  color: var(--muted);
+}
+
+.issue-objective p,
+p.issue-objective {
+  white-space: pre-wrap;
+}
+
+.issue-objective summary,
+.delivery-identity summary,
+.delivery-preview summary,
+.work-deliveries summary {
+  cursor: pointer;
+}
+
+.issue-objective summary {
+  list-style: none;
+}
+
+.issue-objective summary::-webkit-details-marker {
+  display: none;
+}
+
+.issue-objective-preview {
+  display: block;
+}
+
+.issue-objective-expand {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.issue-objective[open] .issue-objective-preview {
+  display: none;
+}
+
+.issue-objective[open] .issue-objective-expand::before {
+  content: "收起";
+}
+
+.issue-objective[open] p {
+  margin-top: 6px;
+}
+
+.detail-section,
+.issue-discussion {
+  margin-top: 24px;
+  padding-top: 18px;
+  border-top: 1px solid var(--border);
+}
+
+.detail-section-heading {
+  justify-content: space-between;
+  margin-bottom: 10px;
+}
+
+.detail-section-heading h2,
+.detail-properties h2 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 650;
+}
+
+#issue-discussion,
+.delivery-report,
+.issue-properties {
+  scroll-margin-block: 16px;
+}
+
+.delivery-report,
+.detail-empty,
+.issue-decisions,
+.detail-properties {
+  padding: 14px 16px;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--sidebar);
+}
+
+.delivery-report + .delivery-report {
+  margin-top: 12px;
+}
+
+.delivery-report:target,
+.issue-discussion .message:target,
+.issue-discussion .run-row:target {
+  outline: 2px solid var(--border);
+  outline-offset: 3px;
+}
+
+.delivery-report-heading {
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 8px;
+}
+
+.delivery-report-heading > span {
+  font-weight: 650;
+}
+
+.delivery-report-heading > a {
+  white-space: nowrap;
+}
+
+.delivery-files,
+.issue-decisions,
+.detail-properties ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.delivery-files {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.delivery-file {
+  min-width: 0;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+}
+
+.delivery-file-heading {
+  justify-content: space-between;
+  align-items: center;
+  gap: 2px 8px;
+}
+
+.delivery-kind {
+  font-size: 11px;
+  font-weight: 600;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.delivery-file-actions {
+  margin-top: 4px;
+  row-gap: 2px;
+}
+
+.delivery-identity,
+.delivery-preview {
+  margin-top: 6px;
+}
+
+.delivery-preview summary {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.delivery-preview[open] .markdown {
+  margin-top: 12px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.delivery-identity dd,
+.detail-properties dd {
+  margin: 0;
+}
+
+.delivery-identity dl {
+  margin: 6px 0;
+}
+
+.delivery-identity dl > div,
+.detail-properties dl > div {
+  display: grid;
+  grid-template-columns: 4em minmax(0, 1fr);
+  gap: 4px;
+}
+
+.detail-properties dl {
+  margin: 12px 0 0;
+}
+
+.detail-properties dl > div + div {
+  margin-top: 6px;
+}
+
+.detail-properties dt {
+  color: var(--muted);
+}
+
+.detail-properties section {
+  border-top: 1px solid var(--border);
+  margin-top: 12px;
+  padding-top: 10px;
+  font-size: 13px;
+}
+
+.detail-properties h3 {
+  margin: 0 0 6px;
+  font-size: inherit;
+}
+
+.detail-properties li + li {
+  margin-top: 5px;
+}
+
+.issue-decisions li + li {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border);
+}
+
+.issue-decisions a {
+  display: inline-block;
+  margin-top: 6px;
+}
+
+.work-deliveries {
+  padding: 8px 12px;
+  margin-bottom: 18px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--sidebar);
+}
+
+.work-deliveries summary {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.work-deliveries .detail-muted {
+  margin-top: 8px;
+}
+
+.work-deliveries summary span {
+  color: var(--muted);
+  margin-inline-start: 6px;
+}
+
+.issue-discussion .older-messages {
+  display: block;
+  margin: 0 0 16px;
+}
+
+.issue-discussion .messages {
+  gap: 20px;
+}
+
+.markdown {
+  min-width: 0;
+  font-size: 14px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+
+.markdown > :first-child {
+  margin-top: 0;
+}
+
+.markdown > :last-child {
+  margin-bottom: 0;
+}
+
+.markdown :is(h1, h2, h3, h4, h5, h6) {
+  font-size: 1.04em;
+  line-height: 1.35;
+  margin: 16px 0 6px;
+}
+
+.markdown h1 {
+  font-size: 1.22em;
+}
+
+.markdown h2 {
+  font-size: 1.12em;
+}
+
+.markdown p + p,
+.markdown :is(ul, ol) {
+  margin: 8px 0;
+}
+
+.markdown :is(ul, ol) {
+  padding-inline-start: 1.6em;
+}
+
+.markdown .markdown-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+  overscroll-behavior-inline: contain;
+  margin-block: 10px;
+}
+
+.markdown table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.markdown th,
+.markdown td {
+  border: 1px solid var(--border);
+  padding: 5px 9px;
+  text-align: start;
+  max-width: 32ch;
+  overflow-wrap: normal;
+}
+
+.markdown th {
+  background: var(--sidebar);
+}
+
+.markdown pre {
+  white-space: pre;
+  overflow-wrap: normal;
+  padding: 8px 10px;
+  background: var(--bubble);
+  border-radius: 6px;
+}
+
+.markdown :not(pre) > code {
+  padding: 0 3px;
+  background: var(--bubble);
+  border-radius: 3px;
+}
+
+@media (max-width: 860px) {
+  .content[data-issue="true"] {
+    --detail-edge: 16px;
+  }
+
+  .issue-detail,
+  .content[data-issue="true"] > .dock {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .issue-detail {
+    padding-block: 24px;
+  }
+
+  .issue-properties {
+    grid-column: 1;
+    grid-row: auto;
+    margin-top: 24px;
+  }
+
+  .delivery-report,
+  .detail-empty,
+  .issue-decisions {
+    padding: 12px;
+  }
+}

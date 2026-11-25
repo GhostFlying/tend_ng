@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import {
   chatLink,
-  issueOverviewLink,
+  issueLink,
   issueStageLabels,
   issueTitle,
   pullLinkLabel,
@@ -92,7 +92,7 @@ function Card({ issue }: { issue: BoardIssue }) {
       {repositories && <div className="board-card-repos">{repositories}</div>}
       <a
         className="board-card-title"
-        href={issueOverviewLink(issue.id, issue.short_number)}
+        href={issueLink(issue.id, issue.short_number)}
       >
         {issueTitle(issue.title, issue.short_number)}
       </a>

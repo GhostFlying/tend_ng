@@ -10,8 +10,12 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
         || path
             .strip_prefix("/issues/")
             .map(|route| route.strip_suffix("/overview").unwrap_or(route))
-            .is_some_and(protocol::valid_id)
-    {
+            .is_some_and(|reference| {
+                protocol::valid_id(reference)
+                    || reference
+                        .strip_prefix("%23")
+                        .is_some_and(|digits| protocol::parse_issue_number(digits).is_some())
+            }) {
         (root.join("index.html"), "text/html; charset=utf-8")
     } else {
         let name = path.strip_prefix("/assets/")?;

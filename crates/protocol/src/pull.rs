@@ -148,6 +148,10 @@ pub struct IssueOverview {
     pub children: Vec<IssueOverviewChild>,
     pub pulls: Vec<PullLink>,
     pub artifacts: Vec<IssueOverviewArtifact>,
+    #[serde(default)]
+    pub reports: Vec<IssueDeliveryReport>,
+    #[serde(default)]
+    pub decisions: Vec<IssueDecision>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -164,6 +168,27 @@ pub struct IssueOverviewArtifact {
     pub artifact: crate::Artifact,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub issue_title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<DeliverySource>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DeliverySource {
+    pub issue: IssueOverviewChild,
+    pub task_id: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueDeliveryReport {
+    pub message_id: String,
+    pub text: String,
+    pub artifacts: Vec<IssueOverviewArtifact>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct IssueDecision {
+    pub message_id: String,
+    pub text: String,
 }
 
 pub fn issue_pulls_path(issue: &str) -> String {

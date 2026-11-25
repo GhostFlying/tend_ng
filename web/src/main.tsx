@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { lazy, Suspense, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { issueOverviewLink, issueTitle, readMessages } from "./api";
+import { readMessages } from "./api";
 import { IssueBoard } from "./IssueBoard";
-import { IssueOverview } from "./IssueOverview";
 import { Chat } from "./Chat";
 import { Notifications } from "./Notifications";
 import { Agents, Hosts } from "./Resources";
@@ -14,6 +13,11 @@ import {
   resourceLinks,
 } from "./ResourceNavigation";
 import "./style.css";
+import "./issue-detail.css";
+
+const IssueDetail = lazy(() =>
+  import("./IssueDetail").then(({ IssueDetail }) => ({ default: IssueDetail })),
+);
 
 const path = window.location.pathname;
 const board = path === "/issues";
@@ -28,9 +32,10 @@ const resourceTitle =
 const tokenKey = "tend.token.v1";
 const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
 const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
-const issueRoute = /^\/issues\/([a-zA-Z0-9_-]+)(\/overview)?$/.exec(path);
-const issue = issueRoute?.[1];
-const overview = !!issueRoute?.[2];
+const issueRoute =
+  /^\/issues\/(%23[1-9][0-9]*|[a-zA-Z0-9_-]+)(?:\/overview)?$/.exec(path);
+const issue = issueRoute ? decodeURIComponent(issueRoute[1]) : undefined;
+const issueNumber = issue?.match(/^#?([1-9][0-9]*)$/)?.[1];
 
 function Connect({ onConnect }: { onConnect: (token: string) => void }) {
   const [token, setToken] = useState("");
@@ -82,10 +87,6 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
 function App() {
   const [token, setToken] = useState(() => sessionStorage.getItem(tokenKey));
   const [reachable, setReachable] = useState<boolean | null>(null);
-  const [issueHeader, setIssueHeader] = useState<{
-    title: string;
-    number?: number;
-  }>();
 
   function connect(value: string) {
     sessionStorage.setItem(tokenKey, value);
@@ -97,7 +98,6 @@ function App() {
     sessionStorage.removeItem(tokenKey);
     setReachable(null);
     setToken(null);
-    setIssueHeader(undefined);
   }
 
   return (
@@ -157,32 +157,23 @@ function App() {
           </nav>
         </aside>
       )}
-      <div className="content">
+      <div className="content" data-issue={!!issue}>
         <header
           className={
             token && resourceTitle ? "header resource-header" : "header"
           }
           data-resource={token && resourceTitle ? path.slice(1) : undefined}
         >
-          {token && overview ? (
-            <a href="/issues" className="text-button">
-              返回看板
-            </a>
-          ) : token && issue ? (
-            <div className="issue-heading">
-              <a
-                href={issueOverviewLink(issue, issueHeader?.number)}
-                className="text-button"
-              >
-                Issue 概览
+          {token && issue ? (
+            <nav className="issue-crumb" aria-label="当前位置">
+              <a href="/issues" className="text-button">
+                返回看板
               </a>
               <span aria-hidden="true">/</span>
-              <h1>
-                {issueHeader
-                  ? issueTitle(issueHeader.title, issueHeader.number)
-                  : "Issue 对话"}
-              </h1>
-            </div>
+              <span>
+                {issueNumber ? `Issue #${issueNumber}` : "Issue 详情"}
+              </span>
+            </nav>
           ) : (
             <h1>
               {(token && (resourceTitle || (board && "Issue 看板"))) || "Tend"}
@@ -204,12 +195,21 @@ function App() {
         {token ? (
           board ? (
             <IssueBoard token={token} onReachable={setReachable} />
-          ) : issue && overview ? (
-            <IssueOverview
-              token={token}
-              issue={issue}
-              onReachable={setReachable}
-            />
+          ) : issue ? (
+            <Suspense
+              fallback={
+                <main className="lane chat" role="status">
+                  正在读取 Issue 详情…
+                </main>
+              }
+            >
+              <IssueDetail
+                token={token}
+                issue={issue}
+                chatId={chatId}
+                onReachable={setReachable}
+              />
+            </Suspense>
           ) : path === "/agents" ? (
             <Agents token={token} onReachable={setReachable} />
           ) : path === "/hosts" ? (
@@ -217,13 +217,7 @@ function App() {
           ) : path === "/more" ? (
             <MoreResources disconnect={disconnect} />
           ) : (
-            <Chat
-              token={token}
-              issue={issue}
-              chatId={chatId}
-              onReachable={setReachable}
-              onIssueHeader={setIssueHeader}
-            />
+            <Chat token={token} chatId={chatId} onReachable={setReachable} />
           )
         ) : (
           <Connect onConnect={connect} />

@@ -82,6 +82,21 @@ export type BoardIssue = {
 
 export type BoardPage = { issues: BoardIssue[]; next_before: number | null };
 
+export type IssueReference = {
+  id: string;
+  short_number?: number;
+  title: string;
+};
+export type IssueDelivery = Artifact & {
+  issue_title?: string;
+  source?: { issue: IssueReference; task_id: string };
+};
+export type IssueDeliveryReport = {
+  message_id: string;
+  text: string;
+  artifacts: IssueDelivery[];
+};
+
 export type IssueOverviewData = {
   id: string;
   short_number?: number;
@@ -91,9 +106,11 @@ export type IssueOverviewData = {
   repo_ids: string[];
   chat_id: string;
   source_message_id: string;
-  children: { id: string; short_number?: number; title: string }[];
+  children: IssueReference[];
   pulls: PullLink[];
-  artifacts: (Artifact & { issue_title?: string })[];
+  artifacts: IssueDelivery[];
+  reports?: IssueDeliveryReport[];
+  decisions?: { message_id: string; text: string }[];
 };
 
 export type Activity = {
@@ -159,10 +176,6 @@ export function chatLink(chat: string, message?: string) {
 
 export function issueLink(id: string, number?: number) {
   return `/issues/${encodeURIComponent(number ?? id)}`;
-}
-
-export function issueOverviewLink(id: string, number?: number) {
-  return `${issueLink(id, number)}/overview`;
 }
 
 export function issueTitle(title: string, number?: number) {
@@ -323,11 +336,41 @@ export async function readRollout(
     .join("\n\n");
 }
 
+function readArtifact(token: string, id: string, signal?: AbortSignal) {
+  return request(token, `/api/v1/artifacts/${encodeURIComponent(id)}`, {
+    signal,
+  });
+}
+
+export const markdownPreviewLimit = 1024 * 1024;
+
+export async function readArtifactMarkdown(
+  token: string,
+  id: string,
+  signal: AbortSignal,
+) {
+  const response = await readArtifact(token, id, signal);
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error("无法读取 Markdown 原件");
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  let read = 0;
+  let markdown = "";
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) return markdown + decoder.decode();
+      read += chunk.value.byteLength;
+      if (read > markdownPreviewLimit)
+        throw new Error("文件太大，请下载原件阅读");
+      markdown += decoder.decode(chunk.value, { stream: true });
+    }
+  } finally {
+    await reader.cancel();
+  }
+}
+
 export async function download(token: string, file: Artifact) {
-  const response = await request(
-    token,
-    `/api/v1/artifacts/${encodeURIComponent(file.id)}`,
-  );
+  const response = await readArtifact(token, file.id);
   const url = URL.createObjectURL(await response.blob());
   const link = document.createElement("a");
   link.href = url;
