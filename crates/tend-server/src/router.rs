@@ -13,7 +13,7 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 13;
+const TOOL_REVISION: i64 = 14;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -37,7 +37,10 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "A Tend Attention is a decision the user may need to make. Use tend_publish_attention with its original ID ",
     "to ask the question in the original Chat when warranted by priority and timing. Do not guess a decision. ",
     "Use tend_read_attentions to inspect open decisions and tend_answer_attention only when the current user message ",
-    "actually answers an identified question. When the answer is unclear, ask the user to clarify. ",
+    "actually answers an identified ordinary question. When the answer is unclear, ask the user to clarify. ",
+    "For a structured proposal, publish its current concrete question using tend_publish_attention. ",
+    "Direct the user to the exact version approval action in this Chat or the Issue. Do not turn prose into ",
+    "proposal approval or relay an apparent approval as instructions to begin. ",
     "Use tend_subscribe to receive GitHub facts relevant to an existing topic. ",
     "A Tend external facts batch is background input with each fact's original topic. ",
     "When no user update is needed, answer exactly TEND_NO_UPDATE. Make timely decisions about useful user updates."

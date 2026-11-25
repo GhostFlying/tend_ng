@@ -97,6 +97,46 @@ export type IssueDeliveryReport = {
   artifacts: IssueDelivery[];
 };
 
+export type ApprovalDecision = {
+  id: string;
+  version: number;
+  decided_at: number;
+  continuation_run_id?: string;
+};
+
+export type ProposalStatus = {
+  issue_id: string;
+  version: number;
+  question: string;
+  action: string;
+  can_approve: boolean;
+  decision?: ApprovalDecision;
+};
+
+export type ProposalVersion = {
+  version: number;
+  report_id: string;
+  title: string;
+  highlights: string[];
+  updated_at: number;
+  artifact: Artifact;
+  other_artifacts: Artifact[];
+  message_id: string | null;
+};
+
+export type IssueProposal = {
+  attention_id: string;
+  question_message_id: string | null;
+  status: ProposalStatus;
+  versions: ProposalVersion[];
+};
+
+type IssueApprovalEvent = {
+  decision: ApprovalDecision;
+  issue_id: string;
+  before_message_id: string | null;
+};
+
 export type IssueOverviewData = {
   id: string;
   short_number?: number;
@@ -111,6 +151,8 @@ export type IssueOverviewData = {
   artifacts: IssueDelivery[];
   reports?: IssueDeliveryReport[];
   decisions?: { message_id: string; text: string }[];
+  proposals?: IssueProposal[];
+  proposal_requires_chat?: boolean;
 };
 
 export type Activity = {
@@ -139,9 +181,11 @@ export type Message = {
   issue_ids?: string[];
   issue_numbers?: number[];
   issue?: IssueMessage;
+  approval?: IssueApprovalEvent;
   attention?: {
     id: string;
     state: "pending" | "awaiting_user" | "answered" | "delivered";
+    proposal?: ProposalStatus;
   };
 };
 
@@ -216,6 +260,22 @@ async function request(token: string, path: string, options?: RequestInit) {
   return response;
 }
 
+export async function approveProposal(
+  token: string,
+  chat: string,
+  attention: string,
+  version: number,
+  fromIssue = false,
+) {
+  const path = `/api/v1/chats/${encodeURIComponent(chat)}/attentions/${encodeURIComponent(attention)}/approve`;
+  const response = await request(token, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ version, from_issue: fromIssue }),
+  });
+  return response.json() as Promise<ApprovalDecision>;
+}
+
 export async function readMessages(
   token: string,
   before?: number,
@@ -235,7 +295,23 @@ export async function readMessages(
     awaiting_start?: boolean;
     next_before: number | null;
     messages: IssueMessage[];
+    approvals?: IssueApprovalEvent[];
   } = await response.json();
+  const eventsBefore = new Map<string | null, Message[]>();
+  for (const approval of page.approvals ?? []) {
+    const key = approval.before_message_id;
+    const rows = eventsBefore.get(key) ?? [];
+    rows.push({
+      id: `approval-${approval.decision.id}`,
+      approval,
+      text: "",
+      author: "router",
+      reply_to: null,
+      router_state: null,
+      router_error: null,
+    });
+    eventsBefore.set(key, rows);
+  }
   return {
     title: page.title,
     issue_id: page.issue_id,
@@ -243,15 +319,21 @@ export async function readMessages(
     chat_id: page.chat_id,
     awaiting_start: page.awaiting_start,
     next_before: page.next_before,
-    messages: page.messages.map((message) => ({
-      id: message.id,
-      text: message.text,
-      author: message.kind === "user" ? "user" : "router",
-      reply_to: message.reply_to,
-      router_state: null,
-      router_error: null,
-      issue: message,
-    })),
+    messages: [
+      ...page.messages.flatMap((message): Message[] => [
+        ...(eventsBefore.get(message.id) ?? []),
+        {
+          id: message.id,
+          text: message.text,
+          author: message.kind === "user" ? "user" : "router",
+          reply_to: message.reply_to,
+          router_state: null,
+          router_error: null,
+          issue: message,
+        },
+      ]),
+      ...(eventsBefore.get(null) ?? []),
+    ],
   };
 }
 

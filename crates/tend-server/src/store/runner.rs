@@ -358,6 +358,7 @@ impl Store {
             && request.reclaim_receipts.is_empty()
         {
             return Ok(Some(RunnerSyncReply {
+                proposal_approval: true,
                 workspace_reclaims: if task.is_none() {
                     super::reclaim::pending(&self.db, &profile.runner_id)?
                 } else {
@@ -526,6 +527,7 @@ impl Store {
         }
         super::timing::commit(tx, timing)?;
         Ok(Some(RunnerSyncReply {
+            proposal_approval: true,
             workspace_reclaims,
             confirmed_reclaims,
             assignments,

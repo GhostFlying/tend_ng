@@ -49,6 +49,8 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 旧 Tend 已为逻辑请求固定 `request_id`，Web 发消息前会生成并保存到发送记录。#393 记录了负责人事件已被处理、SQLite ACK 写入超时后原执行中止的情况。新版收件与推进所需记录一起提交，各入站操作的回执从已提交记录生成，故障恢复沿原身份读取。 [旧请求身份](https://github.com/GhostFlying/tend/blob/83bc15ae/internal/protocol/envelope.go#L16-L32) · [旧 Web 发送记录](https://github.com/GhostFlying/tend/blob/83bc15ae/web/src/queue/sendQueue.ts#L182-L217) · [负责人 ACK 恢复](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/manager-run-timeout-recovery.md#L1-L8) · [首个切片的定向验收](plans/first-product-slice.md#最少验收)
 
+`tend_propose_approval` 由支持该能力的 Server 开启。顶层 Issue Owner 可以引用具体的正式报告操作和 Markdown 原件登记待批准版本。修订以原 Attention ID 和下一个版本提交，不登记第二个等待义务。回执仍是 Runner 本地受理。 [结构化方案批准](plans/inline-proposal-approval.md#implemented-contract)
+
 ## Session 接续
 
 **已确认。** 新 session 收到本轮输入和接续所需的工作摘要。摘要从持久的 Chat、Issue、Task 和操作记录读取。Agent 通过工具把会影响后续行动的事实写入 Issue。同一 Task 的兼容且已停妥的原生 thread 优先续用，默认只补本轮输入和相关变化。缺失或已知不兼容时，新 session 带原工作契约、当前输入与近期已持久化原输入和受理回执。线程是执行上下文，不能代替 Issue、Task 或业务回执。

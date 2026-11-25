@@ -89,6 +89,8 @@ Server 持久保存匹配事实，按原等待和 Task 生成直接投递。每�
 
 旧 Tend 的精确 PR 等待覆盖先捕获事实、实际停妥后续跑同一 Task 的竞态。 [旧 PR 等待竞态](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/pr-external-waits.md#L7-L10)
 
+同一份结构化方案在修订时保留原 Attention 和历史版本。批准使用原 `AttentionAnswered` 唤醒和责任链。Issue 的批准事件取自同一决定记录，有对应输入的原生回合证据后才算接续。 [结构化方案批准](chat-routing.md#结构化方案批准)
+
 ## 等待期间的用户输入
 
 **已确认。** `waitfor` 用于释放空闲期间的执行 slot。Router 转来的用户补充、工作方向变更和 Attention 答复，以及用户在 Issue Chat 的直接留言，及时沿原收件关系持久入队并请求唤醒 Owner。其他需要唤醒 Owner 的输入按各自的投递时机进入队列。

@@ -215,7 +215,8 @@ impl Store {
         let Some((title, chat_id, awaiting_start, short_number)) = header else {
             return Ok(None);
         };
-        let mut statement = self.db.prepare(&format!(
+        let tx = self.db.unchecked_transaction()?;
+        let mut statement = tx.prepare(&format!(
             "{TREE}
             SELECT m.seq, {MESSAGE_COLUMNS} FROM issue_messages m
             JOIN tree ON tree.id = m.issue_id JOIN issues i ON i.id = m.issue_id
@@ -233,6 +234,20 @@ impl Store {
         } else {
             None
         };
+        let approvals =
+            super::proposals::issue_events(&tx, issue, next_before.unwrap_or(0), before)?
+                .into_iter()
+                .map(|(seq, mut event)| {
+                    event.before_message_id = page
+                        .iter()
+                        .rev()
+                        .find(|(message_seq, _)| *message_seq > seq)
+                        .map(|(_, message)| message.id.clone());
+                    event
+                })
+                .collect();
+        drop(statement);
+        tx.commit()?;
         Ok(Some(IssueMessagePage {
             issue_id: Some(issue.to_owned()),
             short_number,
@@ -241,6 +256,7 @@ impl Store {
             awaiting_start,
             messages: page.into_iter().rev().map(|(_, message)| message).collect(),
             next_before,
+            approvals,
         }))
     }
 

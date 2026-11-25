@@ -86,7 +86,8 @@ pub fn apply_parent(
         .query_row(
             "SELECT a.issue_id, a.task_id FROM attentions a JOIN issues i ON i.id = a.issue_id
          WHERE a.id = ?1 AND i.parent_issue_id = ?2 AND a.answer_input_id IS NULL
-           AND a.question_seq IS NULL",
+           AND a.question_seq IS NULL
+           AND NOT EXISTS (SELECT 1 FROM proposal_versions WHERE attention_id = a.id)",
             params![id, actor],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
@@ -101,7 +102,7 @@ pub fn apply_parent(
     Ok(())
 }
 
-fn answer_task(
+pub(super) fn answer_task(
     db: &Connection,
     id: &str,
     issue: &str,
@@ -158,6 +159,7 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attention> {
         status: AttentionStatus {
             id: row.get(0)?,
             state: state(row.get(8)?),
+            proposal: None,
         },
         issue_id: row.get(1)?,
         task_id: row.get(2)?,
@@ -176,17 +178,21 @@ fn view(row: &rusqlite::Row<'_>) -> rusqlite::Result<Attention> {
 }
 
 pub(super) fn lookup(db: &Connection, chat: &str, id: &str) -> Result<Option<Attention>> {
-    Ok(db
+    let mut fact = db
         .query_row(
             &format!("{VIEW} WHERE origin.chat_id = ?1 AND a.id = ?2"),
             params![chat, id],
             view,
         )
-        .optional()?)
+        .optional()?;
+    if let Some(fact) = &mut fact {
+        fact.status.proposal = super::proposals::status(db, id)?;
+    }
+    Ok(fact)
 }
 
 #[derive(Debug)]
-struct UserInput {
+pub(super) struct UserInput {
     id: String,
     seq: i64,
     reply_to: Option<String>,
@@ -233,9 +239,13 @@ impl Store {
             "{VIEW} WHERE origin.chat_id = ?1 AND (NOT ?2 OR a.answer_input_id IS NULL)
                      ORDER BY a.rowid DESC LIMIT 50"
         ))?;
-        Ok(statement
+        let mut rows = statement
             .query_map(params![chat, open_only], view)?
-            .collect::<rusqlite::Result<_>>()?)
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for fact in &mut rows {
+            fact.status.proposal = super::proposals::status(&self.db, &fact.status.id)?;
+        }
+        Ok(rows)
     }
 
     pub fn router_attentions(&self, attempt: &str, call: &ToolCall) -> Result<Vec<Attention>> {
@@ -310,7 +320,8 @@ impl Store {
             [id],
             |row| row.get(0),
         )?;
-        if existing.status.state != AttentionState::AwaitingUser
+        if existing.status.proposal.is_some()
+            || existing.status.state != AttentionState::AwaitingUser
             || posted.is_none_or(|seq| seq >= user.seq)
             || user
                 .reply_to
@@ -348,25 +359,34 @@ pub(super) fn on_page(
          LEFT JOIN issue_inputs i ON i.id = a.answer_input_id LEFT JOIN task_runs r ON r.id = i.run_id
          WHERE q.chat_id = ?1 AND q.seq >= ?2 AND q.seq < ?3",
     )?;
-    Ok(query
+    let mut statuses = query
         .query_map(params![chat, oldest, before], |row| {
             Ok((
                 row.get(0)?,
                 AttentionStatus {
                     id: row.get(1)?,
                     state: state(row.get(2)?),
+                    proposal: None,
                 },
             ))
         })?
-        .collect::<rusqlite::Result<_>>()?)
+        .collect::<rusqlite::Result<std::collections::HashMap<_, _>>>()?;
+    for status in statuses.values_mut() {
+        status.proposal = super::proposals::status(db, &status.id)?;
+    }
+    Ok(statuses)
 }
 
 pub(super) fn quoted(db: &Connection, chat: &str, message: &str) -> Result<Option<Attention>> {
-    Ok(db
+    let mut fact = db
         .query_row(
             &format!("{VIEW} WHERE origin.chat_id = ?1 AND q.id = ?2"),
             params![chat, message],
             view,
         )
-        .optional()?)
+        .optional()?;
+    if let Some(fact) = &mut fact {
+        fact.status.proposal = super::proposals::status(db, &fact.status.id)?;
+    }
+    Ok(fact)
 }

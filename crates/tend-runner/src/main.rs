@@ -12,7 +12,17 @@ use config::Config;
 use protocol::{
     ClaimReceipt, DEFAULT_LISTEN, RUNNER_PROTOCOL, RunnerRecord, RunnerSync, TOKEN_ENV,
 };
-use std::{env, ffi::OsString, path::PathBuf, sync::Arc, thread, time::Duration};
+use std::{
+    env,
+    ffi::OsString,
+    path::PathBuf,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    thread,
+    time::Duration,
+};
 use store::Store;
 
 const USAGE: &str = "Usage: tend-runner --config <json-file> --db <sqlite-file> [--once | --reconcile <task-id>] [--app-server <program> <args>...]\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates Runner sync.";
@@ -64,6 +74,7 @@ fn main() -> Result<()> {
     ensure!(!token.is_empty(), "TEND_TOKEN is empty");
     let auth = format!("Bearer {token}");
     let server = Arc::new(Server {
+        proposal_approval: Arc::new(AtomicBool::new(false)),
         base: base.trim_end_matches('/').to_owned(),
         auth: auth.clone(),
         http: ureq::AgentBuilder::new()
@@ -97,6 +108,7 @@ fn main() -> Result<()> {
         Arc::clone(&server),
     );
     let runtime = execution::Runtime {
+        proposal_approval: Arc::clone(&server.proposal_approval),
         root: config
             .workspace_root
             .clone()
@@ -168,6 +180,7 @@ fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<Vec<Strin
 }
 
 struct Server {
+    proposal_approval: Arc<AtomicBool>,
     base: String,
     auth: String,
     http: ureq::Agent,
@@ -206,6 +219,8 @@ impl Server {
             .send_json(&request)
             .context("exchange Runner records")?
             .into_json()?;
+        self.proposal_approval
+            .store(reply.proposal_approval, Ordering::Relaxed);
         let uploads = std::mem::take(&mut reply.uploads);
         store.apply_sync(config, reply)?;
         Ok(uploads)

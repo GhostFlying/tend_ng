@@ -41,6 +41,15 @@ pub struct IssueMessagePage {
     pub awaiting_start: bool,
     pub messages: Vec<IssueMessage>,
     pub next_before: Option<i64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub approvals: Vec<IssueApprovalEvent>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct IssueApprovalEvent {
+    pub decision: crate::ApprovalDecision,
+    pub issue_id: String,
+    pub before_message_id: Option<String>,
 }
 
 pub fn issue_messages_path(id: &str) -> String {

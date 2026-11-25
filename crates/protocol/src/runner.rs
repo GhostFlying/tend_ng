@@ -161,6 +161,8 @@ pub struct RunnerSync {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSyncReply {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proposal_approval: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_reclaims: Vec<crate::WorkspaceReclaim>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -245,6 +247,8 @@ pub enum WorkAction {
     },
     AskAttention {
         request: AttentionRequest,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        proposal: Option<crate::ProposalRequest>,
     },
     EscalateAttention {
         attention_id: String,

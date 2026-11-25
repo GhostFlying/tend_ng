@@ -13,6 +13,7 @@ ATTENTION_REPLY = "用精简版。"
 STAGE_REQUEST = "请发一份使用说明和附件，然后原地等我确认是否结案。"
 STAGE_QUESTION = "请审阅附上的使用说明。确认结案，还是需要修改？"
 STAGE_REPLY = "确认结案。"
+PROPOSAL_REQUEST = "请设计任务摘要导出，等我批准对应版本后再实现。"
 ISSUE_CHAT_REQUEST = "请整理示例仓库的快速上手指南。"
 CROSS_CHAT_LOOKUP = "Verify cross-chat Issue access "
 ISSUE_CHAT_RELAY = "请让负责指南的 Agent 补一段常见问题。"
@@ -34,6 +35,7 @@ cases[WEB_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REQUEST] = {"dispatch": True}
 cases[ATTENTION_REPLY] = {"answer": "我已把精简版的决定交给负责的 Agent。"}
 cases[STAGE_REQUEST] = {"dispatch": True}
+cases[PROPOSAL_REQUEST] = {"dispatch": True}
 cases[STAGE_REPLY] = {"answer": "我已把结案确认交给负责的 Agent。"}
 cases["我稍后再决定，可以先继续聊吗？"] = {"answer": "可以。你准备好时，回复上面的问题就行。"}
 cases["这项工作现在到哪一步了？"] = {"answer": "负责的 Agent 已经整理完使用说明，文件正在同步。", "wait": True}
@@ -74,7 +76,7 @@ def missing_thread(request):
 
 
 def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending=False, pinned=False,
-             stage=False):
+             stage=False, proposal=False):
     tools, = database.execute("SELECT tools FROM threads WHERE id = ?", (thread_id,)).fetchone()
     assert any(tool["name"] == "tend_dispatch_issue" for tool in json.loads(tools)), tools
     params = {
@@ -91,6 +93,8 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
     if stage:
         params["arguments"].update(title="交付使用说明并等候审阅",
                                    objective="阶段交付实际使用说明和附件，然后原地等待用户确认是否结案。")
+    if proposal:
+        params["arguments"].update(title="设计任务运行摘要导出", objective=PROPOSAL_REQUEST)
     if pinned:
         requirements = {"category": "issue-router", "repo_ids": ["example"],
                         "required_capabilities": ["image_gen"]}
@@ -187,7 +191,14 @@ for line in sys.stdin:
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
             if text.startswith("Tend Attention for the user's original topic.\n"):
                 attention = json.loads(text.split("\n", 1)[1])
-                if attention["original_request"] == STAGE_REQUEST:
+                if attention["original_request"] == PROPOSAL_REQUEST:
+                    if attention["proposal"]:
+                        assert attention["proposal"]["version"] == 1
+                        question = attention["proposal"]["question"]
+                    else:
+                        question = attention["request"]["question"]
+                    case = {"attention": attention, "question": question, "answer": "TEND_NO_UPDATE"}
+                elif attention["original_request"] == STAGE_REQUEST:
                     assert attention["request"]["options"] == ["确认结案", "需要修改"]
                     case = {"attention": attention, "question": STAGE_QUESTION, "answer": "TEND_NO_UPDATE"}
                 else:
@@ -199,8 +210,10 @@ for line in sys.stdin:
                 case = {"answer": "TEND_NO_UPDATE"}
             elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
-                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST, STAGE_REQUEST}
-                if report["original_request"] == STAGE_REQUEST:
+                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST, STAGE_REQUEST, PROPOSAL_REQUEST}
+                if report["original_request"] == PROPOSAL_REQUEST:
+                    case = {"answer": report["summary"]}
+                elif report["original_request"] == STAGE_REQUEST:
                     assert report["summary"] == "使用说明已整理好，附上初稿供审阅。"
                     [file] = report["artifacts"]
                     assert file["name"] == "guide.txt"
@@ -329,7 +342,8 @@ for line in sys.stdin:
                 if starts == 1:
                     receipt = dispatch(thread_id, turn_id, params["clientUserMessageId"],
                                        guide=text == ISSUE_CHAT_REQUEST, pending=text == BOARD_WAITING,
-                                       pinned=text == PINNED_REVIEW, stage=text == STAGE_REQUEST)
+                                       pinned=text == PINNED_REVIEW, stage=text == STAGE_REQUEST,
+                                       proposal=text == PROPOSAL_REQUEST)
                     with database:
                         database.execute(
                             "INSERT INTO dispatch_receipts VALUES (?, ?)", (text, json.dumps(receipt))

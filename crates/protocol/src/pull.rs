@@ -152,6 +152,10 @@ pub struct IssueOverview {
     pub reports: Vec<IssueDeliveryReport>,
     #[serde(default)]
     pub decisions: Vec<IssueDecision>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub proposals: Vec<crate::IssueProposal>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub proposal_requires_chat: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

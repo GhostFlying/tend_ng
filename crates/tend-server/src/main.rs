@@ -522,6 +522,34 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
             None => api_error(404, "issue not found"),
         });
     }
+    if let Some((chat, attention)) = path
+        .strip_prefix("/api/v1/chats/")
+        .and_then(|path| path.strip_suffix("/approve"))
+        .and_then(|path| path.split_once("/attentions/"))
+        .filter(|(chat, id)| protocol::valid_id(chat) && protocol::valid_id(id))
+    {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let (chat, attention) = (chat.to_owned(), attention.to_owned());
+        let Ok(input) =
+            serde_json::from_reader::<_, protocol::ApproveProposal>(request.as_reader())
+        else {
+            return Ok(api_error(400, "expected a proposal version"));
+        };
+        if input.version == 0 {
+            return Ok(api_error(400, "invalid proposal version"));
+        }
+        use store::proposals::Approval;
+        return Ok(match store.approve_proposal(&chat, &attention, &input)? {
+            Approval::Recorded(decision) => (200, serde_json::to_value(decision)?),
+            Approval::NotFound => api_error(404, "structured proposal not found in this Chat"),
+            Approval::Conflict => api_error(
+                409,
+                "proposal changed or is not available for approval; reload it before deciding",
+            ),
+        });
+    }
     if let Some(chat_id) = path
         .strip_prefix("/api/v1/chats/")
         .and_then(|path| path.strip_suffix("/attentions"))

@@ -133,6 +133,11 @@ if worker and attention and (root / "question.json").exists():
     role = "decision"
 if scenario == "stage-delivery" and not worker and (root / "stage-delivery.json").exists():
     role = "stage-decision"
+if scenario == "proposal" and not worker:
+    if (root / "proposal-v2.json").exists():
+        role = "proposal-continue"
+    elif (root / "proposal-v1.json").exists():
+        role = "proposal-revise"
 if scenario == "issue-chat":
     import uuid
     role = f"{role}-{uuid.uuid4().hex}"
@@ -153,6 +158,9 @@ items = turn["params"]["input"]
 assignment = json.loads(items[-1]["text"])
 if scenario == "external-wait" and worker and assignment["work"]["title"] in {"Isolated B", "Shared C"}:
     role = "other-work"
+if role == "proposal-continue":
+    (root / "continuation-prepared").touch()
+    gate("start-continuation")
 respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
 
 if scenario == "issue-chat":
@@ -252,6 +260,25 @@ elif role == "child":
         guide.write_text("A later edit to the workspace file.\n")
         assert tool("tend_submit_artifact", arguments, "replay-submit", "delivery") == delivered
         (root / "submitted.json").write_text(json.dumps(delivered))
+    elif scenario == "proposal":
+        for version in (1, 2):
+            path = Path(f"summary-export-v{version}.md")
+            path.write_text(
+                f"# 任务运行摘要导出方案 v{version}\n\n"
+                "## 结论\n\n导出格式为 **Markdown**，保留任务标题、结果和更新时间。\n\n"
+                "- 无运行记录时，显示暂无可导出的运行。\n"
+                "- 有运行记录时，保留结果的段落结构。\n\n"
+                "| 任务字段 | 示例值 | 输出说明 | 更新策略 | 适用范围 |\n"
+                "| --- | --- | --- | --- | --- |\n"
+                "| 示例任务 A | 运行完成 | 保留可读的工作摘要 | 使用记录中的时间 | 合成数据 |\n\n"
+                "```text\n" + "This is a deliberately long synthetic example for checking horizontal scrolling inside a narrow report. " * 2 + "\n```\n"
+            )
+            tool("tend_submit_artifact", {"path": str(path)}, f"submit-v{version}", f"delivery-v{version}")
+        note = Path("wording-notes.md")
+        note.write_text("# 独立文案记录\n\n这份记录不是审批版本。\n")
+        tool("tend_submit_artifact", {"path": str(note)}, "submit-note", "delivery-note")
+        tool("tend_close_issue", {"summary": "已整理示例草稿。"}, "close-child", "child-close")
+        gate("finish-stage-child")
     elif scenario == "stage-delivery":
         tool("tend_submit_artifact", {"path": "repos/example/guide.txt"}, "submit", "delivery")
         tool("tend_close_issue", {"summary": "The draft guide is ready."}, "close-child", "child-close")
@@ -308,6 +335,56 @@ elif role == "stage-decision":
     assert decision["attention_id"] == original["attention_id"] and decision["answer"] == "确认结案"
     (root / "decision.json").write_text(json.dumps({**decision, "run_id": turn["params"]["clientUserMessageId"]}))
     tool("tend_close_issue", {"summary": "用户已审阅使用说明并确认结案。"}, "close-parent", "parent-close")
+elif scenario == "proposal":
+    inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
+    if role == "proposal-continue":
+        [decision] = inputs
+        original = json.loads((root / "proposal-v1.json").read_text())
+        current = json.loads((root / "proposal-v2.json").read_text())
+        assert assignment["task_id"] == original["task_id"]
+        assert decision["kind"] == "attention_answered" and decision["attention_id"] == original["id"]
+        assert "user_message_id" not in decision and "user_text" not in decision
+        assert "v2" in decision["answer"] and current["report_id"] in decision["answer"]
+        (root / "decision.json").write_text(json.dumps({**decision, "run_id": turn["params"]["clientUserMessageId"]}))
+        gate("finish-continuation")
+        tool("tend_close_issue", {"summary": "已处理示例中的精确批准。"}, "close-parent", "parent-close")
+    else:
+        assert "tend_propose_approval" in tools
+        version = 2 if role == "proposal-revise" else 1
+        if version == 1:
+            assert sorted(fact["kind"] for fact in inputs) == ["artifact_available"] * 3 + ["issue_closed"]
+            files = {fact["artifact"]["name"]: fact["artifact"]["id"] for fact in inputs if fact["kind"] == "artifact_available"}
+            tool("tend_report_result", {"summary": "独立文案记录，不属于审批版本。", "artifact_ids": [files["wording-notes.md"]]},
+                 "independent", "independent")
+        else:
+            [revision] = inputs
+            assert revision["message"]["text"] == "请把空结果行为补进同一方案。"
+            original = json.loads((root / "proposal-v1.json").read_text())
+            files = original["files"]
+        file = files[f"summary-export-v{version}.md"]
+        report = tool("tend_report_result", {"summary": f"已交付任务摘要导出方案 v{version}。", "artifact_ids": [file]},
+                      "report", "report")
+        args = {
+            "question": f"是否按 v{version} 进入实现？",
+            "version": version,
+            "report_id": report["operation_id"],
+            "artifact_id": file,
+            "title": "任务运行摘要导出方案",
+            "highlights": ["首版导出任务摘要为 Markdown。", "保留标题、结果和更新时间。"]
+                          + (["v2 补充空结果行为和导出字段。"] if version == 2 else []),
+            "action": f"批准按 v{version} 实现",
+        }
+        if version == 2:
+            args["replaces"] = original["id"]
+        op = tool("tend_propose_approval", args, "proposal", "proposal")
+        assert tool("tend_propose_approval", args, "retry-proposal", "proposal") == op
+        if version == 2 and (root / "independent-decision").exists():
+            tool("tend_request_attention", {"question": "示例发布说明要使用简体中文还是英文？",
+                                           "options": ["简体中文", "英文"]}, "legacy", "legacy")
+        (root / f"proposal-v{version}.json").write_text(json.dumps({
+            "id": op["operation_id"], "task_id": assignment["task_id"], "files": files,
+            "report_id": report["operation_id"], "run_id": turn["params"]["clientUserMessageId"],
+        }))
 elif scenario == "stage-delivery":
     delegated = json.loads((root / "delegation.json").read_text())["action"]
     inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]

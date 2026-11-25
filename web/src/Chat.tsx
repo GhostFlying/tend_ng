@@ -17,6 +17,7 @@ import {
   sendMessage,
 } from "./api";
 import type { Artifact, Message, PendingMessage } from "./api";
+import { DecisionTime, ProposalApproval } from "./ProposalApproval";
 
 function pendingKey(chat: string, issue?: string) {
   if (issue) return `tend.pending-issue-message.v1:${issue}`;
@@ -130,6 +131,7 @@ function MessageRow({
   descendant,
   token,
   onReply,
+  onRefresh,
 }: {
   message: Message;
   source?: Message;
@@ -138,6 +140,7 @@ function MessageRow({
   descendant: boolean;
   token: string;
   onReply: (message: Message) => void;
+  onRefresh: () => void;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -190,7 +193,17 @@ function MessageRow({
           {source.text}
         </a>
       )}
-      <p>{message.text}</p>
+      {!message.attention?.proposal ? (
+        <p>{message.text}</p>
+      ) : (
+        (message.text !== message.attention.proposal.question ||
+          message.attention.proposal.decision) && (
+          <details className="proposal-original-question">
+            <summary>原提问</summary>
+            <p>{message.text}</p>
+          </details>
+        )
+      )}
       {message.issue_ids?.map((id, index, ids) => {
         const number = message.issue_numbers?.[index];
         return (
@@ -222,25 +235,36 @@ function MessageRow({
           回复
         </button>
       ) : null}
-      {message.attention && (
-        <div className="attention-actions">
-          <span role="status">
-            {message.attention.state === "delivered"
-              ? "Agent 已接续"
-              : message.attention.state === "answered"
-                ? "决定已转交"
-                : "待你决定"}
-          </span>
-          {message.attention.state === "awaiting_user" && (
-            <button
-              className="text-button"
-              type="button"
-              onClick={() => onReply(message)}
-            >
-              回复
-            </button>
-          )}
-        </div>
+      {message.attention?.proposal ? (
+        <ProposalApproval
+          key={message.attention.proposal.version}
+          token={token}
+          chat={sourceChat}
+          attention={message.attention.id}
+          status={message.attention.proposal}
+          onRefresh={onRefresh}
+        />
+      ) : (
+        message.attention && (
+          <div className="attention-actions">
+            <span role="status">
+              {message.attention.state === "delivered"
+                ? "Agent 已接续"
+                : message.attention.state === "answered"
+                  ? "决定已转交"
+                  : "待你决定"}
+            </span>
+            {message.attention.state === "awaiting_user" && (
+              <button
+                className="text-button"
+                type="button"
+                onClick={() => onReply(message)}
+              >
+                回复
+              </button>
+            )}
+          </div>
+        )
       )}
       {pending && <span className="message-state">已收到</span>}
       {message.router_error && (
@@ -405,6 +429,8 @@ export function Chat({
     header: ReactNode;
     work: ReactNode;
     properties: ReactNode;
+    refresh?: number;
+    structured?: boolean;
   };
 }) {
   const [messages, setMessages] = useState<Message[]>([]);
@@ -431,6 +457,7 @@ export function Chat({
   const handledAnchor = useRef("");
   const seekingAnchor = historyMode === "anchor";
   const readyForAnchor = detail?.overviewLoaded ?? true;
+  const detailRefresh = detail?.refresh;
   const historyRequest = useRef<AbortController | null>(null);
   const preserve = useRef<{ top: number; height: number } | null>(null);
 
@@ -498,7 +525,7 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, issue, chatId, refresh, onReachable]);
+  }, [token, issue, chatId, refresh, detailRefresh, onReachable]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
@@ -510,6 +537,13 @@ export function Chat({
         setAnchorError("");
         follow.current = false;
         preserve.current = null;
+        for (
+          let parent = target.parentElement;
+          parent;
+          parent = parent.parentElement
+        ) {
+          if (parent instanceof HTMLDetailsElement) parent.open = true;
+        }
         target.scrollIntoView({ block: "center" });
         return;
       }
@@ -600,6 +634,25 @@ export function Chat({
   const byId = new Map(messages.map((message) => [message.id, message]));
   let lastUser: string | null = null;
   const rows = messages.map((message) => {
+    if (message.approval) {
+      const { decision, issue_id } = message.approval;
+      return (
+        <li
+          className="approval-event"
+          id={`message-${message.id}`}
+          key={message.id}
+        >
+          <span className="approval-icon" aria-hidden="true">
+            ✓
+          </span>
+          <strong>你批准了 v{decision.version}</strong>
+          <DecisionTime time={decision.decided_at} />
+          {issue_id !== (canonicalIssue ?? issue) && (
+            <a href={issueLink(issue_id)}>来源 Issue</a>
+          )}
+        </li>
+      );
+    }
     const detail = message.issue;
     const descendant =
       !!detail && detail.issue_id !== (canonicalIssue ?? issue);
@@ -631,6 +684,7 @@ export function Chat({
         sourceChat={sourceChat}
         descendant={descendant}
         token={token}
+        onRefresh={() => setRefresh((value) => value + 1)}
         onReply={(question) => {
           setReplyId(question.id);
           textarea.current?.focus({ preventScroll: true });
@@ -643,7 +697,9 @@ export function Chat({
     <>
       {detail && (
         <div className="detail-section-heading">
-          <h2 id="issue-discussion">Issue 对话与工作记录</h2>
+          <h2 id="issue-discussion">
+            {detail.structured ? "Issue 对话" : "Issue 对话与工作记录"}
+          </h2>
         </div>
       )}
       {detail?.work}
@@ -686,7 +742,7 @@ export function Chat({
         }}
       >
         {detail ? (
-          <div className="issue-detail">
+          <div className="issue-detail" data-proposal={detail.structured}>
             <div className="issue-detail-summary">{detail.header}</div>
             <section
               className="issue-discussion"

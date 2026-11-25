@@ -13,6 +13,7 @@ const CLOSE: &str = "tend_close_issue";
 const SUBMIT: &str = "tend_submit_artifact";
 const REPORT: &str = "tend_report_result";
 const ASK: &str = "tend_request_attention";
+const PROPOSE: &str = "tend_propose_approval";
 const ESCALATE: &str = "tend_escalate_attention";
 const ANSWER: &str = "tend_answer_child_attention";
 const FORWARD: &str = "tend_forward_issue_message";
@@ -20,7 +21,7 @@ const FIND_PULL: &str = "tend_find_pull_request";
 const LINK_PULL: &str = "tend_link_pull_request";
 const POST: &str = "tend_post_issue_message";
 
-pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
+pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<Value>) {
     let post = json!({
         "type":"function", "name":POST,
         "description":"Publish a complete message to the current Issue. When answering a message, use its original ID as reply_to.",
@@ -207,28 +208,41 @@ pub fn catalogue(category: &str) -> (&'static str, Vec<Value>) {
                 "child_issue_id":{"type":"string"},"message_id":{"type":"string"}
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
+        let mut catalogue = vec![
+            delegate,
+            candidates,
+            close,
+            report,
+            ask,
+            escalate,
+            answer,
+            post,
+            forward,
+            link_pull,
+            find_pull,
+            waitfor,
+            subscribe,
+            clear_waits,
+            stop_task,
+            issue_state,
+            record_review,
+            review_handoff,
+        ];
+        if proposal_approval {
+            catalogue.push(json!({
+                "type":"function", "name": PROPOSE,
+                "description": "Ask the user to approve one exact version of a delivered report, only when the user asked this Issue to wait for approval. Reference the tend_report_result operation ID and one immutable Markdown attachment from it. Use version 1 for a new proposal. To revise the same unresolved choice, reference the original Attention ID in replaces and use the next version and a new report and Markdown original. Put the exact version and the concrete next action in question and action. The receipt is local acceptance. Do not create a separate Attention for revisions.",
+                "inputSchema": {"type":"object","properties":{
+                    "question":{"type":"string"}, "version":{"type":"integer","minimum":1},
+                    "report_id":{"type":"string"}, "artifact_id":{"type":"string"},
+                    "title":{"type":"string"}, "highlights":{"type":"array","items":{"type":"string"},"minItems":1,"maxItems":6},
+                    "action":{"type":"string"}, "replaces":{"type":"string"}
+                },"required":["question","version","report_id","artifact_id","title","highlights","action"],"additionalProperties":false}
+            }));
+        }
         (
             include_str!("../../../docs/roles/issue-agent.md"),
-            vec![
-                delegate,
-                candidates,
-                close,
-                report,
-                ask,
-                escalate,
-                answer,
-                post,
-                forward,
-                link_pull,
-                find_pull,
-                waitfor,
-                subscribe,
-                clear_waits,
-                stop_task,
-                issue_state,
-                record_review,
-                review_handoff,
-            ],
+            catalogue,
         )
     } else {
         let submit = json!({
@@ -346,6 +360,7 @@ pub fn action(
     cwd: &Path,
     artifacts: &Path,
     operation: &str,
+    proposal_approval: bool,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
         REQUEST_REVIEW if run.assignment.placement.agent.category != "review" => {
@@ -554,13 +569,49 @@ pub fn action(
                 artifact_ids: args.artifact_ids,
             })
         }
+        PROPOSE
+            if run.assignment.parent_issue_id.is_none()
+                && run.assignment.placement.agent.category == "issue-router" =>
+        {
+            ensure!(
+                proposal_approval,
+                "The connected Server does not advertise proposal approval. Ask a concrete question in the original Chat instead."
+            );
+            let mut metadata = call.arguments.clone();
+            let question = metadata
+                .as_object_mut()
+                .and_then(|fields| fields.remove("question"))
+                .and_then(|value| value.as_str().map(str::to_owned))
+                .unwrap_or_default();
+            let proposal: protocol::ProposalRequest = serde_json::from_value(metadata)?;
+            ensure!(
+                proposal.valid()
+                    && !question.trim().is_empty()
+                    && question.chars().count() <= 300
+                    && !question.contains(['\n', '\r']),
+                "Provide one concrete question and an exact proposal version"
+            );
+            Ok(WorkAction::AskAttention {
+                request: AttentionRequest {
+                    question,
+                    context: String::new(),
+                    options: Vec::new(),
+                    priority: None,
+                    due_at: None,
+                },
+                proposal: Some(proposal),
+            })
+        }
         ASK => {
             let request: AttentionRequest = serde_json::from_value(call.arguments.clone())?;
             ensure!(
                 !request.question.trim().is_empty(),
                 "Specify the decision needed"
             );
-            Ok(WorkAction::AskAttention { request })
+            Ok(WorkAction::AskAttention {
+                request,
+                proposal: None,
+            })
         }
         ESCALATE if run.assignment.placement.agent.category == "issue-router" => {
             let args: Escalation = serde_json::from_value(call.arguments.clone())?;

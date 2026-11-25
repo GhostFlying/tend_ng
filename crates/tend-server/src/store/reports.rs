@@ -143,6 +143,12 @@ pub fn context(
 
 pub fn attach(db: &Connection, message: &str, input: i64) -> Result<()> {
     db.execute(
+        "INSERT INTO issue_report_publications (message_id, report_id)
+         SELECT ?1, report_id FROM router_inputs WHERE seq = ?2 AND report_id IS NOT NULL
+         ON CONFLICT DO NOTHING",
+        params![message, input],
+    )?;
+    db.execute(
         "INSERT INTO chat_artifacts (message_id, artifact_id)
          SELECT ?1, r.artifact_id FROM router_inputs i
          JOIN chat_messages source ON source.seq = i.message_seq
@@ -188,6 +194,10 @@ pub(super) fn delivery_reports(db: &Connection, issue: &str) -> Result<Vec<Issue
          JOIN tasks t ON t.id = a.task_id AND t.issue_id = i.id
          JOIN issue_short_numbers n ON n.issue_id = i.id
          WHERE a.published = 1 AND m.operation_id IS NULL
+         AND NOT EXISTS (
+             SELECT 1 FROM issue_report_publications p JOIN proposal_versions v ON v.report_id = p.report_id
+             WHERE p.message_id = m.id
+         )
          AND EXISTS (
              SELECT 1 FROM completed_reports r
              WHERE NOT EXISTS (

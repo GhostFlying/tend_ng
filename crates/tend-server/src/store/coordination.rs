@@ -277,7 +277,25 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 artifact_ids,
             )?;
         }
-        WorkAction::AskAttention { request } => {
+        WorkAction::AskAttention {
+            request,
+            proposal: Some(proposal),
+        } => {
+            super::proposals::register(
+                db,
+                operation,
+                &source_issue,
+                &source_task,
+                source_message,
+                parent_issue.as_deref(),
+                request,
+                proposal,
+            )?;
+        }
+        WorkAction::AskAttention {
+            request,
+            proposal: None,
+        } => {
             super::attention::register(
                 db,
                 &operation.operation_id,

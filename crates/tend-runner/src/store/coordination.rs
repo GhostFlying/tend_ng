@@ -245,6 +245,23 @@ impl Store {
                 );
             }
         }
+        if let WorkAction::AskAttention {
+            proposal: Some(proposal),
+            ..
+        } = &action
+        {
+            let known = self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                 WHERE o.id = ?1 AND a.task_id = ?2 AND json_extract(o.operation, '$.action.kind') = 'report_issue'
+                 AND EXISTS (SELECT 1 FROM json_each(o.operation, '$.action.artifact_ids') WHERE value = ?3))",
+                params![proposal.report_id, run.assignment.task_id, proposal.artifact_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(
+                known,
+                "Select the Markdown attachment of a report returned by this Task"
+            );
+        }
         let operation = WorkOperation {
             operation_id,
             assignment_id: run.assignment.placement.assignment_id.clone(),
@@ -340,6 +357,7 @@ pub(super) fn waiting_for_attention(db: &Connection, assignment: &str) -> Result
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_task_intents o
          WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'ask_attention'
+           AND json_extract(o.operation, '$.action.proposal.replaces') IS NULL
            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i
                 WHERE i.assignment_id = o.assignment_id AND i.run_id IS NOT NULL
                   AND json_extract(i.payload, '$.kind') = 'attention_answered'

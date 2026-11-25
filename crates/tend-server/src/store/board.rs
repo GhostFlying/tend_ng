@@ -122,6 +122,11 @@ impl Store {
                 .collect::<rusqlite::Result<_>>()?
         };
         let reports = reports::delivery_reports(&tx, id)?;
+        let proposals = super::proposals::overview(&tx, id)?;
+        let proposal_requires_chat = proposals
+            .iter()
+            .any(|proposal| proposal.status.decision.is_none())
+            && super::proposals::requires_chat(&tx, id)?;
         let decisions = {
             let mut query = tx.prepare(&format!(
                 "{TREE}
@@ -129,10 +134,12 @@ impl Store {
                  FROM tree JOIN attentions a ON a.issue_id = tree.issue
                  JOIN chat_messages question ON question.seq = a.question_seq
                  WHERE a.answer_input_id IS NULL AND question.chat_id = ?2
+                   AND (a.issue_id != ?3 OR NOT EXISTS
+                        (SELECT 1 FROM proposal_versions WHERE attention_id = a.id))
                  ORDER BY a.rowid"
             ))?;
             query
-                .query_map(params![roots, chat_id], |row| {
+                .query_map(params![roots, chat_id, id], |row| {
                     Ok(IssueDecision {
                         message_id: row.get(0)?,
                         text: row.get(1)?,
@@ -156,6 +163,8 @@ impl Store {
             artifacts: files,
             reports,
             decisions,
+            proposals,
+            proposal_requires_chat,
         }))
     }
 

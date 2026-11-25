@@ -9,6 +9,7 @@ pub(crate) mod external_routing;
 mod handoff;
 mod issue_chat;
 mod notification;
+pub(crate) mod proposals;
 pub(crate) mod pull;
 mod reclaim;
 mod reports;
@@ -66,7 +67,7 @@ impl Store {
         let tx = store.db.transaction()?;
         let version: i64 = tx.pragma_query_value(None, "user_version", |row| row.get(0))?;
         ensure!(
-            version <= 25,
+            version <= 26,
             "unsupported Server database version {version}"
         );
         tx.execute_batch(
@@ -208,12 +209,16 @@ impl Store {
         if version < 25 {
             coordination::migrate_continuity(&tx)?;
             tend_review::migrate(&tx)?;
-            tx.pragma_update(None, "user_version", 25)?;
+        }
+        if version < 26 {
+            proposals::migrate(&tx)?;
+            tx.pragma_update(None, "user_version", 26)?;
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
              CREATE INDEX IF NOT EXISTS chat_artifacts_by_file ON chat_artifacts(artifact_id, message_id);
-             CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);",
+             CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);
+             CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",
         )?;
         tx.commit()?;
         Ok(store)
@@ -438,6 +443,7 @@ impl Store {
             let payload = json!({
                 "attention_id": id,
                 "request": fact.request,
+                "proposal": fact.status.proposal,
                 "issue_id": fact.issue_id,
                 "original_message_id": fact.source_message_id,
                 "original_request": input.text,

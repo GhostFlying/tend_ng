@@ -15,13 +15,17 @@ use std::{
     hash::{DefaultHasher, Hash, Hasher},
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[derive(Clone)]
 pub struct Runtime {
+    pub proposal_approval: Arc<AtomicBool>,
     pub root: PathBuf,
     pub artifacts: PathBuf,
     pub program: OsString,
@@ -246,7 +250,11 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         }
     };
     let branches = workspace::branches(run, &cwd);
-    let (instructions, tools) = tools::catalogue(&agent.category);
+    let (instructions, tools) = tools::catalogue(
+        &agent.category,
+        runtime.proposal_approval.load(Ordering::Relaxed)
+            && run.assignment.parent_issue_id.is_none(),
+    );
     let native_context =
         native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;
     let previous = store.reusable_thread(run, &native_context)?;
@@ -333,6 +341,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 run,
                 cwd: &cwd,
                 artifacts: &runtime.artifacts,
+                proposal_approval: &runtime.proposal_approval,
                 branches: &branches,
                 config,
             },
@@ -395,6 +404,7 @@ struct Handler<'a> {
     run: &'a LocalRun,
     cwd: &'a Path,
     artifacts: &'a Path,
+    proposal_approval: &'a AtomicBool,
     branches: &'a [protocol::WorkBranch],
     config: &'a Config,
 }
@@ -491,7 +501,14 @@ impl TurnHandler for Handler<'_> {
             });
         }
         match self.store.accept_operation(self.run, &call, |id| {
-            tools::action(self.run, &call, self.cwd, self.artifacts, id)
+            tools::action(
+                self.run,
+                &call,
+                self.cwd,
+                self.artifacts,
+                id,
+                self.proposal_approval.load(Ordering::Relaxed),
+            )
         }) {
             Ok(Some(operation)) => Ok(ToolOutput {
                 success: true,
