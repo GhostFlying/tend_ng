@@ -22,12 +22,10 @@ function savedReply(key: string): PendingAttentionReply | null {
 }
 
 function DirectReply({
-  token,
   issue,
   reply,
   onRefresh,
 }: {
-  token: string;
   issue: string;
   reply: NonNullable<IssueDecision["reply"]>;
   onRefresh: () => void;
@@ -46,7 +44,12 @@ function DirectReply({
   const answer = reply.answer ?? confirmed;
 
   useEffect(() => {
-    if (answer !== null) sessionStorage.removeItem(key);
+    if (answer === null) return;
+    try {
+      sessionStorage.removeItem(key);
+    } catch {
+      // The recorded answer is authoritative even when Web Storage is blocked.
+    }
   }, [answer, key]);
 
   useEffect(() => {
@@ -63,10 +66,14 @@ function DirectReply({
     attempt.current = pending;
     setSending(true);
     setError("");
+    let savedLocally = true;
     try {
       sessionStorage.setItem(key, JSON.stringify(pending));
+    } catch {
+      savedLocally = false;
+    }
+    try {
       const receipt = await answerIssueAttention(
-        token,
         issue,
         reply.attention_id,
         pending,
@@ -76,7 +83,9 @@ function DirectReply({
     } catch (error) {
       setError(
         error instanceof TypeError
-          ? "暂时无法确认答复是否已记录。再次提交原文会沿原操作重试。"
+          ? savedLocally
+            ? "暂时无法确认答复是否已记录。再次提交原文会沿原操作重试。"
+            : "暂时无法确认答复是否已记录，浏览器未保存本次操作。请留在本页重试。"
           : error instanceof Error
             ? error.message
             : "暂时无法提交答复。",
@@ -148,14 +157,12 @@ function replyRowId(message: string) {
 }
 
 export function IssueAttention({
-  token,
   issue,
   chat,
   decisions,
   historyBefore,
   onRefresh,
 }: {
-  token: string;
   issue: string;
   chat: string;
   decisions: IssueDecision[];
@@ -211,7 +218,6 @@ export function IssueAttention({
     setError("");
     try {
       const page = await readIssueAttentionHistory(
-        token,
         issue,
         before,
         controller.signal,
@@ -263,7 +269,6 @@ export function IssueAttention({
             {reply && (
               <DirectReply
                 key={`${issue}:${reply.attention_id}`}
-                token={token}
                 issue={issue}
                 reply={reply}
                 onRefresh={onRefresh}

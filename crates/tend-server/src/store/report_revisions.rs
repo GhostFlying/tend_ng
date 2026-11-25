@@ -336,7 +336,8 @@ mod tests {
         // Restore the pre-feature schema and seed an existing v26 publication.
         super::super::board::remove_projection_schema(&original.db)?;
         original.db.execute_batch(
-            "DROP TABLE issue_attention_replies;
+            "DROP TABLE web_sessions;
+             DROP TABLE issue_attention_replies;
              DROP TABLE report_revision_receipts;
              DROP TABLE report_revisions;
              DROP INDEX report_proposal_candidates;

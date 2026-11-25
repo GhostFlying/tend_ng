@@ -405,7 +405,7 @@ a {
   align-items: flex-start;
   gap: 8px;
 }
-.connect-form input {
+.connect-form input[type="password"] {
   width: min(360px, 100%);
   min-height: 40px;
   padding: 8px 12px;
@@ -413,6 +413,32 @@ a {
   border: 1px solid var(--border);
   border-radius: 8px;
 }
+.remember-browser {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.remember-browser input {
+  margin: 0;
+}
+
+.session-hint,
+.session-notice {
+  color: var(--muted);
+}
+
+.session-hint {
+  max-width: 360px;
+  margin: 0 0 4px;
+  font-size: 13px;
+}
+
+.session-notice {
+  padding: 8px 16px;
+}
+
 .connect > .error {
   margin-top: 8px;
 }

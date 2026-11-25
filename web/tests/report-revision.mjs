@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { isAnonymousSessionProbe } from "./console-errors.mjs";
 
 const {
   TEND_URL: url,
@@ -36,6 +37,7 @@ try {
     const requests = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
+      if (isAnonymousSessionProbe(message)) return;
       if (["warn", "warning", "error"].includes(message.type()))
         errors.push(message.text());
     });

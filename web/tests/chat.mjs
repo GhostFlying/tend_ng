@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { collectPageErrors } from "./console-errors.mjs";
 
 const mode = process.argv[2];
 const base = process.env.TEND_URL;
@@ -70,10 +71,7 @@ try {
       });
       const page = await context.newPage();
       const errors = [];
-      page.on("pageerror", (error) => errors.push(error.message));
-      page.on("console", (message) => {
-        if (message.type() === "error") errors.push(message.text());
-      });
+      collectPageErrors(page, errors);
       await page.goto(base);
       await page.getByLabel("访问令牌").fill(token);
       await page.getByRole("button", { name: "连接", exact: true }).click();

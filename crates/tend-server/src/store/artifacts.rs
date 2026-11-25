@@ -62,6 +62,36 @@ impl Store {
         Ok(())
     }
 
+    pub fn audit_artifact_files(&self, root: &std::path::Path, after: i64) -> Result<i64> {
+        const BATCH: usize = 64;
+        let mut query = self.db.prepare_cached(
+            "SELECT rowid, id, available FROM artifacts
+             WHERE rowid > ?1 ORDER BY rowid LIMIT ?2",
+        )?;
+        let files = query
+            .query_map(params![after, BATCH], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (_, id, available) in &files {
+            if *available {
+                let path = root.join(id);
+                if !path.is_file() {
+                    self.mark_artifact_missing(id, &path)?;
+                }
+            }
+        }
+        Ok(if files.len() == BATCH {
+            files.last().expect("full artifact page").0
+        } else {
+            0
+        })
+    }
+
     pub fn issue_artifacts(&self, issue: &str) -> Result<Vec<Artifact>> {
         let mut statement = self.db.prepare(
             "SELECT id, name, bytes, available FROM artifacts WHERE issue_id = ?1 ORDER BY rowid",

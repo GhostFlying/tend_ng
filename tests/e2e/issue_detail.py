@@ -83,6 +83,8 @@ def seed(root):
                 (3, 'review-decision', 'work', 'review-request', '是否按推荐方案进入实现？');
             INSERT INTO attentions (id, issue_id, task_id, source_seq, question_seq, request)
                 VALUES ('real-attention', 'design-child', 'design-task', 1, 3, '{"question":"是否按推荐方案进入实现？"}');
+            INSERT INTO router_inputs (chat_id, message_seq, attention_id, outcome)
+                VALUES ('work', 1, 'real-attention', 'completed');
             INSERT INTO router_inputs (chat_id, message_seq, report_id, outcome)
                 VALUES ('work', 1, 'text-only', 'completed');
         """)

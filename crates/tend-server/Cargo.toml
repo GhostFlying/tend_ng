@@ -7,10 +7,15 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+base64 = "0.22"
 codex-app.workspace = true
+getrandom = "0.4"
 protocol.workspace = true
 rusqlite.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2 = "0.10"
+subtle = "2.6"
 tiny_http.workspace = true
 ureq.workspace = true
+url = "2.5"

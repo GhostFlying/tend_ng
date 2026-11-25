@@ -1,3 +1,5 @@
+import { sessionFetch } from "./webSession";
+
 export type Artifact = {
   id: string;
   name: string;
@@ -273,13 +275,10 @@ export function operationId() {
   );
 }
 
-async function request(token: string, path: string, options?: RequestInit) {
-  const headers = new Headers(options?.headers);
-  headers.set("Authorization", `Bearer ${token}`);
-  const response = await fetch(path, { ...options, headers });
+async function request(path: string, options?: RequestInit) {
+  const response = await sessionFetch(path, options);
   if (!response.ok) {
     const body: { error?: string } = await response.json().catch(() => ({}));
-    if (response.status === 401) throw new Error("访问令牌无效");
     if (response.status === 409 && path.startsWith("/api/v1/artifacts/")) {
       throw new Error("文件正在同步，请稍后重试");
     }
@@ -289,34 +288,31 @@ async function request(token: string, path: string, options?: RequestInit) {
 }
 
 export async function readAttentionStatus(
-  token: string,
   chat: string,
   attention: string,
   signal: AbortSignal,
 ) {
   const path = `/api/v1/chats/${encodeURIComponent(chat)}/attentions/${encodeURIComponent(attention)}`;
-  const response = await request(token, path, { signal });
+  const response = await request(path, { signal });
   return response.json() as Promise<AttentionStatus>;
 }
 
 export async function readProposalStatus(
-  token: string,
   chat: string,
   attention: string,
   signal: AbortSignal,
 ) {
-  return (await readAttentionStatus(token, chat, attention, signal)).proposal;
+  return (await readAttentionStatus(chat, attention, signal)).proposal;
 }
 
 export async function approveProposal(
-  token: string,
   chat: string,
   attention: string,
   version: number,
   fromIssue = false,
 ) {
   const path = `/api/v1/chats/${encodeURIComponent(chat)}/attentions/${encodeURIComponent(attention)}/approve`;
-  const response = await request(token, path, {
+  const response = await request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ version, from_issue: fromIssue }),
@@ -327,13 +323,12 @@ export async function approveProposal(
 export type PendingAttentionReply = { operation_id: string; text: string };
 
 export async function answerIssueAttention(
-  token: string,
   issue: string,
   attention: string,
   reply: PendingAttentionReply,
 ) {
   const path = `/api/v1/issues/${encodeURIComponent(issue)}/attentions/${encodeURIComponent(attention)}/answer`;
-  const response = await request(token, path, {
+  const response = await request(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(reply),
@@ -346,7 +341,6 @@ export async function answerIssueAttention(
 }
 
 export async function readMessages(
-  token: string,
   before?: number,
   signal?: AbortSignal,
   issue?: string,
@@ -354,7 +348,7 @@ export async function readMessages(
 ): Promise<Page> {
   const messages = messagePath(issue, chat);
   const path = before === undefined ? messages : `${messages}?before=${before}`;
-  const response = await request(token, path, { signal });
+  const response = await request(path, { signal });
   if (!issue) return response.json() as Promise<Page>;
   const page: {
     title: string;
@@ -407,7 +401,6 @@ export async function readMessages(
 }
 
 export async function readIssueBoard(
-  token: string,
   before: string | undefined,
   signal: AbortSignal,
 ) {
@@ -416,78 +409,61 @@ export async function readIssueBoard(
     before === undefined
       ? path
       : `${path}?before=${encodeURIComponent(before)}`;
-  return (await request(token, url, { signal })).json() as Promise<BoardPage>;
+  return (await request(url, { signal })).json() as Promise<BoardPage>;
 }
 
-export async function readIssueOverview(
-  token: string,
-  issue: string,
-  signal: AbortSignal,
-) {
+export async function readIssueOverview(issue: string, signal: AbortSignal) {
   const path = `/api/v1/issues/${encodeURIComponent(issue)}/overview`;
-  return (
-    await request(token, path, { signal })
-  ).json() as Promise<IssueOverviewData>;
+  return (await request(path, { signal })).json() as Promise<IssueOverviewData>;
 }
 
 export async function readIssueAttentionHistory(
-  token: string,
   issue: string,
   before: number,
   signal: AbortSignal,
 ) {
   const path = `/api/v1/issues/${encodeURIComponent(issue)}/attention-replies?before=${before}`;
   return (
-    await request(token, path, { signal })
+    await request(path, { signal })
   ).json() as Promise<IssueAttentionReplyPage>;
 }
 
-export async function readNotifications(
-  token: string,
-  before?: number,
-  signal?: AbortSignal,
-) {
+export async function readNotifications(before?: number, signal?: AbortSignal) {
   const path = "/api/v1/chats/main/notifications";
   const url = before === undefined ? path : `${path}?before=${before}`;
-  return (
-    await request(token, url, { signal })
-  ).json() as Promise<NotificationPage>;
+  return (await request(url, { signal })).json() as Promise<NotificationPage>;
 }
 
-export async function readRunners(token: string, signal: AbortSignal) {
-  return (
-    await request(token, "/api/v1/runners", { signal })
-  ).json() as Promise<RunnerInstance[]>;
+export async function readRunners(signal: AbortSignal) {
+  return (await request("/api/v1/runners", { signal })).json() as Promise<
+    RunnerInstance[]
+  >;
 }
 
-export async function readAgents(token: string, signal: AbortSignal) {
+export async function readAgents(signal: AbortSignal) {
   return (
-    await request(token, "/api/v1/agents", { signal })
+    await request("/api/v1/agents", { signal })
   ).json() as Promise<AgentDirectory>;
 }
 
 export async function sendMessage(
-  token: string,
   message: PendingMessage,
   issue?: string,
   chat?: string,
 ) {
-  await request(token, messagePath(issue, chat), {
+  const response = await request(messagePath(issue, chat), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(message),
   });
+  // Finish reading the receipt before clearing the saved retry.
+  await response.json();
 }
 
 type RolloutItem = { type: string; text?: string; [field: string]: unknown };
 
-export async function readRollout(
-  token: string,
-  run: string,
-  signal: AbortSignal,
-) {
+export async function readRollout(run: string, signal: AbortSignal) {
   const response = await request(
-    token,
     `/api/v1/runs/${encodeURIComponent(run)}/rollout`,
     { signal },
   );
@@ -502,20 +478,16 @@ export async function readRollout(
     .join("\n\n");
 }
 
-function readArtifact(token: string, id: string, signal?: AbortSignal) {
-  return request(token, `/api/v1/artifacts/${encodeURIComponent(id)}`, {
+function readArtifact(id: string, signal?: AbortSignal) {
+  return request(`/api/v1/artifacts/${encodeURIComponent(id)}`, {
     signal,
   });
 }
 
 export const markdownPreviewLimit = 1024 * 1024;
 
-export async function readArtifactMarkdown(
-  token: string,
-  id: string,
-  signal: AbortSignal,
-) {
-  const response = await readArtifact(token, id, signal);
+export async function readArtifactMarkdown(id: string, signal: AbortSignal) {
+  const response = await readArtifact(id, signal);
   const reader = response.body?.getReader();
   if (!reader) throw new Error("无法读取 Markdown 原件");
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -535,8 +507,8 @@ export async function readArtifactMarkdown(
   }
 }
 
-export async function download(token: string, file: Artifact) {
-  const response = await readArtifact(token, file.id);
+export async function download(file: Artifact) {
+  const response = await readArtifact(file.id);
   const url = URL.createObjectURL(await response.blob());
   const link = document.createElement("a");
   link.href = url;

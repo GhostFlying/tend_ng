@@ -58,11 +58,9 @@ export const resourceLinks = [
 ] as const;
 
 export function PhoneNavigation({
-  token,
   resource,
   board,
 }: {
-  token: string;
   resource: boolean;
   board: boolean;
 }) {
@@ -85,7 +83,7 @@ export function PhoneNavigation({
         <NavIcon name="board" />
         Issues
       </a>
-      <Notifications token={token} mobileIcon={<NavIcon name="notice" />} />
+      <Notifications mobileIcon={<NavIcon name="notice" />} />
       <a
         className="phone-item"
         href="/more"
@@ -98,7 +96,13 @@ export function PhoneNavigation({
   );
 }
 
-export function MoreResources({ disconnect }: { disconnect: () => void }) {
+export function MoreResources({
+  disconnect,
+  ending,
+}: {
+  disconnect: () => void;
+  ending: boolean;
+}) {
   return (
     <main className="resource-page">
       <nav className="more-resources" aria-label="更多导航">
@@ -108,7 +112,7 @@ export function MoreResources({ disconnect }: { disconnect: () => void }) {
             {label}
           </a>
         ))}
-        <button type="button" onClick={disconnect}>
+        <button type="button" onClick={disconnect} disabled={ending}>
           断开连接
         </button>
       </nav>

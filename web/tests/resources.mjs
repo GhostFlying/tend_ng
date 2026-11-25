@@ -9,11 +9,9 @@ try {
     const page = await browser.newPage({ viewport: { width, height: 844 } });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
-    await page.addInitScript(
-      (value) => sessionStorage.setItem("tend.token.v1", value),
-      token,
-    );
     await page.goto(url);
+    await page.getByLabel("访问令牌").fill(token);
+    await page.getByRole("button", { name: "连接", exact: true }).click();
     if (width === 390) {
       await page.getByRole("button", { name: "通知", exact: true }).click();
       const notifications = page.getByRole("region", { name: "工作通知" });

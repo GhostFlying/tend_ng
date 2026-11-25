@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { chromium } from "playwright";
+import { isAnonymousSessionProbe } from "./console-errors.mjs";
 
 const {
   TEND_URL: url,
@@ -36,6 +37,7 @@ async function connect(viewport) {
   const errors = [];
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
+    if (isAnonymousSessionProbe(message)) return;
     if (
       ["error", "warning"].includes(message.type()) &&
       !message.text().includes("net::ERR_FAILED")

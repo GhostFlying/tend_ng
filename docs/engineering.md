@@ -50,6 +50,10 @@ devcontainer 统一提供 Rust 和 Go 工具链。Web 工具链跟随选中的 V
 
 以旧 Tend 主干 `83bc15ae` 的 Web 工具链为初始基线。开发容器使用 Node 24，包管理用 pnpm 10.34.7。旧版锁文件中的 React、TypeScript 和 Vite 分别为 19.3.1、6.0.3 和 8.3.5。ESLint 和 Prettier 负责静态检查和格式，Vitest 跑模块测试，Playwright 验证少量关键浏览器路径。新项目按实际前端依赖维护自己的清单和锁文件。 [旧容器工具链](https://github.com/GhostFlying/tend/blob/83bc15ae/.devcontainer/Dockerfile#L1-L20) · [旧前端清单](https://github.com/GhostFlying/tend/blob/83bc15ae/web/package.json) · [旧前端锁文件](https://github.com/GhostFlying/tend/blob/83bc15ae/web/pnpm-lock.yaml#L9-L71)
 
+### Web 会话与部署入口
+
+Web 静态资源与用户 API 同源。Server 验证一次 `TEND_TOKEN` 后签发 HttpOnly Cookie，随后只在明确列出的 Web 用户 API 验证会话。HTTP 本机回环仅使用非持久 Cookie。远程 Web 使用同机可信 TLS 代理经回环转发到 HTTP 上游，Server 以 `--web-origin` 配置的完整 HTTPS origin 判断入口，不信任客户端声明的转发头。发布时按入口核对 Host 保留、准确 Origin 校验与 Cookie 属性。 [接口、测试与回退边界](web-session.md)
+
 ## 数据库
 
 **已确认。** 一期 Server 和每个 Runner 各自使用本地 SQLite WAL。Server 保存权威的完整 Chat 正文和 Issue 当前状态。Runner 持有自己的输入、执行与发送记录，在本机确认已接收的指令、原生回执和补传位置。SQL 与事务由各组件的存储实现持有。Smoke 已验证 `rusqlite` 的 bundled SQLite 配置，作为产品实现的驱动候选。 [数据归属与访问边界](storage.md) · [Smoke 结果](plans/rust-offline-smoke.md#执行结果)

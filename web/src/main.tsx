@@ -1,7 +1,8 @@
 import { lazy, Suspense, useState } from "react";
 import type { FormEvent } from "react";
 import { createRoot } from "react-dom/client";
-import { readMessages } from "./api";
+import { allowsWebLogin } from "./webSession";
+import { useWebSession } from "./useWebSession";
 import { IssueBoard } from "./IssueBoard";
 import { Chat } from "./Chat";
 import { Notifications } from "./Notifications";
@@ -29,7 +30,6 @@ const resourceTitle =
       : path === "/more"
         ? "更多"
         : "";
-const tokenKey = "tend.token.v1";
 const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
 const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
 const issueRoute =
@@ -37,8 +37,16 @@ const issueRoute =
 const issue = issueRoute ? decodeURIComponent(issueRoute[1]) : undefined;
 const issueNumber = issue?.match(/^#?([1-9][0-9]*)$/)?.[1];
 
-function Connect({ onConnect }: { onConnect: (token: string) => void }) {
+function Connect({
+  notice,
+  onConnect,
+}: {
+  notice: string;
+  onConnect: (token: string, remember: boolean) => Promise<void>;
+}) {
   const [token, setToken] = useState("");
+  const canRemember = window.location.protocol === "https:";
+  const [remember, setRemember] = useState(false);
   const [checking, setChecking] = useState(false);
   const [error, setError] = useState("");
 
@@ -49,10 +57,15 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
     setError("");
     setChecking(true);
     try {
-      await readMessages(value);
-      onConnect(value);
+      await onConnect(value, canRemember && remember);
+      setToken("");
     } catch (error) {
-      setError(error instanceof Error ? error.message : "暂时无法连接 Tend");
+      if (error instanceof DOMException && error.name === "AbortError") {
+        setToken("");
+        setError("另一标签已退出，请重新连接 Tend。");
+      } else {
+        setError(error instanceof Error ? error.message : "暂时无法连接 Tend");
+      }
     } finally {
       setChecking(false);
     }
@@ -66,18 +79,33 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
         <input
           id="token"
           type="password"
-          autoComplete="current-password"
+          autoComplete="off"
           value={token}
           required
           onChange={(event) => setToken(event.target.value)}
         />
+        <label className="remember-browser">
+          <input
+            type="checkbox"
+            checked={remember}
+            disabled={!canRemember || checking}
+            aria-describedby="remember-hint"
+            onChange={(event) => setRemember(event.target.checked)}
+          />
+          记住此浏览器（7 天）
+        </label>
+        <p id="remember-hint" className="session-hint">
+          {canRemember
+            ? "不勾选时，仅在本次浏览器会话内有效，最长 12 小时。"
+            : "关闭并重新打开浏览器后保留登录，需要 HTTPS。本机 HTTP 会话最长 12 小时。"}
+        </p>
         <button type="submit" className="primary" disabled={checking}>
           {checking ? "正在连接…" : "连接"}
         </button>
       </form>
-      {error && (
+      {(error || notice) && (
         <p className="error" role="alert">
-          {error}
+          {error || notice}
         </p>
       )}
     </main>
@@ -85,24 +113,18 @@ function Connect({ onConnect }: { onConnect: (token: string) => void }) {
 }
 
 function App() {
-  const [token, setToken] = useState(() => sessionStorage.getItem(tokenKey));
+  const { state, notice, ending, connect, disconnect } = useWebSession();
   const [reachable, setReachable] = useState<boolean | null>(null);
+  const connected = state === "connected";
 
-  function connect(value: string) {
-    sessionStorage.setItem(tokenKey, value);
+  async function handleConnect(token: string, remember: boolean) {
+    await connect(token, remember);
     setReachable(true);
-    setToken(value);
-  }
-
-  function disconnect() {
-    sessionStorage.removeItem(tokenKey);
-    setReachable(null);
-    setToken(null);
   }
 
   return (
-    <div className={token ? "app connected" : "app"}>
-      {token && (
+    <div className={connected ? "app connected" : "app"}>
+      {connected && (
         <aside className="sidebar">
           <div className="brand">
             <span className="brand-mark" aria-hidden="true">
@@ -160,11 +182,11 @@ function App() {
       <div className="content" data-issue={!!issue}>
         <header
           className={
-            token && resourceTitle ? "header resource-header" : "header"
+            connected && resourceTitle ? "header resource-header" : "header"
           }
-          data-resource={token && resourceTitle ? path.slice(1) : undefined}
+          data-resource={connected && resourceTitle ? path.slice(1) : undefined}
         >
-          {token && issue ? (
+          {connected && issue ? (
             <nav className="issue-crumb" aria-label="当前位置">
               <a href="/issues" className="text-button">
                 返回看板
@@ -176,25 +198,32 @@ function App() {
             </nav>
           ) : (
             <h1>
-              {(token && (resourceTitle || (board && "Issue 看板"))) || "Tend"}
+              {(connected && (resourceTitle || (board && "Issue 看板"))) ||
+                "Tend"}
             </h1>
           )}
-          {token && !resourceTitle && (
+          {connected && !resourceTitle && (
             <div className="header-actions">
-              <Notifications token={token} />
+              <Notifications />
               <button
                 type="button"
                 className="text-button"
-                onClick={disconnect}
+                disabled={ending}
+                onClick={() => void disconnect()}
               >
                 断开连接
               </button>
             </div>
           )}
         </header>
-        {token ? (
+        {connected && notice && (
+          <p className="session-notice" role="status">
+            {notice}
+          </p>
+        )}
+        {connected ? (
           board ? (
-            <IssueBoard token={token} onReachable={setReachable} />
+            <IssueBoard onReachable={setReachable} />
           ) : issue ? (
             <Suspense
               fallback={
@@ -204,27 +233,32 @@ function App() {
               }
             >
               <IssueDetail
-                token={token}
                 issue={issue}
                 chatId={chatId}
                 onReachable={setReachable}
               />
             </Suspense>
           ) : path === "/agents" ? (
-            <Agents token={token} onReachable={setReachable} />
+            <Agents onReachable={setReachable} />
           ) : path === "/hosts" ? (
-            <Hosts token={token} onReachable={setReachable} />
+            <Hosts onReachable={setReachable} />
           ) : path === "/more" ? (
-            <MoreResources disconnect={disconnect} />
+            <MoreResources
+              disconnect={() => void disconnect()}
+              ending={ending}
+            />
           ) : (
-            <Chat token={token} chatId={chatId} onReachable={setReachable} />
+            <Chat chatId={chatId} onReachable={setReachable} />
           )
+        ) : state === "checking" ? (
+          <main className="lane connect" role="status">
+            正在检查登录状态…
+          </main>
         ) : (
-          <Connect onConnect={connect} />
+          <Connect notice={notice} onConnect={handleConnect} />
         )}
-        {token && (
+        {connected && (
           <PhoneNavigation
-            token={token}
             resource={!!resourceTitle}
             board={board || !!issue}
           />
@@ -234,4 +268,24 @@ function App() {
   );
 }
 
-createRoot(document.getElementById("root")!).render(<App />);
+function HttpsRequired() {
+  return (
+    <div className="app">
+      <div className="content">
+        <header className="header">
+          <h1>Tend</h1>
+        </header>
+        <main className="lane connect">
+          <h1>请使用 HTTPS 登录 Tend</h1>
+          <p className="session-hint">
+            当前是远端 HTTP 地址。请打开已配置的 HTTPS 地址后再输入访问令牌。
+          </p>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+createRoot(document.getElementById("root")!).render(
+  allowsWebLogin(location) ? <App /> : <HttpsRequired />,
+);

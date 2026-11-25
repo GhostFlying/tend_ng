@@ -39,11 +39,9 @@ function Objective({ text }: { text: string }) {
 }
 
 function Delivery({
-  token,
   file,
   proposal,
 }: {
-  token: string;
   file: IssueDelivery;
   proposal?: boolean;
 }) {
@@ -60,7 +58,7 @@ function Delivery({
   useEffect(() => {
     if (!opened || !canPreview) return;
     const controller = new AbortController();
-    void readArtifactMarkdown(token, id, controller.signal).then(
+    void readArtifactMarkdown(id, controller.signal).then(
       (text) => {
         if (!controller.signal.aborted) setBody({ text });
       },
@@ -74,13 +72,13 @@ function Delivery({
     return () => controller.abort();
     // The report is polled. An immutable original doesn't need re-reading
     // when only the enclosing report object has changed.
-  }, [token, id, opened, canPreview]);
+  }, [id, opened, canPreview]);
 
   async function saveFile() {
     setDownloadError("");
     setDownloading(true);
     try {
-      await download(token, file);
+      await download(file);
     } catch (error) {
       setDownloadError(
         error instanceof Error ? error.message : "暂时无法下载原件",
@@ -180,11 +178,9 @@ function Delivery({
 }
 
 function CandidateReport({
-  token,
   candidate,
   chat,
 }: {
-  token: string;
   candidate: ProposalVersion;
   chat: string;
 }) {
@@ -204,13 +200,12 @@ function CandidateReport({
       </ul>
       <ul className="delivery-files" aria-label="报告附件">
         <Delivery
-          token={token}
           key={candidate.artifact.id}
           file={candidate.artifact}
           proposal
         />
         {candidate.other_artifacts.map((file) => (
-          <Delivery key={file.id} token={token} file={file} />
+          <Delivery key={file.id} file={file} />
         ))}
       </ul>
       {candidate.message_id && (
@@ -226,13 +221,11 @@ function CandidateReport({
 }
 
 function ProposalReport({
-  token,
   proposal,
   chat,
   selected,
   onRefresh,
 }: {
-  token: string;
   proposal: IssueProposal;
   chat: string;
   selected: boolean;
@@ -248,15 +241,9 @@ function ProposalReport({
           <DecisionTime time={current.updated_at} /> 更新
         </span>
       </div>
-      <CandidateReport
-        key={current.version}
-        token={token}
-        candidate={current}
-        chat={chat}
-      />
+      <CandidateReport key={current.version} candidate={current} chat={chat} />
       {!selected && proposal.status.decision && (
         <ProposalApproval
-          token={token}
           chat={chat}
           attention={proposal.attention_id}
           status={proposal.status}
@@ -273,11 +260,7 @@ function ProposalReport({
                 {candidate.title} · v{candidate.version} ·{" "}
                 <DecisionTime time={candidate.updated_at} />
               </summary>
-              <CandidateReport
-                token={token}
-                candidate={candidate}
-                chat={chat}
-              />
+              <CandidateReport candidate={candidate} chat={chat} />
             </details>
           ))}
         </details>
@@ -288,11 +271,9 @@ function ProposalReport({
 
 function ReportArticle({
   report,
-  token,
   chat,
 }: {
   report: IssueDeliveryReport;
-  token: string;
   chat: string;
 }) {
   const history = report.history ?? [];
@@ -305,7 +286,7 @@ function ReportArticle({
       <Markdown text={report.text} />
       <ul className="delivery-files" aria-label="报告附件">
         {report.artifacts.map((file) => (
-          <Delivery key={file.id} token={token} file={file} />
+          <Delivery key={file.id} file={file} />
         ))}
       </ul>
       {history.length > 0 && (
@@ -315,7 +296,6 @@ function ReportArticle({
             <ReportArticle
               key={version.message_id}
               report={version}
-              token={token}
               chat={chat}
             />
           ))}
@@ -327,11 +307,9 @@ function ReportArticle({
 
 function DeliveredReports({
   reports,
-  token,
   chat,
 }: {
   reports: IssueDeliveryReport[];
-  token: string;
   chat: string;
 }) {
   if (!reports.length) {
@@ -342,21 +320,14 @@ function DeliveredReports({
     );
   }
   return reports.map((report) => (
-    <ReportArticle
-      key={report.message_id}
-      report={report}
-      token={token}
-      chat={chat}
-    />
+    <ReportArticle key={report.message_id} report={report} chat={chat} />
   ));
 }
 
 function IssueSummary({
-  token,
   data,
   onRefresh,
 }: {
-  token: string;
   data: IssueOverviewData;
   onRefresh: () => void;
 }) {
@@ -427,7 +398,6 @@ function IssueSummary({
         current && (
           <ProposalApproval
             key={`${current.attention_id}-${current.status.version}`}
-            token={token}
             chat={data.chat_id}
             attention={current.attention_id}
             status={current.status}
@@ -441,7 +411,6 @@ function IssueSummary({
           key={proposal.attention_id}
           proposal={proposal}
           chat={data.chat_id}
-          token={token}
           selected={proposal === current}
           onRefresh={onRefresh}
         />
@@ -450,11 +419,7 @@ function IssueSummary({
         reports.length > 0 && (
           <details className="proposal-other-reports">
             <summary>其他报告 ({reports.length})</summary>
-            <DeliveredReports
-              reports={reports}
-              token={token}
-              chat={data.chat_id}
-            />
+            <DeliveredReports reports={reports} chat={data.chat_id} />
           </details>
         )
       ) : (
@@ -463,16 +428,11 @@ function IssueSummary({
             <h2 id="issue-reports">报告与评审材料</h2>
             {reports.length > 0 && <span>{reports.length} 份已回传报告</span>}
           </div>
-          <DeliveredReports
-            reports={reports}
-            token={token}
-            chat={data.chat_id}
-          />
+          <DeliveredReports reports={reports} chat={data.chat_id} />
         </section>
       )}
       <IssueAttention
         key={data.id}
-        token={token}
         issue={data.id}
         chat={data.chat_id}
         decisions={decisions}
@@ -483,13 +443,7 @@ function IssueSummary({
   );
 }
 
-function WorkDeliveries({
-  token,
-  data,
-}: {
-  token: string;
-  data: IssueOverviewData;
-}) {
+function WorkDeliveries({ data }: { data: IssueOverviewData }) {
   const reported = new Set([
     ...(data.reports ?? []).flatMap((report) => [
       ...report.artifacts.map(({ id }) => id),
@@ -516,7 +470,7 @@ function WorkDeliveries({
       </p>
       <ul className="delivery-files" aria-label="其他工作交付">
         {files.map((file) => (
-          <Delivery key={file.id} token={token} file={file} />
+          <Delivery key={file.id} file={file} />
         ))}
       </ul>
     </details>
@@ -610,12 +564,10 @@ function IssueProperties({ data }: { data: IssueOverviewData }) {
 }
 
 export function IssueDetail({
-  token,
   issue,
   chatId,
   onReachable,
 }: {
-  token: string;
   issue: string;
   chatId: string;
   onReachable: (online: boolean) => void;
@@ -629,7 +581,7 @@ export function IssueDetail({
     let timer: number;
     async function update() {
       try {
-        const result = await readIssueOverview(token, issue, controller.signal);
+        const result = await readIssueOverview(issue, controller.signal);
         if (!controller.signal.aborted) {
           setData(result);
           setError("");
@@ -649,11 +601,10 @@ export function IssueDetail({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, issue, refresh]);
+  }, [issue, refresh]);
 
   return (
     <Chat
-      token={token}
       issue={issue}
       chatId={chatId}
       onReachable={onReachable}
@@ -670,7 +621,6 @@ export function IssueDetail({
             )}
             {data ? (
               <IssueSummary
-                token={token}
                 data={data}
                 onRefresh={() => setRefresh((value) => value + 1)}
               />
@@ -679,7 +629,7 @@ export function IssueDetail({
             )}
           </>
         ),
-        work: data && <WorkDeliveries token={token} data={data} />,
+        work: data && <WorkDeliveries data={data} />,
         properties: data && <IssueProperties data={data} />,
       }}
     />

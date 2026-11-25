@@ -15,14 +15,12 @@ export function DecisionTime({ time }: { time: number }) {
 }
 
 export function ProposalApproval({
-  token,
   chat,
   attention,
   status,
   inIssue,
   onRefresh,
 }: {
-  token: string;
   chat: string;
   attention: string;
   status: ProposalStatus;
@@ -42,7 +40,7 @@ export function ProposalApproval({
     setError("");
     try {
       setReceipt(
-        await approveProposal(token, chat, attention, status.version, inIssue),
+        await approveProposal(chat, attention, status.version, inIssue),
       );
     } catch (reason) {
       setError(
@@ -114,14 +112,12 @@ export function ProposalApproval({
 }
 
 export function ChatProposal({
-  token,
   chat,
   attention,
   initial,
   historical,
   onRefresh,
 }: {
-  token: string;
   chat: string;
   attention: string;
   initial: ProposalStatus;
@@ -137,7 +133,7 @@ export function ChatProposal({
     let timer: number;
     async function update() {
       try {
-        const status = await readProposalStatus(token, chat, attention, signal);
+        const status = await readProposalStatus(chat, attention, signal);
         if (!signal.aborted) setFresh(status);
       } catch {
         // Keep the last saved view. The Server still validates every write.
@@ -149,12 +145,11 @@ export function ChatProposal({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, chat, attention, historical, refresh]);
+  }, [chat, attention, historical, refresh]);
   const status = historical ? (fresh ?? initial) : initial;
   return (
     <ProposalApproval
       key={status.version}
-      token={token}
       chat={chat}
       attention={attention}
       status={status}

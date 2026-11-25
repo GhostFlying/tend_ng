@@ -28,27 +28,24 @@ function change(activity: Activity) {
   return labels[activity.current] ?? activity.current;
 }
 
-function ActivityList({ token }: { token: string }) {
+function ActivityList() {
   const [page, setPage] = useState<NotificationPage | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     const controller = new AbortController();
-    void readNotifications(token, undefined, controller.signal).then(
-      setPage,
-      () => {
-        if (!controller.signal.aborted) setError("暂时无法读取通知");
-      },
-    );
+    void readNotifications(undefined, controller.signal).then(setPage, () => {
+      if (!controller.signal.aborted) setError("暂时无法读取通知");
+    });
     return () => controller.abort();
-  }, [token]);
+  }, []);
 
   async function earlier() {
     if (page?.next_before == null || loading) return;
     setLoading(true);
     setError("");
     try {
-      const next = await readNotifications(token, page.next_before);
+      const next = await readNotifications(page.next_before);
       setPage({
         activities: [...page.activities, ...next.activities],
         next_before: next.next_before,
@@ -101,13 +98,7 @@ function ActivityList({ token }: { token: string }) {
   );
 }
 
-export function Notifications({
-  token,
-  mobileIcon,
-}: {
-  token: string;
-  mobileIcon?: ReactNode;
-}) {
+export function Notifications({ mobileIcon }: { mobileIcon?: ReactNode }) {
   const [open, setOpen] = useState(false);
   const panelId = useId();
   const focusBefore = useRef<HTMLElement | null>(null);
@@ -153,7 +144,7 @@ export function Notifications({
               关闭
             </button>
           </div>
-          <ActivityList token={token} />
+          <ActivityList />
         </section>
       )}
     </>

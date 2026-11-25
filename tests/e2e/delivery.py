@@ -217,8 +217,8 @@ def main():
                 stored = root / "server.artifacts" / file_id
                 stored.unlink()
                 assert cli("artifact", "download", file_id).returncode != 0
-                wait_for(lambda: read("issue", "read", child)["artifacts"][0]["available"], bool)
-                assert cli("artifact", "download", file_id).stdout == CONTENTS
+                wait_for(lambda: cli("artifact", "download", file_id).stdout, lambda body: body == CONTENTS)
+                assert read("issue", "read", child)["artifacts"][0]["available"]
                 assert sql("server", "SELECT count(*) FROM issue_inputs WHERE id = ?", file_id) == [(1,)]
                 wait_for(lambda: sql("runner", "SELECT 1 FROM run_outbox WHERE acknowledged = 0 LIMIT 1"),
                          lambda rows: not rows)

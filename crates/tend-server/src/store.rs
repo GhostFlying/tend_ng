@@ -20,6 +20,7 @@ mod runner;
 mod short_numbers;
 mod tend_review;
 mod timing;
+pub(crate) mod web_sessions;
 mod work;
 
 use anyhow::{Context, Result, ensure};
@@ -30,7 +31,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-const SCHEMA_VERSION: i64 = 29;
+const SCHEMA_VERSION: i64 = 30;
 
 pub struct Store {
     db: Connection,
@@ -223,6 +224,9 @@ impl Store {
         }
         if version < 29 {
             attention::migrate_issue_replies(&tx)?;
+        }
+        if version < 30 {
+            web_sessions::migrate(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

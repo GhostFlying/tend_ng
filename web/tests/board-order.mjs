@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { collectPageErrors } from "./console-errors.mjs";
 
 const {
   TEND_URL: url,
@@ -22,10 +23,7 @@ try {
       colorScheme: "light",
     });
     const errors = [];
-    page.on("pageerror", (error) => errors.push(error.message));
-    page.on("console", (message) => {
-      if (message.type() === "error") errors.push(message.text());
-    });
+    collectPageErrors(page, errors);
 
     await page.goto(url);
     await page.getByLabel("访问令牌").fill(token);

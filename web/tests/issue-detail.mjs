@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { isAnonymousSessionProbe } from "./console-errors.mjs";
 
 const { TEND_URL: url, TEND_TOKEN: token, TEND_SCREENSHOTS } = process.env;
 assert(url && token);
@@ -200,6 +201,7 @@ try {
     const requests = [];
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
+      if (isAnonymousSessionProbe(message)) return;
       if (message.type() === "error" || message.type() === "warning") {
         errors.push({ text: message.text(), url: message.location().url });
       }

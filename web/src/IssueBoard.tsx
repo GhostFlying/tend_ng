@@ -129,10 +129,8 @@ export function Card({ issue }: { issue: BoardIssue }) {
 }
 
 export function IssueBoard({
-  token,
   onReachable,
 }: {
-  token: string;
   onReachable: (value: boolean) => void;
 }) {
   const [cursors, setCursors] = useState<string[]>([]);
@@ -155,7 +153,7 @@ export function IssueBoard({
     let timer: number;
     async function update() {
       try {
-        const result = await readIssueBoard(token, before, controller.signal);
+        const result = await readIssueBoard(before, controller.signal);
         if (!controller.signal.aborted) {
           setPage(result);
           setMobileStage(
@@ -183,7 +181,7 @@ export function IssueBoard({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, before, onReachable]);
+  }, [before, onReachable]);
 
   useEffect(() => {
     mobileTabs.current

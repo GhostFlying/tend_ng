@@ -22,13 +22,11 @@ import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
 
 function OrdinaryChatAttention({
-  token,
   chat,
   initial,
   historical,
   onReply,
 }: {
-  token: string;
   chat: string;
   initial: AttentionStatus;
   historical: boolean;
@@ -57,7 +55,7 @@ function OrdinaryChatAttention({
     let timer: number;
     async function update() {
       try {
-        const current = await readAttentionStatus(token, chat, id, signal);
+        const current = await readAttentionStatus(chat, id, signal);
         if (signal.aborted) return;
         setFresh(current);
         if (current.state === "delivered") return;
@@ -71,7 +69,7 @@ function OrdinaryChatAttention({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, chat, id, watch, visible]);
+  }, [chat, id, watch, visible]);
 
   return (
     <div ref={row}>
@@ -109,10 +107,9 @@ function pendingKey(chat: string, issue?: string) {
 }
 
 function savedMessage(chat: string, issue?: string): PendingMessage | null {
-  const value = sessionStorage.getItem(pendingKey(chat, issue));
-  if (!value) return null;
   try {
-    return JSON.parse(value) as PendingMessage;
+    const value = sessionStorage.getItem(pendingKey(chat, issue));
+    return value ? (JSON.parse(value) as PendingMessage) : null;
   } catch {
     return null;
   }
@@ -128,13 +125,11 @@ function messageAnchor() {
 
 function RunRow({
   id,
-  token,
   run,
   author,
   issue,
 }: {
   id: string;
-  token: string;
   run: string;
   author: string;
   issue?: string;
@@ -154,7 +149,7 @@ function RunRow({
     const { signal } = request.current;
     setText(null);
     setError("");
-    void readRollout(token, run, signal).then(
+    void readRollout(run, signal).then(
       (value) => {
         if (!signal.aborted) setText(value);
       },
@@ -204,7 +199,6 @@ function MessageRow({
   showReference,
   sourceChat,
   descendant,
-  token,
   onReply,
   onRefresh,
   historical,
@@ -214,7 +208,6 @@ function MessageRow({
   showReference: boolean;
   sourceChat: string;
   descendant: boolean;
-  token: string;
   onReply: (message: Message) => void;
   onRefresh: () => void;
   historical: boolean;
@@ -231,7 +224,7 @@ function MessageRow({
     setError("");
     setDownloading(file.id);
     try {
-      await download(token, file);
+      await download(file);
     } catch (error) {
       setError(errorText(error));
     } finally {
@@ -315,7 +308,6 @@ function MessageRow({
       {message.attention?.proposal ? (
         <ChatProposal
           historical={historical}
-          token={token}
           chat={sourceChat}
           attention={message.attention.id}
           initial={message.attention.proposal}
@@ -325,7 +317,6 @@ function MessageRow({
         message.attention && (
           <OrdinaryChatAttention
             historical={historical}
-            token={token}
             chat={sourceChat}
             initial={message.attention}
             onReply={() => onReply(message)}
@@ -361,7 +352,6 @@ function MessageRow({
 }
 
 function Composer({
-  token,
   issue,
   chatId,
   replyId,
@@ -370,7 +360,6 @@ function Composer({
   onCancelReply,
   onSent,
 }: {
-  token: string;
   issue?: string;
   chatId: string;
   replyId: string | null;
@@ -395,17 +384,35 @@ function Composer({
         ? attempt.current
         : { operation_id: operationId(), text: value, reply_to: quote };
     attempt.current = message;
-    sessionStorage.setItem(pendingKey(chatId, issue), JSON.stringify(message));
+    let saved = true;
+    try {
+      sessionStorage.setItem(
+        pendingKey(chatId, issue),
+        JSON.stringify(message),
+      );
+    } catch {
+      saved = false;
+    }
     setSending(true);
     setError("");
     try {
-      await sendMessage(token, message, issue, chatId);
-      sessionStorage.removeItem(pendingKey(chatId, issue));
+      await sendMessage(message, issue, chatId);
+      if (saved) {
+        try {
+          sessionStorage.removeItem(pendingKey(chatId, issue));
+        } catch {
+          // The Server already accepted the message.
+        }
+      }
       attempt.current = null;
       setText("");
       onSent(replyId);
     } catch {
-      setError("暂时无法确认收件，再次发送会沿原消息重试。");
+      setError(
+        saved
+          ? "暂时无法确认收件，再次发送会沿原消息重试。"
+          : "暂时无法确认收件，浏览器未保存草稿。请留在本页并重试。",
+      );
     } finally {
       setSending(false);
     }
@@ -480,13 +487,11 @@ function Composer({
 }
 
 export function Chat({
-  token,
   issue,
   chatId,
   onReachable,
   detail,
 }: {
-  token: string;
   issue?: string;
   chatId: string;
   onReachable: (online: boolean) => void;
@@ -554,13 +559,7 @@ export function Chat({
     let timer: number;
     async function update() {
       try {
-        const page = await readMessages(
-          token,
-          undefined,
-          signal,
-          issue,
-          chatId,
-        );
+        const page = await readMessages(undefined, signal, issue, chatId);
         if (signal.aborted) return;
         setMessages((current) => mergeMessages(current, page.messages));
         if (!issue) setLatestIds(new Set(page.messages.map(({ id }) => id)));
@@ -593,7 +592,7 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, issue, chatId, refresh, detailRefresh, onReachable]);
+  }, [issue, chatId, refresh, detailRefresh, onReachable]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
@@ -641,7 +640,7 @@ export function Chat({
       const history: Message[][] = [];
       try {
         while (cursor !== null) {
-          const page = await readMessages(token, cursor, signal, issue, chatId);
+          const page = await readMessages(cursor, signal, issue, chatId);
           if (signal.aborted) return;
           history.push(page.messages);
           cursor = page.next_before;
@@ -679,7 +678,7 @@ export function Chat({
         }
       }
     },
-    [token, issue, chatId],
+    [issue, chatId],
   );
 
   useEffect(() => {
@@ -730,7 +729,6 @@ export function Chat({
         <RunRow
           key={message.id}
           id={message.id}
-          token={token}
           run={detail.run_id}
           author={detail.author}
           issue={
@@ -752,7 +750,6 @@ export function Chat({
         showReference={showReference}
         sourceChat={sourceChat}
         descendant={descendant}
-        token={token}
         onRefresh={() => setRefresh((value) => value + 1)}
         historical={!latestIds.has(message.id)}
         onReply={(question) => {
@@ -843,7 +840,6 @@ export function Chat({
         </footer>
       ) : !numericRoute || canonicalIssue ? (
         <Composer
-          token={token}
           issue={canonicalIssue ?? issue}
           chatId={chatId}
           replyId={replyId}

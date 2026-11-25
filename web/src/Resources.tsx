@@ -4,13 +4,13 @@ import { readAgents, readRunners } from "./api";
 import type { AgentDirectory, AgentProfile, RunnerInstance } from "./api";
 import "./resources.css";
 
-type Props = { token: string; onReachable: (online: boolean) => void };
+type Props = { onReachable: (online: boolean) => void };
 
 function useResource<T>(
   props: Props,
-  read: (token: string, signal: AbortSignal) => Promise<T>,
+  read: (signal: AbortSignal) => Promise<T>,
 ) {
-  const { token, onReachable } = props;
+  const { onReachable } = props;
   const [data, setData] = useState<T>();
   const [failed, setFailed] = useState(false);
   const [revision, setRevision] = useState(0);
@@ -20,7 +20,7 @@ function useResource<T>(
     let timer: number;
     async function update() {
       try {
-        const value = await read(token, controller.signal);
+        const value = await read(controller.signal);
         if (controller.signal.aborted) return;
         setData(value);
         setFailed(false);
@@ -37,7 +37,7 @@ function useResource<T>(
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [token, onReachable, read, revision]);
+  }, [onReachable, read, revision]);
 
   return { data, failed, refresh: () => setRevision((value) => value + 1) };
 }

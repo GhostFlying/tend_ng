@@ -10,6 +10,7 @@ use std::{
         mpsc::{self, SyncSender},
     },
     thread,
+    time::Duration,
 };
 use tiny_http::{Header, Method, Request, Response, ResponseBox};
 
@@ -42,6 +43,18 @@ impl Endpoint {
 pub fn serve(db: &Path) -> Result<SyncSender<(Request, Endpoint)>> {
     let root = db.with_extension("artifacts");
     fs::create_dir_all(&root)?;
+    let audit = Store::open(db)?;
+    let audit_root = root.clone();
+    thread::spawn(move || {
+        let mut after = 0;
+        loop {
+            thread::sleep(Duration::from_secs(1));
+            match audit.audit_artifact_files(&audit_root, after) {
+                Ok(next) => after = next,
+                Err(error) => eprintln!("Audit delivery files: {error:#}"),
+            }
+        }
+    });
     let (sender, receiver) = mpsc::sync_channel::<(Request, Endpoint)>(8);
     let receiver = Arc::new(Mutex::new(receiver));
     for _ in 0..2 {
@@ -89,9 +102,9 @@ fn handle(
                         Header::from_bytes("Content-Type", "application/octet-stream").unwrap(),
                     )
                     .with_header(Header::from_bytes("Content-Disposition", "attachment").unwrap())
+                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
                     .boxed()),
                 Err(error) if error.kind() == ErrorKind::NotFound => {
-                    store.mark_artifact_missing(&id, &path)?;
                     Ok(error_response(409, "Delivery file is pending restoration"))
                 }
                 Err(error) => Err(error.into()),

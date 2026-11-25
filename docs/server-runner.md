@@ -10,7 +10,7 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 ## 通信通道与独立升级
 
-**已确认。** 外置 tsnet、LAN 直连和宿主机 `tailscaled` 是一期对等的通信方式。部署可按实际可达性配置，任一通道都可承载同一套 Tend API 和同步协议。信道按可信处理，请求用预共享 token 鉴权。业务身份独立于网络入口和 tailnet 节点名、tag、WhoIs。重连或切换通道后沿同一 Runner、Task 和操作身份对账。
+**已确认。** 外置 tsnet、LAN 直连和宿主机 `tailscaled` 是一期对等的通信方式。部署可按实际可达性配置，任一通道都可承载同一套 Tend API 和同步协议。信道按可信处理，请求用预共享 token 鉴权。业务身份独立于网络入口和 tailnet 节点名、tag、WhoIs。重连或切换通道后沿同一 Runner、Task 和操作身份对账。Runner 同步、原执行实例的 inspect 与交付上传只接受显式 Bearer，不接受 Web 会话 Cookie。浏览器访问 Server 的 rollout 读取入口时，Server 仍用共享 Bearer 向原 Runner 读取。 [Web 会话与 Bearer 边界](web-session.md)
 
 **外置 tsnet。** Go 通信进程独立持有节点状态，负责入网、监听、拨号和转发。它独立于 Rust 业务进程发布和重启。鉴权与业务协议由 Server 和 Runner 的 API 处理，Server 按 `runner_id` 查询对应的执行端点。 [独立 tsnet 进程](engineering.md#独立-tsnet-进程)
 

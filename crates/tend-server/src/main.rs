@@ -5,6 +5,7 @@ mod router;
 mod runner_api;
 mod store;
 mod web;
+mod web_session;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use protocol::{ApiError, DEFAULT_LISTEN, SendMessage, TOKEN_ENV};
@@ -21,7 +22,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -30,6 +31,7 @@ fn main() -> Result<()> {
     let mut listen = DEFAULT_LISTEN.to_owned();
     let mut cwd = env::current_dir()?;
     let mut web_dir = None;
+    let mut web_origin = None;
     let mut router_effort = None;
     let mut router_model = None;
     let mut program = OsString::from("codex");
@@ -76,6 +78,14 @@ fn main() -> Result<()> {
                 );
                 web_dir = Some(directory.canonicalize()?);
             }
+            Some("--web-origin") => {
+                web_origin = Some(
+                    args.next()
+                        .context("--web-origin needs an HTTPS origin")?
+                        .into_string()
+                        .map_err(|_| anyhow!("invalid --web-origin"))?,
+                );
+            }
             Some("--github-cli") => {
                 github_cli = args.next().context("--github-cli needs a program")?
             }
@@ -92,15 +102,17 @@ fn main() -> Result<()> {
         }
     }
     let db = db.context(USAGE)?;
-    let mut store = Store::initialize(&db)?;
-    store.enable_foreground_writes()?;
     let cwd = cwd
         .canonicalize()
         .context("resolve Router working directory")?;
     let token = env::var(TOKEN_ENV).context("set TEND_TOKEN before starting Server")?;
     ensure!(!token.is_empty(), "TEND_TOKEN is empty");
     let auth = format!("Bearer {token}");
+    let sessions = web_session::Sessions::new(web_origin.as_deref(), &token)?;
+    let mut store = Store::initialize(&db)?;
+    store.enable_foreground_writes()?;
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
+    sessions.prepare(&store)?;
     let placement = Store::open(&db)?;
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
@@ -129,9 +141,27 @@ fn main() -> Result<()> {
             }
             continue;
         }
-        let (status, body) = if !authenticated(&request, &auth) {
-            api_error(401, "valid Tend token required")
-        } else if let Some(run) = protocol::rollout_id(request.url()) {
+        let session_route = request.url().split('?').next() == Some(web_session::PATH);
+        let checked = if session_route {
+            sessions.handle(&mut store, &mut request, &auth).map(Some)
+        } else {
+            sessions.authorize(&store, &request, &auth)
+        };
+        let response = match checked {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("Web session operation failed: {error:#}");
+                let (_, body) = api_error(500, "Server could not check the request");
+                Some(json_response(500, &body)?.boxed())
+            }
+        };
+        if let Some(response) = response {
+            if let Err(error) = request.respond(response) {
+                eprintln!("Send authentication response: {error}");
+            }
+            continue;
+        }
+        let (status, body) = if let Some(run) = protocol::rollout_id(request.url()) {
             if request.method() != &Method::Get {
                 let (_, body) = api_error(405, "method not allowed");
                 let _ = request.respond(json_response(405, &body)?);
@@ -200,14 +230,8 @@ fn schedule(mut store: Store) {
 fn json_response(status: u16, body: &Value) -> Result<Response<Cursor<Vec<u8>>>> {
     Ok(Response::from_string(serde_json::to_string(body)?)
         .with_status_code(status)
-        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap()))
-}
-
-fn authenticated(request: &Request, auth: &str) -> bool {
-    request
-        .headers()
-        .iter()
-        .any(|header| header.field.equiv("Authorization") && header.value.as_str() == auth)
+        .with_header(Header::from_bytes("Content-Type", "application/json").unwrap())
+        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()))
 }
 
 fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u16, Value)> {

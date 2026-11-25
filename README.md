@@ -76,7 +76,7 @@ export TEND_URL=http://127.0.0.1:8832
 target/release/tend-runner --config .local/runner/config.json --db .local/runner/tend.sqlite
 ```
 
-Open [Tend on loopback](http://127.0.0.1:8832/) and enter the token, or use the CLI with the same environment.
+Open [Tend on loopback](http://127.0.0.1:8832/) and enter the token once to start a Web session. The browser does not store the shared token. Use the CLI with the same environment as before.
 
 ```sh
 target/release/tend runner list
@@ -86,6 +86,25 @@ target/release/tend --help
 ```
 
 Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach. For parallel replacement on the same Host, give both Runners the same absolute `workspace_root` and `host_id`, plus distinct Runner IDs and database files.
+
+## Web sign-in over HTTPS
+
+To use Web remotely or enable **Remember this browser (7 days)**, put a trusted TLS endpoint in front of the Server. Give the Web instance a dedicated hostname and configure its exact public origin. For example:
+
+```sh
+target/release/tend-server --db .local/server/tend.sqlite \
+  --listen 127.0.0.1:8832 --router-cwd .local/server --web-dir web/dist \
+  --web-origin https://tend.example.com
+```
+
+Terminate TLS with a reverse proxy that preserves the public `Host` header, or use `tend-tsnet --inbound-tls :443=127.0.0.1:8832` with the Web origin set to the node's certificate hostname. Forward to the Server over loopback from the same machine. Web session requests from non-loopback peers are rejected. The Server does not infer HTTPS from forwarded headers. Serve the Web and its API from the same origin. Do not log Authorization, Cookie, or Set-Cookie headers at the proxy.
+
+- Remember is off by default. The session Cookie is shared by new tabs on the same entry, and the Server expires it at 12 hours. Some browsers may restore session Cookies when they restore the previous browser session.
+- Remembered sessions expire after 7 days and survive closing and reopening a browser with the same profile and cookies. Both lifetimes are absolute and are not extended by use. A Server restart with the same token and database does not expire an otherwise valid session.
+- Without `--web-origin`, only local HTTP loopback addresses can sign in to Web, with a nonpersistent Cookie. With it, Web sign-in is accepted only on the configured entry. On a remote HTTP page, Web shows HTTPS guidance without collecting a token. Existing Bearer API clients on trusted links are unchanged.
+- Disconnect revokes that browser session and signs out other tabs. To invalidate all existing Web sessions, rotate `TEND_TOKEN` and start the Server with the new value. Update the CLI and Runner token when rotating as before.
+
+See the [Web session contract](docs/web-session.md) for API and verification details.
 
 ## Ordinary report history
 

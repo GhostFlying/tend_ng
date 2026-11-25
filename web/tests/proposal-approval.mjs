@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { isAnonymousSessionProbe } from "./console-errors.mjs";
 
 const {
   TEND_URL: url,
@@ -19,6 +20,7 @@ async function open(viewport) {
   const page = await browser.newPage({ viewport, colorScheme: "light" });
   page.on("pageerror", (error) => errors.push(error.message));
   page.on("console", (message) => {
+    if (isAnonymousSessionProbe(message)) return;
     if (
       ["error", "warning"].includes(message.type()) &&
       !message.text().includes("net::ERR_FAILED")

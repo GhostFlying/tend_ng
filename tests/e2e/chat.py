@@ -18,13 +18,14 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "chat_app_server.py
 
 
 @contextmanager
-def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=None):
+def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=None, web_origin=None):
+    origin = ["--web-origin", web_origin] if web_origin is not None else []
     web = ["--web-dir", web_dir] if web_dir is not None else []
     provider = ["--github-cli", github_cli] if github_cli is not None else []
     process = subprocess.Popen(
         [
             binary, "--db", root / "server.sqlite", "--listen", listen,
-            "--router-cwd", root, *web, *provider, "--app-server", sys.executable,
+            "--router-cwd", root, *web, *provider, *origin, "--app-server", sys.executable,
             FIXTURE, root / "app.sqlite",
         ],
         stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,

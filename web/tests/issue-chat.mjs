@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
 import { chromium } from "playwright";
+import { collectPageErrors } from "./console-errors.mjs";
 
 const {
   TEND_URL: url,
@@ -23,10 +24,7 @@ const reads = [];
 
 async function open(width, height) {
   const page = await browser.newPage({ viewport: { width, height } });
-  page.on("pageerror", (error) => errors.push(error.message));
-  page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
-  });
+  collectPageErrors(page, errors);
   page.on("request", (request) => {
     if (/\/api\/v1\/runs\/[^/]+\/rollout$/.test(request.url()))
       reads.push(request.url());
