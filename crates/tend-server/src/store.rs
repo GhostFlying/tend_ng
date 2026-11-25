@@ -234,6 +234,7 @@ impl Store {
         }
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS assignments_by_task ON runner_assignments(task_id, runner_id);
+             CREATE INDEX IF NOT EXISTS handoff_proofs_by_assignment ON runner_handoff_proofs(predecessor, json_extract(proof, '$.assignment_id'));
              CREATE INDEX IF NOT EXISTS chat_artifacts_by_file ON chat_artifacts(artifact_id, message_id);
              CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);
              CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",

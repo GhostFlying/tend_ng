@@ -124,6 +124,8 @@ pub struct TaskAssignment {
     pub followup: Option<CoordinationFollowup>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<crate::TendReview>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub review_history: Vec<IssueInput>,
     pub work: DispatchIssue,
 }
 

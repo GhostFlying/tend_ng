@@ -17,6 +17,8 @@
 
 收到结果后如需复审，作者提交新候选并传入结果的 `child_task_id` 作为 `review_task_id`，不传 `agent_id`。该输入进入原 Review Issue、Task 和 Reviewer。Reviewer 用 `tend_deliver_review` 回传结论和证据，Runner 从当前 Run 填入确切的请求身份。重复调用沿原回执对账，只有本轮第一条结果产生作者输入。普通讨论或结案不替代结构化证据，用户授权也不走该工具。
 
+经过同机 Runner 接替的 Assignment 可附 `review_history`，供新原生会话识别先前候选和结果。历史不是新的审阅结果或本轮输入。接替不授权跳过原审阅停妥检查，也不自动发起复审。
+
 派发方可以直接提交工作要求，也可以用本机工具查询合格候选再指名。候选信息来自已同步的清单，Server 应用时按当前事实确认。 [具名 Agent 与任务分配](agent-selection.md)
 
 ## 角色 Skill 与仓库约定

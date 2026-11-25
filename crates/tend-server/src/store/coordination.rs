@@ -239,7 +239,20 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 scope,
                 &workspace,
             )?;
-            if *rereview {
+            if !super::tend_review::author_can_request(db, operation, task_id, &source_task)? {
+                if !rereview {
+                    db.execute(
+                        "UPDATE tasks SET status = 'cancelled' WHERE id = ?1",
+                        [task_id],
+                    )?;
+                }
+                super::tend_review::not_run(
+                    db,
+                    task_id,
+                    operation,
+                    "Review was not run because its Issue tree or author Task was cancelled, stopping, or no longer assigned to the request's Runner.",
+                )?;
+            } else if *rereview {
                 super::tend_review::request_again(db, runner, operation, issue_id, task_id, work)?;
             } else {
                 super::runner::assign_task(db, task_id)?;

@@ -45,6 +45,54 @@ pub fn note_drained(db: &Connection, runner: &str) -> Result<()> {
     Ok(())
 }
 
+/// An accepted assignment can only move after its exact Runner supplied a
+/// stop/handoff proof. The Issue tree can have moved more than once since a
+/// completed review was last active.
+pub(super) fn review_released_to(db: &Connection, task: &str, runner: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "WITH RECURSIVE prior AS (
+             SELECT id, runner_id FROM runner_assignments WHERE task_id = ?1 AND state = 'accepted'
+             ORDER BY rowid DESC LIMIT 1
+         ), route(id) AS (
+             SELECT json_extract(p.proof, '$.successor') FROM prior a JOIN runner_handoff_proofs p
+               ON p.predecessor = a.runner_id AND json_extract(p.proof, '$.assignment_id') = a.id
+             UNION SELECT r.successor FROM runner_replacements r JOIN route p ON r.predecessor = p.id
+         ) SELECT NOT EXISTS(SELECT 1 FROM prior WHERE runner_id != ?2)
+               OR EXISTS(SELECT 1 FROM route WHERE id = ?2)",
+        params![task, runner], |row| row.get(0),
+    )?)
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+
+    #[test]
+    fn replacement_chain_does_not_substitute_for_the_exact_review_stop() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE runner_assignments (id TEXT, task_id TEXT, runner_id TEXT, state TEXT);
+             CREATE TABLE runner_handoff_proofs (predecessor TEXT, proof TEXT);
+             CREATE TABLE runner_replacements (predecessor TEXT, successor TEXT);
+             INSERT INTO runner_assignments VALUES ('first', 'review', 'prior', 'accepted');
+             INSERT INTO runner_replacements VALUES ('prior','next'), ('next','later');
+             INSERT INTO runner_handoff_proofs VALUES ('prior','{\"assignment_id\":\"unrelated\",\"successor\":\"next\"}');",
+        )?;
+        assert!(review_released_to(&db, "review", "prior")?);
+        assert!(!review_released_to(&db, "review", "next")?);
+        assert!(!review_released_to(&db, "review", "later")?);
+        db.execute_batch(
+            "INSERT INTO runner_handoff_proofs VALUES ('prior','{\"assignment_id\":\"first\",\"successor\":\"next\"}');",
+        )?;
+        assert!(review_released_to(&db, "review", "later")?);
+        db.execute_batch(
+            "INSERT INTO runner_assignments VALUES ('second', 'review', 'next', 'accepted');",
+        )?;
+        assert!(!review_released_to(&db, "review", "later")?);
+        Ok(())
+    }
+}
+
 pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool> {
     let raw = serde_json::to_string(proof)?;
     let prior = db
@@ -81,14 +129,28 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
            WHERE handoff_roots.runner_id = ?3",
         params![root, proof.successor, runner],
     )?;
-    if proof.context.phase != HandoffPhase::Finished
+    let pending_review = proof.context.phase == HandoffPhase::Finished
+        && status == "waiting"
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
+                        AND json_extract(payload, '$.kind') = 'review_requested')",
+            [&proof.task_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+    if (proof.context.phase != HandoffPhase::Finished || pending_review)
         && current.as_deref() == Some(&proof.assignment_id)
     {
+        let mut context = serde_json::to_value(&proof.context)?;
+        if pending_review {
+            // The Server has a new round, but the predecessor had not yet
+            // received its input when it stopped. The queued input follows.
+            context["phase"] = json!(HandoffPhase::Queued);
+        }
         db.execute(
             "UPDATE tasks SET current_assignment = NULL, status = 'awaiting_assignment', pinned_runner_id = ?2,
                               pinned_agent_id = ?3, handoff = ?4
              WHERE id = ?1 AND status NOT IN ('completed','failed','cancelled')",
-            params![proof.task_id, proof.successor, owner, serde_json::to_string(&proof.context)?],
+            params![proof.task_id, proof.successor, owner, serde_json::to_string(&context)?],
         )?;
     }
     db.execute(

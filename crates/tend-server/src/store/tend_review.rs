@@ -97,6 +97,48 @@ pub(super) fn work_for_round(db: &Connection, review: &TendReview) -> Result<Dis
     Ok(serde_json::from_str(&raw)?)
 }
 
+pub(super) fn history(db: &Connection, task: &str, reviewer: bool) -> Result<Vec<IssueInput>> {
+    // The Server retains every result. Give replacement sessions the most
+    // recent result for each related Review Task without replaying it as input.
+    let mut statement = db.prepare(if reviewer {
+        "SELECT i.payload FROM tend_reviews v JOIN issue_inputs i ON i.id = v.result_input_id
+         WHERE v.review_task_id = ?1 ORDER BY v.rowid DESC LIMIT 1"
+    } else {
+        "SELECT i.payload FROM tend_reviews v JOIN issue_inputs i ON i.id = v.result_input_id
+         WHERE v.author_task_id = ?1 AND i.run_id IS NOT NULL
+           AND v.rowid = (SELECT max(p.rowid) FROM tend_reviews p JOIN issue_inputs consumed ON consumed.id = p.result_input_id
+                           WHERE p.review_task_id = v.review_task_id AND consumed.run_id IS NOT NULL)
+         ORDER BY v.rowid DESC LIMIT 32"
+    })?;
+    statement
+        .query_map([task], |row| row.get::<_, String>(0))?
+        .map(|payload| Ok(serde_json::from_str(&payload?)?))
+        .collect()
+}
+
+pub(super) fn author_can_request(
+    db: &Connection,
+    operation: &WorkOperation,
+    task: &str,
+    author_task: &str,
+) -> Result<bool> {
+    Ok(db.query_row(
+        "WITH RECURSIVE ancestors(id, parent, state) AS (
+           SELECT i.id, i.parent_issue_id, i.state FROM issues i JOIN tasks t ON t.issue_id = i.id
+            WHERE t.id = ?1 OR t.id = ?2
+           UNION SELECT i.id, i.parent_issue_id, i.state FROM issues i JOIN ancestors a ON a.parent = i.id
+         )
+         SELECT NOT EXISTS(SELECT 1 FROM ancestors WHERE state = 'cancelled')
+            AND EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id = t.id
+                        WHERE r.id = ?3 AND t.current_assignment = ?4
+                          AND t.status NOT IN ('completed','failed','cancelled')
+                          AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.task_id = t.id
+                             AND c.assignment_id = ?4 AND c.state = 'pending'
+                             AND json_extract(c.action, '$.kind') = 'stop'))",
+        params![task, author_task, operation.run_id, operation.assignment_id], |row| row.get(0),
+    )?)
+}
+
 fn round(db: &Connection, review_task: &str, request: Option<&str>) -> Result<Option<TendReview>> {
     Ok(db
         .query_row(
@@ -164,27 +206,45 @@ pub(super) fn request_again(
     task: &str,
     work: &DispatchIssue,
 ) -> Result<()> {
-    // The same durable assignment is eligible only after its last Run has
-    // stopped. Do not reopen a cancelled Issue or move its ownership.
-    let queued = runner.shared_reviews && db.execute(
-        "UPDATE tasks AS t SET status = 'waiting' WHERE t.id = ?1 AND t.status IN ('completed','failed')
-           AND EXISTS(SELECT 1 FROM runner_assignments a WHERE a.id = t.current_assignment
-                       AND a.state = 'accepted' AND a.runner_id = ?2)
+    let prior = db
+        .query_row(
+            "SELECT a.runner_id, json_extract(a.contract, '$.placement.agent.id'),
+                json_extract(a.contract, '$.review.author_workspace') IS NOT NULL
+         FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
+         WHERE t.id = ?1 AND t.status IN ('completed','failed') AND a.state = 'accepted'
            AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.assignment_id = t.current_assignment
-                            AND c.state = 'pending' AND json_extract(c.action, '$.kind') = 'stop')
-           AND EXISTS(SELECT 1 FROM issues i WHERE i.id = t.issue_id AND i.state != 'cancelled')",
-        params![task, runner.runner_id],
-    )? == 1;
-    if !queued {
-        return finish(
+                            AND c.state = 'pending' AND json_extract(c.action, '$.kind') = 'stop')",
+            [task],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, bool>(2)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((previous_runner, owner, shared_workspace)) = prior.filter(|_| runner.shared_reviews)
+    else {
+        return not_run(
             db,
             task,
-            Some(&operation.operation_id),
-            &operation.operation_id,
-            None,
-            None,
-            "The original Review Task is not stopped and available on the author's Runner, or its Issue was cancelled.",
+            operation,
+            "The original Review Task has not stopped or is not eligible to re-review.",
         );
+    };
+    let reuse = previous_runner == runner.runner_id && shared_workspace;
+    if reuse {
+        db.execute("UPDATE tasks SET status = 'waiting' WHERE id = ?1", [task])?;
+    } else {
+        // Preserve the named owner. Allocation to another Runner waits for
+        // evidence from the exact predecessor assignment, even if the author
+        // has already resumed and that proof is still in flight.
+        db.execute(
+            "UPDATE tasks SET status = 'awaiting_assignment', current_assignment = NULL, handoff = NULL,
+                pinned_runner_id = ?2, pinned_agent_id = ?3 WHERE id = ?1",
+            params![task, runner.runner_id, owner],
+        )?;
     }
     let review = round(db, task, Some(&operation.operation_id))?.expect("round just bound");
     coordination::enqueue(
@@ -203,7 +263,27 @@ pub(super) fn request_again(
             ),
         },
     )?;
+    if !reuse {
+        super::runner::assign_task(db, task)?;
+    }
     Ok(())
+}
+
+pub(super) fn not_run(
+    db: &Connection,
+    task: &str,
+    operation: &WorkOperation,
+    summary: &str,
+) -> Result<()> {
+    finish(
+        db,
+        task,
+        Some(&operation.operation_id),
+        &operation.operation_id,
+        None,
+        None,
+        summary,
+    )
 }
 
 /// Keep the first result or terminal no-result receipt with the exact source

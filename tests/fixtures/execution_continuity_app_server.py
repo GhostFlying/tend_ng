@@ -11,7 +11,7 @@ import uuid
 root = Path(sys.argv[1])
 mode = sys.argv[2]
 fallback = mode in {"fallback", "workspace-missing", "workspace-replaced"}
-two_rounds = mode in {"resume", "review-missing", "review-unknown"}
+two_rounds = mode in {"resume", "review-missing", "review-unknown", "replacement"}
 
 
 def gate(name):
@@ -148,6 +148,12 @@ elif model == "fixture-reviewer":
             assert any(op["action"]["kind"] == "deliver_review"
                        and op["action"]["result"]["evidence"] == "Line one should include an example."
                        for op in context["recovery"]["prior_receipts_recent_first"])
+        elif mode == "replacement":
+            assert not reused and assignment["placement"]["runner_id"] == "next-runner"
+            [previous] = assignment["review_history"]
+            assert previous["kind"] == "review_finished" and previous["child_task_id"] == assignment["task_id"]
+            assert previous["review"]["scope"] == "Guide example"
+            assert previous["result"]["evidence"] == "Line one should include an example."
         else:
             assert reused
     if not fallback:
@@ -225,6 +231,8 @@ else:
                 assert turn["params"]["effort"] == "low"
             assert any(op["action"]["kind"] == "request_review"
                        for op in context["recovery"]["prior_receipts_recent_first"])
+        elif mode == "replacement":
+            assert not reused and assignment["placement"]["runner_id"] == "next-runner"
         else:
             assert reused
         guide.write_text("Revised candidate with example\n")

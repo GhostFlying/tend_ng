@@ -152,19 +152,29 @@ impl Store {
                  ORDER BY rowid DESC LIMIT 1",
                 params![assignment_id, task_id.as_str()], |row| row.get(0),
             ).optional()?;
-            let prior: IssueInput = serde_json::from_str(prior.as_deref().ok_or_else(|| {
-                anyhow::anyhow!(
+            let local: Option<IssueInput> =
+                prior.as_deref().map(serde_json::from_str).transpose()?;
+            let prior = local.as_ref().or_else(|| {
+                run.assignment
+                    .review_history
+                    .iter()
+                    .find(|input| input.child_task_id == *task_id)
+            });
+            let Some(IssueInput {
+                child_issue_id,
+                cause: protocol::IssueInputCause::ReviewFinished { review, .. },
+                ..
+            }) = prior
+            else {
+                anyhow::bail!(
                     "Use the Review Task ID from a completed review returned to this author Task"
-                )
-            })?)?;
-            if let protocol::IssueInputCause::ReviewFinished { review, .. } = prior.cause {
-                ensure!(
-                    review.author_task_id == run.assignment.task_id
-                        && review.candidate != *candidate,
-                    "Submit a new candidate for a review requested by this author Task"
                 );
-            }
-            *issue_id = prior.child_issue_id;
+            };
+            ensure!(
+                review.author_task_id == run.assignment.task_id && review.candidate != *candidate,
+                "Submit a new candidate for a review requested by this author Task"
+            );
+            issue_id.clone_from(child_issue_id);
             let requests = self.0.prepare(
                 "SELECT operation FROM local_work_operations WHERE run_id = ?1 AND json_extract(operation, '$.action.kind') = 'request_review'
                      AND json_extract(operation, '$.action.task_id') = ?2",

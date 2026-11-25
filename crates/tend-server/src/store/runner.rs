@@ -126,13 +126,29 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
         }
-        if let Some(review) = &review
-            && (!profile.shared_reviews || !db.query_row(
-                "SELECT EXISTS(SELECT 1 FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
-                  WHERE t.id = ?1 AND a.state = 'accepted' AND a.runner_id = ?2)",
-                params![review.author_task_id, profile.runner_id], |row| row.get::<_, bool>(0),
-            )?) {
-            continue;
+        if let Some(review) = &review {
+            if !profile.shared_reviews
+                || !super::handoff::review_released_to(db, &dispatch.task_id, &profile.runner_id)?
+            {
+                continue;
+            }
+            let author_contract: Option<String> = db.query_row(
+                "SELECT a.contract FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
+                  WHERE t.id = ?1 AND a.state = 'accepted' AND a.runner_id = ?2 AND t.status != 'cancelled'",
+                params![review.author_task_id, profile.runner_id], |row| row.get(0),
+            ).optional()?;
+            let Some(author_contract) = author_contract else {
+                continue;
+            };
+            let author: TaskAssignment = serde_json::from_str(&author_contract)?;
+            let path = author.workspace_path();
+            if review
+                .author_workspace
+                .as_ref()
+                .is_some_and(|bound| bound != &path)
+            {
+                continue;
+            }
         }
         if db.query_row(
             "SELECT EXISTS(
@@ -167,6 +183,21 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             host_id: profile.host_id,
             agent,
         };
+        let review_history = if profile.shared_reviews
+            && (review.is_some() || continuation.is_some() && bound_author)
+        {
+            super::tend_review::history(db, &dispatch.task_id, review.is_some())?
+        } else {
+            Vec::new()
+        };
+        let workspace_key = if let Some(path) = review
+            .as_ref()
+            .and_then(|review| review.author_workspace.as_deref())
+        {
+            path.strip_prefix("workspaces/").map(str::to_owned)
+        } else {
+            workspace_key
+        };
         let assignment = TaskAssignment {
             placement,
             task_id: dispatch.task_id,
@@ -184,6 +215,7 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
                 issue_state: dispatch.issue_state,
             }),
             review,
+            review_history,
             work: dispatch.work,
         };
         let contract = serde_json::to_string(&assignment)?;
@@ -200,8 +232,8 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             ],
         )?;
         db.execute(
-            "UPDATE tasks SET current_assignment = ?1, status = 'reserved' WHERE id = ?2",
-            params![assignment.placement.assignment_id, assignment.task_id],
+            "UPDATE tasks SET current_assignment = ?1, status = 'reserved', workspace_key = ?3 WHERE id = ?2",
+            params![assignment.placement.assignment_id, assignment.task_id, assignment.workspace_key],
         )?;
         db.execute(
             "UPDATE task_controls SET assignment_id = ?2 WHERE task_id = ?1 AND state = 'pending' AND run_id IS NULL",

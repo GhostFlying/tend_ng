@@ -78,7 +78,9 @@ Work Agent 显式登记候选提交或产物、审阅范围及结论，引用 Ru
 
 作者根据结果在原作者 Task 内修订。需要复审时，用 `tend_request_review` 提交不同候选并带结果中的 `child_task_id` 作为 `review_task_id`。已有审阅实际停妥并结算后，新输入让同一 Review Issue、Task 和 Reviewer 再次排队。两轮间归还 slot。审阅 Issue 保持 Owner 原先决定的 open/closed 状态，复审不代为重开或改变 Owner，已取消的审阅不重新执行。原 Task 的普通讨论继续持久保存，结束后的讨论不代替复审请求。候选、范围、请求、证据及结果身份逐轮保留。
 
-在原 Runner 和兼容配置内优先继续同一原生 thread。明确无法读取原 thread 时，从持久的本轮输入和历史回执新开 session，Issue/Task 不变。连接中断、临时异常或未知恢复结果不证明原 thread 不可用，保留相同准备 Run 重试。 [Task 结算](#run-正常结束时的-task-结算) · [Session 接续](agent-tools.md#session-接续)
+Server 在应用请求的事务内核对实际作者 Assignment、未完成的停止控制以及作者和审阅两边的 Issue 祖先。取消或正在停止时，迟到的请求保留本轮未运行回执，不重新排队。重开 Issue 不复活已经停止的作者 Task。
+
+在原 Runner 和兼容配置内优先继续同一原生 thread。明确无法读取原 thread 时，从持久的本轮输入和历史回执新开 session，Issue/Task 不变。连接中断、临时异常或未知恢复结果不证明原 thread 不可用，保留相同准备 Run 重试。同机 Runner 接替后，复审等待前驱原审阅 Assignment 的停妥交接证据，继续使用原具名 Reviewer。只换执行 Assignment，保留原 Issue/Task 和审阅历史，不迁移原生 thread。 [Task 结算](#run-正常结束时的-task-结算) · [Session 接续](agent-tools.md#session-接续)
 
 ## PR / CI 的 subscribe 和 waitfor
 
