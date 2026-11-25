@@ -1,0 +1,448 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light">
+<title>Issue #12 · Tend 页内批准预览</title>
+<style>
+:root {
+  color-scheme: light;
+  --white: #fff; --side: #f6f7f8; --ink: #161a1c; --body: #30383d;
+  --muted: #616970; --line: #e5e8e9; --hover: #f3f5f5;
+  --teal: #125b50; --teal-hover: #0f4b42; --mint: #edf6f1;
+  --nav: 220px; --header: 54px;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Droid Sans Fallback", sans-serif;
+  font-synthesis: weight; font-size: 15px; line-height: 1.55;
+  background: var(--white); color: var(--ink);
+}
+* { box-sizing: border-box; }
+body { margin: 0; min-width: 300px; }
+button, textarea { font: inherit; }
+button { cursor: pointer; }
+svg { width: 17px; height: 17px; flex: none; display: inline-block; vertical-align: -3px; }
+a { color: inherit; text-decoration: none; }
+a:hover { text-decoration: underline; text-underline-offset: 3px; }
+button:focus-visible, a:focus-visible, summary:focus-visible, textarea:focus-visible {
+  outline: 2px solid var(--teal); outline-offset: 4px;
+}
+[hidden] { display: none !important; }
+.global { position: fixed; width: var(--nav); inset: 0 auto 0 0; background: var(--side); border-right: 1px solid #eceeee; display: flex; flex-direction: column; padding: 18px 14px; }
+.brand { display: flex; align-items: center; font-size: 20px; font-weight: 720; gap: 10px; padding-left: 7px; letter-spacing: -.025em; }
+.mark { height: 31px; width: 31px; border-radius: 7px; background: #161b1d; color: #fff; display: grid; place-items: center; font-size: 20px; font-weight: 720; }
+.nav { margin-top: 26px; display: grid; gap: 3px; font-size: 14px; }
+.nav-item { display: flex; align-items: center; gap: 11px; padding: 9px 12px; color: #4e575c; border-radius: 7px; }
+.nav-item.current { color: var(--teal); background: #e6efec; font-weight: 680; }
+.nav-label { padding: 15px 12px 3px; color: #6d767a; font-size: 11px; }
+.sandbox-label { margin-top: auto; display: flex; align-items: center; gap: 7px; padding: 8px 10px 3px; color: var(--muted); font-size: 12px; }
+.workspace { margin-left: var(--nav); }
+.topbar { min-height: var(--header); display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 0 29px; border-bottom: 1px solid var(--line); font-size: 13px; background: #fff; position: sticky; top: 0; z-index: 4; }
+.breadcrumb, .top-actions { display: flex; align-items: center; gap: 11px; }
+.breadcrumb a, .breadcrumb .slash { color: var(--muted); }
+.issue-number { font-weight: 680; font-variant-numeric: tabular-nums; }
+.read-link { color: var(--teal); font-weight: 650; display: inline-flex; align-items: center; gap: 5px; }
+.read-link svg { width: 13px; height: 13px; }
+.top-actions .properties-button, .phone-preview { display: none; }
+.layout { display: grid; grid-template-columns: minmax(0, 1fr) 232px; max-width: 1440px; margin: auto; }
+.document { min-width: 0; width: 100%; max-width: 880px; margin: auto; padding: 31px 32px 46px; }
+.document-header { margin-bottom: 22px; }
+.status { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 640; line-height: 1.4; color: #505b5d; }
+.status-dot { height: 8px; width: 8px; flex: none; border-radius: 50%; background: #d49027; }
+h1, h2, h3, p, ul, dl { margin: 0; }
+h1 { max-width: 30em; margin-top: 8px; font-size: clamp(25px, 2.05vw, 32px); font-weight: 730; line-height: 1.32; letter-spacing: -.034em; text-wrap: pretty; }
+.description { margin-top: 10px; color: var(--muted); font-size: 14px; }
+.attention { display: grid; grid-template-columns: 24px minmax(0, 1fr) auto; align-items: center; column-gap: 12px; padding: 11px 14px; background: var(--mint); border-radius: 7px; }
+.attention > svg { color: var(--teal); height: 18px; width: 18px; }
+.attention-copy { display: flex; align-items: baseline; column-gap: 11px; row-gap: 2px; flex-wrap: wrap; }
+.attention h2 { font-size: 14px; line-height: 1.4; }
+.attention p { color: #36514a; font-size: 14px; }
+.primary, .secondary, .quiet, .icon-button { display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 1px solid transparent; border-radius: 6px; min-height: 32px; padding: 6px 10px; font-size: 13px; line-height: 1.35; font-weight: 640; white-space: nowrap; }
+.primary { color: white; background: var(--teal); }
+.primary:hover { background: var(--teal-hover); text-decoration: none; }
+.primary:disabled { opacity: .5; cursor: default; }
+.secondary { border-color: #dce2e2; color: #28353a; background: var(--white); }
+.secondary:hover { background: var(--hover); }
+.quiet, .icon-button { color: var(--muted); background: transparent; }
+.quiet:hover, .icon-button:hover { color: var(--ink); background: var(--hover); }
+.attention .primary { min-height: 34px; padding-inline: 12px; }
+
+.report { margin-top: 25px; }
+.section-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px 12px; }
+.section-heading > h2, .properties h2 { font-size: 17px; font-weight: 700; letter-spacing: -.016em; }
+.report .section-heading { padding-bottom: 9px; border-bottom: 1px solid var(--line); }
+.section-tools { display: flex; align-items: center; gap: 9px; color: var(--muted); font-size: 12px; }
+.section-tools time { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.section-tools .quiet { padding: 5px 2px 5px 8px; min-height: 28px; font-size: 12px; }
+.separator { height: 13px; border-left: 1px solid #dce1e1; }
+.history { margin-top: 11px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: #fbfcfc; }
+.history strong { font-size: 13px; }
+.history p { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.history .read-link { font-size: 12px; margin-top: 7px; }
+.version { background: #edf0f1; color: #414b51; padding: 1px 6px; font-size: 11px; line-height: 1.55; font-weight: 700; border-radius: 4px; letter-spacing: -.01em; white-space: nowrap; }
+.report-title { display: flex; align-items: center; gap: 8px; margin-top: 17px; }
+.report-title h3 { font-size: 23px; line-height: 1.4; letter-spacing: -.021em; }
+.report-points { margin-top: 10px; display: grid; gap: 6px; padding-left: 21px; color: var(--body); font-size: 14px; line-height: 1.68; }
+.report-points strong { color: var(--ink); }
+.report-points li::marker { color: #61716d; font-size: 12px; }
+summary { list-style: none; cursor: pointer; }
+summary::-webkit-details-marker { display: none; }
+details[open] > summary svg, #history-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: .92em; background: #f1f3f3; padding: 1px 4px; border-radius: 3px; overflow-wrap: anywhere; }
+.attachment { display: flex; align-items: center; gap: 10px; margin-top: 8px; padding: 10px 12px; border: 1px solid #dee3e4; border-radius: 7px; min-width: 0; }
+.attachment:hover { text-decoration: none; border-color: #bccac6; background: #fcfdfd; }
+.attachment > svg { color: #515e61; }
+.file-info { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 8px; min-width: 0; }
+.file-name { font-weight: 630; font-size: 13px; overflow-wrap: anywhere; }
+.file-size { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.attachment .read-link { margin-left: auto; font-size: 12px; white-space: nowrap; }
+.conversation { margin-top: 33px; padding-top: 23px; border-top: 1px solid #ccd5d4; scroll-margin-top: 70px; }
+.message { display: grid; grid-template-columns: 30px minmax(0, 1fr); gap: 10px; margin-top: 14px; }
+.message .mark { height: 28px; width: 28px; border-radius: 6px; font-size: 18px; }
+.message-meta { display: flex; gap: 8px; align-items: baseline; padding-bottom: 2px; font-size: 13px; }
+.message time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.message p { color: var(--body); font-size: 14px; line-height: 1.65; white-space: pre-wrap; overflow-wrap: anywhere; }
+.composer { margin-top: 15px; display: grid; gap: 7px; }
+.composer label { font-weight: 680; font-size: 13px; }
+.composer textarea { width: 100%; padding: 10px; border: 1px solid #dce2e2; border-radius: 7px; min-height: 80px; resize: vertical; color: var(--ink); }
+.composer-actions { display: flex; justify-content: space-between; gap: 10px; align-items: center; }
+.composer-actions span { font-size: 12px; color: var(--muted); }
+.preview-toast { font-size: 13px; color: var(--teal); margin-top: 12px; }
+.records { margin-top: 16px; border-top: 1px solid var(--line); }
+.records summary, .child-list summary { display: flex; gap: 6px; align-items: center; padding: 10px 0; color: #4e5a5c; font-weight: 630; font-size: 13px; min-height: 40px; }
+.records summary:hover, .child-list summary:hover { color: var(--ink); }
+.records p { font-size: 13px; color: var(--muted); margin: 0 0 8px 19px; max-width: 45em; }
+.properties { min-width: 0; border-left: 1px solid var(--line); padding: 31px 21px 22px 20px; }
+.properties h2 { font-size: 15px; }
+.properties dl { margin-top: 12px; }
+.properties dl > div { display: grid; grid-template-columns: 52px minmax(0, 1fr); padding: 8px 0; border-bottom: 1px solid #edf0f0; align-items: center; gap: 4px; }
+.properties dt { color: var(--muted); font-size: 12px; }
+.properties dd { margin: 0; font-size: 13px; }
+.properties dd .status { font-size: 13px; color: var(--ink); font-weight: 550; }
+.properties dd .status-dot { width: 7px; height: 7px; }
+.child-list { margin-top: 14px; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.child-list ul { padding: 0 0 9px; list-style: none; }
+.child-list li > a { display: flex; align-items: flex-start; gap: 7px; padding: 5px 3px; font-size: 12px; color: #314043; }
+.child-list .child-id { flex: none; color: var(--muted); }
+.property-dialog { padding: 0; border: none; color: var(--ink); max-width: min(320px, 90vw); width: 100%; max-height: 100dvh; height: 100dvh; margin: 0 0 0 auto; overflow-y: auto; }
+.property-dialog::backdrop { background: #1920213d; }
+.dialog-top { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px 0; font-weight: 680; }
+.property-dialog .properties { padding: 9px 17px 22px; border-left: none; }
+.property-dialog .properties h2 { display: none; }
+@media (max-width: 1120px) {
+  :root { --nav: 182px; }
+  .layout { grid-template-columns: minmax(0, 1fr) 198px; }
+  .document { padding-inline: 25px; }
+  .properties { padding-inline: 15px; }
+}
+@media (max-width: 900px) {
+  .layout { grid-template-columns: minmax(0, 1fr); }
+  .layout > .properties { display: none; }
+  .top-actions .properties-button { display: inline-flex; }
+  .topbar { padding-inline: 20px; }
+}
+@media (max-width: 640px) {
+  :root { --header: 46px; }
+  .global { display: none; }
+  .workspace { margin-left: 0; }
+  .topbar { padding: 0 12px 0 16px; }
+  .breadcrumb, .top-actions { gap: 8px; }
+  .properties-button { min-height: 36px; padding: 6px 7px; }
+  .properties-button svg { height: 18px; width: 18px; }
+  .phone-preview { display: inline; color: var(--muted); font-size: 11px; }
+  .top-actions .read-link { display: none; }
+  .document { padding: 19px 16px 30px; }
+  .document-header { margin-bottom: 15px; }
+  h1 { margin-top: 6px; font-size: 24px; letter-spacing: -.025em; text-wrap: balance; }
+  .description { margin-top: 8px; font-size: 13px; }
+  .attention { grid-template-columns: 18px minmax(0, 1fr) auto; gap: 0 8px; padding: 9px 10px; }
+  .attention > svg { width: 17px; height: 17px; }
+  .attention-copy { display: block; }
+  .attention p { font-size: 12px; margin-top: 2px; }
+  .attention .primary { min-height: 35px; font-size: 12px; padding-inline: 8px; }
+  .report { margin-top: 18px; }
+  .report-title { margin-top: 12px; }
+  .report-title h3 { font-size: 20px; }
+  .report-points { margin-top: 8px; gap: 4px; }
+  .attachment { gap: 7px; padding: 9px 8px; }
+  .attachment .read-link { font-size: 11px; gap: 3px; }
+  .file-name { font-size: 12px; }
+  .file-size { display: none; }
+  .conversation { margin-top: 26px; padding-top: 17px; }
+  .records { margin-top: 13px; }
+}
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { transition: none !important; scroll-behavior: auto !important; } }
+
+/* Document attachment expands in normal Issue reading order. */
+.report-toggle { width: 100%; background: var(--white); text-align: left; color: var(--ink); }
+.report-toggle .read-link svg { transition: transform .14s ease; }
+.report-toggle[aria-expanded="true"] .read-link svg { transform: rotate(90deg); }
+.report-toggle, .report-original { scroll-margin-block: calc(var(--header) + 12px) 12px; }
+.report-original { margin-top: 14px; min-width: 0; border: 1px solid var(--line); border-radius: 7px; padding: 20px 22px 16px; overflow-wrap: anywhere; }
+.original-meta { font-size: 12px; color: var(--muted); margin-bottom: 11px; }
+.markdown-body { min-width: 0; font-size: 14px; line-height: 1.72; color: var(--body); }
+.markdown-body h1, .markdown-body h2, .markdown-body h3, .markdown-body h4 { color: var(--ink); line-height: 1.42; letter-spacing: -.012em; }
+.markdown-body h1 { margin: 0 0 8px; font-size: clamp(18px, 2vw, 22px); font-weight: 730; }
+.markdown-body h2 { margin: 23px 0 8px; padding-bottom: 5px; border-bottom: 1px solid var(--line); font-size: 17px; }
+.markdown-body h3, .markdown-body h4 { margin: 18px 0 6px; font-size: 15px; }
+.markdown-body p, .markdown-body ul, .markdown-body ol, .markdown-body pre, .markdown-scroll { margin: 0 0 12px; }
+.markdown-body ol, .markdown-body ul { padding-left: 22px; }
+.markdown-body li + li { margin-top: 3px; }
+.markdown-body li > p { margin-bottom: 5px; }
+.markdown-body a { color: var(--teal); text-decoration: underline; text-underline-offset: 2px; }
+.markdown-body blockquote { margin: 0 0 12px; padding: 0 0 0 12px; border-left: 2px solid var(--line); color: var(--muted); }
+.markdown-body pre { max-width: 100%; overflow: auto; padding: 10px; background: #f5f7f7; border: 1px solid var(--line); border-radius: 5px; white-space: pre; }
+.markdown-body pre code { padding: 0; background: transparent; overflow-wrap: normal; white-space: pre; }
+.markdown-scroll { max-width: 100%; overflow: auto; scrollbar-width: thin; border: 1px solid var(--line); border-radius: 5px; }
+.markdown-scroll:focus-visible { outline: 2px solid var(--teal); outline-offset: 2px; }
+.markdown-body table { border-collapse: collapse; width: 100%; min-width: 560px; font-size: 13px; line-height: 1.58; }
+.markdown-body th, .markdown-body td { text-align: left; padding: 7px 9px; border-bottom: 1px solid var(--line); vertical-align: top; min-width: 7.5ch; }
+.markdown-body th { background: #f5f7f7; color: var(--ink); }
+.markdown-body tbody tr:last-child td { border-bottom: 0; }
+.original-end { border-top: 1px solid var(--line); margin-top: 13px; padding-top: 10px; display: flex; justify-content: flex-end; }
+.original-end button svg { transform: rotate(-90deg); }
+@media (max-width: 640px) {
+  .report-original { padding: 13px 11px 10px; }
+  .markdown-body { font-size: 13px; }
+  .report-toggle .read-link { flex: none; white-space: nowrap; text-align: right; }
+}
+
+
+/* An approval is a compact Issue event, not an authored chat message. */
+.attention[data-approval="approved"] { background: #eef5f2; }
+.attention .approval-jump { color: var(--teal); padding-inline: 8px; }
+.timeline-event { display: flex; align-items: baseline; gap: 8px; margin-top: 13px; padding: 8px 0 2px; color: var(--muted); font-size: 13px; line-height: 1.5; scroll-margin-top: 66px; }
+.timeline-marker { display: grid; place-items: center; color: var(--teal); background: #edf5f1; border-radius: 50%; width: 20px; height: 20px; flex: none; align-self: center; margin-inline: 4px 6px; }
+.timeline-marker svg { width: 13px; height: 13px; }
+.timeline-event strong { color: #3b4945; font-weight: 620; }
+.timeline-event time { font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+@media (max-width: 640px) {
+  .attention .approval-jump { font-size: 12px; padding-inline: 4px; }
+  .timeline-event { gap: 6px; }
+}
+
+</style>
+</head>
+<body>
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-chat" viewBox="0 0 24 24"><path d="M20.5 11A7.5 7.5 0 0 1 13 18.5H8l-4 3v-6l.4-.6A7.5 7.5 0 1 1 20.5 11Z"/></symbol>
+  <symbol id="i-board" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16m6-16v16"/></symbol>
+  <symbol id="i-agents" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2M16 5a3 3 0 0 1 0 6m1 3a5 5 0 0 1 4 5v1"/></symbol>
+  <symbol id="i-host" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="2"/><rect x="3" y="14" width="18" height="6" rx="2"/><path d="M7 7h.01m0 10h.01"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12 4.5 4.5L19 7"/></symbol>
+  <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4m0 1c5-4 9 3 14 0v10c-5 3-9-4-14 0"/></symbol>
+  <symbol id="i-arrow" viewBox="0 0 24 24"><path d="M6 18 18 6m-9 0h9v9"/></symbol>
+  <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m10 6 6 6-6 6"/></symbol>
+  <symbol id="i-file" viewBox="0 0 24 24"><path d="M13 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V10Zm0 0v7h7M8 14h8m-8 3h5"/></symbol>
+  <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M15 4v16"/></symbol>
+  <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+  <symbol id="i-beaker" viewBox="0 0 24 24"><path d="M8 3h8m-6 0v7l-5 8a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-8V3m-7 13h10"/></symbol>
+</svg>
+<aside class="global" aria-label="Tend 导航">
+  <div class="brand"><span class="mark" aria-hidden="true">t</span>Tend</div>
+  <nav class="nav">
+    <a class="nav-item" href="#conversation"><svg><use href="#i-chat"/></svg>对话</a>
+    <a class="nav-item current" href="#conversation" aria-current="page"><svg><use href="#i-board"/></svg>看板</a>
+    <div class="nav-label">资源</div>
+    <a class="nav-item" href="#conversation"><svg><use href="#i-agents"/></svg>Agents</a>
+    <a class="nav-item" href="#conversation"><svg><use href="#i-host"/></svg>主机</a>
+  </nav>
+  <div class="sandbox-label"><svg><use href="#i-beaker"/></svg>设计预览 · 刷新可重置</div>
+</aside>
+<div class="workspace">
+  <header class="topbar">
+    <nav class="breadcrumb" aria-label="位置"><a href="#conversation">看板</a><span class="slash" aria-hidden="true">/</span><span class="issue-number">#12</span></nav>
+    <div class="top-actions">
+      <span class="phone-preview" title="仅本地预览，刷新可重置">设计预览</span>
+      <a class="read-link" href="#conversation" target="_blank" rel="noreferrer">查看原 Chat <svg><use href="#i-arrow"/></svg></a>
+      <button type="button" id="properties-open" class="icon-button properties-button" aria-label="打开工作属性" aria-haspopup="dialog"><svg><use href="#i-panel"/></svg></button>
+    </div>
+  </header>
+  <div class="layout">
+    <main class="document">
+      <header class="document-header">
+        <span class="status"><span class="status-dot"></span>等待中</span>
+        <h1>调查并设计任务运行摘要导出</h1>
+        <p class="description" id="issue-description">任务摘要导出设计。等确认后再开始实现。</p>
+      </header>
+      <section class="attention" data-approval="pending" id="approval-strip" aria-labelledby="attention-title">
+        <svg aria-hidden="true"><use id="approval-icon" href="#i-flag"/></svg>
+        <div class="attention-copy" aria-live="polite">
+          <h2 id="attention-title">待你决定</h2>
+          <p id="approval-description">是否按 v2 进入实现？</p>
+        </div>
+        <button class="primary" type="button" id="approve-v2">批准按 v2 实现</button>
+        <button class="quiet approval-jump" type="button" id="see-approval" hidden>查看记录 <svg aria-hidden="true" style="width:13px;height:13px"><use href="#i-chevron"/></svg></button>
+      </section>
+      <section class="report" aria-labelledby="report-heading">
+        <div class="section-heading">
+          <h2 id="report-heading">当前报告</h2>
+          <div class="section-tools"><time datetime="2026-01-01T14:09:18+08:00">14:09 更新</time><span class="separator" aria-hidden="true"></span><button id="history-toggle" class="quiet" type="button" aria-controls="history" aria-expanded="false">版本历史&nbsp;(1) <svg><use href="#i-chevron"/></svg></button></div>
+        </div>
+        <div id="history" class="history" hidden>
+          <div><strong>调查初稿</strong> <span class="version">v1</span></div>
+          <p>13:50 发布 · 已有修订版，请以 v2 为准。</p>
+          <a class="read-link" href="#conversation" target="_blank" rel="noreferrer">查看初稿 <svg><use href="#i-arrow"/></svg></a>
+        </div>
+        <div class="report-title"><h3>任务运行摘要导出方案</h3><span class="version">v2</span></div>
+        <ul class="report-points">
+          <li><strong>复现。</strong> 当前可以查看运行结果，无法下载摘要。</li>
+          <li><strong>建议。</strong> 首版导出任务摘要为 <code>Markdown</code>。</li>
+          <li><strong>v2 修订。</strong> 补充空结果行为和导出字段。</li>
+        </ul>
+        <button class="attachment report-toggle" type="button" id="report-toggle" aria-expanded="false" aria-controls="report-original">
+          <svg aria-hidden="true"><use href="#i-file"/></svg><span class="file-info"><span class="file-name">run-summary-export-v2.md</span><span class="file-size">2.4 KB</span></span>
+          <span class="read-link"><span id="report-toggle-label">展开报告原文</span> <svg aria-hidden="true"><use href="#i-chevron"/></svg></span>
+        </button>
+        <article class="report-original" id="report-original" aria-label="报告原文" hidden>
+          <p class="original-meta">v2 报告原文 · 合成交付附件</p>
+          <div class="markdown-body">
+            <h1>导出任务运行摘要设计（修订版）</h1>
+            <p>合成设计预览。此报告不描述任何实际任务。</p>
+            <h2>结论</h2>
+            <p>导出任务摘要优先支持 Markdown，保留任务标题、结果和更新时间。</p>
+            <h2>检查项</h2>
+            <ul><li><strong>空任务。</strong> 展示「暂无可导出的运行」。</li><li><strong>有效任务。</strong> 导出文件保留段落结构。</li></ul>
+            <div class="markdown-scroll" role="region" aria-label="可横向滚动的表格" tabindex="0">
+              <table><thead><tr><th>字段</th><th>示例</th></tr></thead><tbody><tr><td>任务</td><td>示例任务 A</td></tr><tr><td>结果</td><td>运行完成</td></tr></tbody></table>
+            </div>
+            <h2>文件示例</h2>
+            <pre><code># 示例任务 A
+状态：运行完成
+</code></pre>
+          </div>
+          <div class="original-end">
+            <button class="secondary" type="button" id="report-collapse"><svg aria-hidden="true"><use href="#i-chevron"/></svg>收起报告原文</button>
+          </div>
+        </article>
+      </section>
+      <section id="conversation" class="conversation" aria-labelledby="conversation-heading">
+        <div class="section-heading">
+          <h2 id="conversation-heading">Issue 对话</h2>
+          <button id="compose-toggle" type="button" class="secondary" aria-controls="composer" aria-expanded="false"><svg><use href="#i-chat"/></svg>回复 Issue Owner</button>
+        </div>
+        <div id="messages">
+          <article class="message">
+            <span class="mark" aria-hidden="true">t</span>
+            <div><div class="message-meta"><strong>Tend · 原 Chat</strong><time datetime="2026-01-01T14:09:18+08:00">14:09</time></div><p>独立审阅后已补充方案边界。请以 v2 为准，本 Issue 继续等待你确认。</p></div>
+          </article>
+        </div>
+        <template id="approval-event-template">
+          <div class="timeline-event" id="approval-event">
+            <span class="timeline-marker" aria-hidden="true"><svg><use href="#i-check"/></svg></span>
+            <strong>你批准了 v2 方案</strong>
+            <time></time>
+          </div>
+        </template>
+        <form id="composer" class="composer" hidden>
+          <label for="draft">给 Issue Owner 留言</label>
+          <textarea id="draft" placeholder="写下问题或反馈…" maxlength="1800"></textarea>
+          <div class="composer-actions"><span>原型内试写，不会发送给 Agent。</span><button id="simulate-post" class="primary" type="submit" disabled>预览留言</button></div>
+        </form>
+        <p class="preview-toast" role="status" id="preview-toast" hidden></p>
+        <details class="records">
+          <summary><svg><use href="#i-chevron"/></svg>工作记录</summary>
+          <p>示例初稿交付后，独立审阅给出建议，随后修订了报告。</p>
+        </details>
+      </section>
+    </main>
+    <aside class="properties" aria-label="工作属性">
+      <div id="properties-content">
+        <h2>属性</h2>
+        <dl>
+          <div><dt>状态</dt><dd><span class="status"><span class="status-dot"></span>等待中</span></dd></div>
+          <div><dt>仓库</dt><dd>example-project</dd></div>
+          <div><dt>来源</dt><dd><a class="read-link" href="#conversation" target="_blank" rel="noreferrer">原 Chat <svg><use href="#i-arrow"/></svg></a></dd></div>
+        </dl>
+        <details class="child-list">
+          <summary><svg><use href="#i-chevron"/></svg>子 Issue · 4</summary>
+          <ul>
+            <li><a href="#conversation" target="_blank" rel="noreferrer"><span class="child-id">#13</span><span>调查并设计任务摘要导出</span></a></li>
+            <li><a href="#conversation" target="_blank" rel="noreferrer"><span class="child-id">#13</span><span>只读审阅设计和样稿</span></a></li>
+            <li><a href="#conversation" target="_blank" rel="noreferrer"><span class="child-id">#13</span><span>独立审阅（重试）</span></a></li>
+            <li><a href="#conversation" target="_blank" rel="noreferrer"><span class="child-id">#13</span><span>按审阅意见修订方案</span></a></li>
+          </ul>
+        </details>
+      </div>
+    </aside>
+  </div>
+</div>
+<dialog id="properties-dialog" class="property-dialog" aria-labelledby="dialog-title">
+  <div class="dialog-top"><span id="dialog-title">工作属性</span><button class="icon-button" type="button" id="properties-close" aria-label="关闭工作属性"><svg><use href="#i-close"/></svg></button></div>
+  <div class="properties" id="properties-mobile"></div>
+</dialog>
+<script>
+const el = (id) => document.getElementById(id);
+for (const [button, content] of [['history-toggle', 'history'], ['compose-toggle', 'composer']]) {
+  el(button).addEventListener('click', () => {
+    const expanded = el(content).hidden;
+    el(content).hidden = !expanded;
+    el(button).setAttribute('aria-expanded', String(expanded));
+    if (button === 'compose-toggle' && expanded) el('draft').focus();
+  });
+}
+const approvalStrip = el('approval-strip');
+const approveButton = el('approve-v2');
+const approvalJump = el('see-approval');
+approveButton.addEventListener('click', () => {
+  if (approvalStrip.dataset.approval !== 'pending') return;
+  approvalStrip.dataset.approval = 'approved';
+  const now = new Date();
+  const event = el('approval-event-template').content.cloneNode(true);
+  const timestamp = event.querySelector('time');
+  timestamp.dateTime = now.toISOString();
+  timestamp.textContent = new Intl.DateTimeFormat('zh-CN', {timeZone:'Asia/Singapore', hour:'2-digit', minute:'2-digit', hourCycle:'h23'}).format(now);
+  el('messages').append(event);
+  el('attention-title').textContent = '已批准，等待接续';
+  el('approval-description').textContent = '尚未开始实现。';
+  el('issue-description').textContent = '只读调查与方案设计。本轮未修改代码或配置。';
+  el('approval-icon').setAttribute('href', '#i-check');
+  approveButton.disabled = true;
+  approveButton.hidden = true;
+  approvalJump.hidden = false;
+  approvalJump.focus({preventScroll:true});
+});
+approvalJump.addEventListener('click', () => {
+  el('approval-event')?.scrollIntoView({block:'center',
+    behavior:matchMedia('(prefers-reduced-motion: reduce)').matches ? 'instant' : 'smooth'});
+});
+const reportToggle = el('report-toggle');
+const reportOriginal = el('report-original');
+function showReport(expanded) {
+  reportOriginal.hidden = !expanded;
+  reportToggle.setAttribute('aria-expanded', String(expanded));
+  el('report-toggle-label').textContent = expanded ? '收起报告原文' : '展开报告原文';
+}
+reportToggle.addEventListener('click', () => showReport(reportOriginal.hidden));
+el('report-collapse').addEventListener('click', () => {
+  showReport(false);
+  reportToggle.focus({preventScroll:true});
+  reportToggle.scrollIntoView({block:'nearest', behavior:'instant'});
+});
+const dialog = el('properties-dialog');
+el('properties-mobile').append(...Array.from(el('properties-content').children, (item) => item.cloneNode(true)));
+el('properties-open').addEventListener('click', () => dialog.showModal());
+el('properties-close').addEventListener('click', () => dialog.close());
+dialog.addEventListener('click', (event) => {
+  if (event.target === dialog && event.clientX < dialog.getBoundingClientRect().left) dialog.close();
+});
+el('draft').addEventListener('input', () => { el('simulate-post').disabled = !el('draft').value.trim(); });
+el('composer').addEventListener('submit', (event) => {
+  event.preventDefault();
+  const text = el('draft').value.trim();
+  if (!text) return;
+  const message = document.createElement('article');
+  message.className = 'message';
+  message.innerHTML = '<span class="mark" aria-hidden="true">你</span><div><div class="message-meta"><strong>你 · 预览</strong></div><p></p></div>';
+  message.querySelector('p').textContent = text;
+  el('messages').append(message);
+  el('draft').value = '';
+  el('simulate-post').disabled = true;
+  el('preview-toast').textContent = '此留言仅显示在本地预览中。';
+  el('preview-toast').hidden = false;
+});
+</script>
+<style>
+svg:not([xmlns]) { fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
+</style>
+</body>
+</html>
