@@ -368,7 +368,7 @@ export function IssueDetail({
       chatId={chatId}
       onReachable={onReachable}
       detail={{
-        ready: data !== null || !!error,
+        overviewLoaded: data !== null,
         header: (
           <>
             {error && (

@@ -1,4 +1,10 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
 import type { FormEvent, ReactNode, RefObject } from "react";
 import {
   chatLink,
@@ -395,7 +401,7 @@ export function Chat({
   chatId: string;
   onReachable: (online: boolean) => void;
   detail?: {
-    ready: boolean;
+    overviewLoaded: boolean;
     header: ReactNode;
     work: ReactNode;
     properties: ReactNode;
@@ -408,10 +414,13 @@ export function Chat({
   const numericRoute = issue !== undefined && /^#?[1-9][0-9]*$/.test(issue);
   const [awaitingStart, setAwaitingStart] = useState(false);
   const [before, setBefore] = useState<number | null | undefined>(undefined);
-  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [historyMode, setHistoryMode] = useState<"manual" | "anchor" | null>(
+    null,
+  );
   const [refresh, setRefresh] = useState(0);
   const [error, setError] = useState("");
   const [historyError, setHistoryError] = useState("");
+  const [anchorError, setAnchorError] = useState("");
   const [replyId, setReplyId] = useState(
     () => savedMessage(chatId, issue)?.reply_to ?? null,
   );
@@ -420,26 +429,28 @@ export function Chat({
   const follow = useRef(!detail);
   const [anchor, setAnchor] = useState(messageAnchor);
   const handledAnchor = useRef("");
-  const attemptedAnchor = useRef("");
-  const [seekingAnchor, setSeekingAnchor] = useState(false);
-  const readyForAnchor = detail?.ready ?? true;
+  const seekingAnchor = historyMode === "anchor";
+  const readyForAnchor = detail?.overviewLoaded ?? true;
   const historyRequest = useRef<AbortController | null>(null);
   const preserve = useRef<{ top: number; height: number } | null>(null);
 
   useEffect(() => {
+    function cancelHistory() {
+      historyRequest.current?.abort();
+      historyRequest.current = null;
+    }
     function followHash() {
       handledAnchor.current = "";
-      attemptedAnchor.current = "";
-      historyRequest.current?.abort();
-      setLoadingHistory(false);
-      setSeekingAnchor(false);
+      cancelHistory();
+      setHistoryMode(null);
       setHistoryError("");
+      setAnchorError("");
       setAnchor(messageAnchor());
     }
     window.addEventListener("hashchange", followHash);
     return () => {
       window.removeEventListener("hashchange", followHash);
-      historyRequest.current?.abort();
+      cancelHistory();
     };
   }, []);
 
@@ -496,6 +507,7 @@ export function Chat({
       const target = document.getElementById(`message-${anchor}`);
       if (target) {
         handledAnchor.current = anchor;
+        setAnchorError("");
         follow.current = false;
         preserve.current = null;
         target.scrollIntoView({ block: "center" });
@@ -514,79 +526,76 @@ export function Chat({
     }
   }, [messages, readyForAnchor, anchor]);
 
-  useEffect(() => {
-    if (
-      !anchor ||
-      !readyForAnchor ||
-      before === undefined ||
-      handledAnchor.current === anchor ||
-      attemptedAnchor.current === anchor
-    )
-      return;
-    const controller = new AbortController();
-    const { signal } = controller;
-
-    async function seek() {
-      // Let a hash change or an unmount cancel the search before it begins.
-      await Promise.resolve();
-      if (signal.aborted) return;
-      attemptedAnchor.current = anchor;
-      setSeekingAnchor(true);
-      let cursor = before ?? null;
+  const loadHistory = useCallback(
+    async (before: number, target?: string) => {
+      // Manual loads and anchor searches exclusively own the same cursor.
+      if (historyRequest.current) return;
+      const controller = new AbortController();
+      const { signal } = controller;
+      historyRequest.current = controller;
+      setHistoryMode(target ? "anchor" : "manual");
+      if (!target) setHistoryError("");
+      let cursor: number | null = before;
       const history: Message[][] = [];
-      let found = false;
       try {
         while (cursor !== null) {
           const page = await readMessages(token, cursor, signal, issue, chatId);
           if (signal.aborted) return;
           history.push(page.messages);
           cursor = page.next_before;
-          if (page.messages.some((message) => message.id === anchor)) {
-            found = true;
+          if (
+            !target ||
+            handledAnchor.current === target ||
+            page.messages.some((message) => message.id === target)
+          ) {
             break;
           }
         }
-        if (!found) setHistoryError("没有找到链接指向的原消息。");
       } catch (error) {
-        if (!signal.aborted) setHistoryError(errorText(error));
+        if (!signal.aborted) {
+          if (target && handledAnchor.current !== target) {
+            setAnchorError(errorText(error));
+          } else if (!target) {
+            setHistoryError(errorText(error));
+          }
+        }
+      } finally {
+        if (historyRequest.current === controller) {
+          if (history.length > 0) {
+            if (!target && timeline.current) {
+              preserve.current = {
+                top: timeline.current.scrollTop,
+                height: timeline.current.scrollHeight,
+              };
+            }
+            const earlier = history.reverse().flat();
+            setMessages((current) => mergeMessages(current, earlier, true));
+            setBefore(cursor);
+          }
+          historyRequest.current = null;
+          setHistoryMode(null);
+        }
       }
-      if (signal.aborted) return;
-      if (history.length > 0) {
-        const linkedHistory = history.reverse().flat();
-        setMessages((current) => mergeMessages(current, linkedHistory, true));
-        setBefore(cursor);
-      }
-      setSeekingAnchor(false);
-    }
+    },
+    [token, issue, chatId],
+  );
 
-    void seek();
-    return () => controller.abort();
-  }, [anchor, readyForAnchor, before, token, issue, chatId]);
-
-  async function loadEarlier() {
-    if (before == null || loadingHistory || seekingAnchor) return;
-    const controller = new AbortController();
-    const { signal } = controller;
-    historyRequest.current = controller;
-    setLoadingHistory(true);
-    setHistoryError("");
-    try {
-      const page = await readMessages(token, before, signal, issue, chatId);
-      if (signal.aborted) return;
-      if (timeline.current) {
-        preserve.current = {
-          top: timeline.current.scrollTop,
-          height: timeline.current.scrollHeight,
-        };
-      }
-      setBefore(page.next_before);
-      setMessages((current) => mergeMessages(current, page.messages, true));
-    } catch (error) {
-      if (!signal.aborted) setHistoryError(errorText(error));
-    } finally {
-      if (!signal.aborted) setLoadingHistory(false);
+  useEffect(() => {
+    if (
+      !anchor ||
+      !readyForAnchor ||
+      before === undefined ||
+      handledAnchor.current === anchor ||
+      historyMode ||
+      anchorError
+    )
+      return;
+    if (before === null) {
+      setAnchorError("没有找到链接指向的原消息。");
+    } else {
+      void loadHistory(before, anchor);
     }
-  }
+  }, [anchor, readyForAnchor, before, historyMode, anchorError, loadHistory]);
 
   const byId = new Map(messages.map((message) => [message.id, message]));
   let lastUser: string | null = null;
@@ -642,19 +651,21 @@ export function Chat({
         <button
           className="text-button older-messages"
           type="button"
-          disabled={loadingHistory || seekingAnchor}
-          onClick={() => void loadEarlier()}
+          disabled={historyMode !== null}
+          onClick={() => {
+            if (before != null && !historyMode) void loadHistory(before);
+          }}
         >
           {seekingAnchor
             ? "正在定位原消息…"
-            : loadingHistory
+            : historyMode === "manual"
               ? "正在读取…"
               : "读取更早的消息"}
         </button>
       )}
-      {(error || historyError) && (
+      {(error || historyError || anchorError) && (
         <p className="error" role="alert">
-          {error || historyError}
+          {error || historyError || anchorError}
         </p>
       )}
       <ol aria-label="对话记录" className="messages">

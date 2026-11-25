@@ -80,8 +80,6 @@ def seed(root):
                 (3, 'review-decision', 'work', 'review-request', '是否按推荐方案进入实现？');
             INSERT INTO attentions (id, issue_id, task_id, source_seq, question_seq, request)
                 VALUES ('real-attention', 'design-child', 'design-task', 1, 3, '{"question":"是否按推荐方案进入实现？"}');
-            INSERT INTO issue_messages (id, issue_id, kind, author, text, source_message_id) VALUES
-                ('old-note', 'plan-child', 'agent', 'Plan Worker', '已核对历史运行记录，可直接回复这条工作备注。', 'review-request');
         """)
         files = [
             ("md-original", "plan-child", "plan-task", "usage-plan.md", MARKDOWN.encode()),
@@ -98,6 +96,15 @@ def seed(root):
             db.execute("INSERT INTO report_artifacts VALUES ('real-report', ?)", (file,))
             db.execute("INSERT INTO chat_artifacts VALUES ('review-report', ?)", (file,))
         db.execute("UPDATE chat_messages SET text = ? WHERE id = 'review-report'", (REPORT,))
+        db.executemany(
+            """INSERT INTO issue_messages (id, issue_id, kind, author, text)
+               VALUES (?, 'historical-parent', 'agent', 'Issue Owner', ?)""",
+            ((f"earlier-{i}", f"更早的记录 {i}") for i in range(50)),
+        )
+        db.execute("""
+            INSERT INTO issue_messages (id, issue_id, kind, author, text, source_message_id) VALUES
+                ('old-note', 'plan-child', 'agent', 'Plan Worker', '已核对历史运行记录，可直接回复这条工作备注。', 'review-request')
+        """)
         db.executemany(
             """INSERT INTO issue_messages (id, issue_id, kind, author, text)
                VALUES (?, 'historical-parent', 'agent', 'Issue Owner', ?)""",
