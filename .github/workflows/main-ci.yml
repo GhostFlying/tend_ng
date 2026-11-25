@@ -13,23 +13,38 @@ jobs:
     name: Rust release and protocol window
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    container: rust:1.91.1-bookworm
     env:
       RUSTUP_TOOLCHAIN: 1.91.1
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
-      - name: Install Rust
-        run: rustup toolchain install 1.91.1 --profile minimal
+      - name: Install the protocol fixture interpreter
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends python3
       - name: Build Server, Runner and CLI
         run: cargo build --release --locked
       - name: Check the Runner protocol window
         run: python3 -B tests/e2e/protocol_window.py target/release/tend-server target/release/tend target/release/tend-runner
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-rust
+          path: |
+            target/release/tend-server
+            target/release/tend-runner
+            target/release/tend
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
   tsnet:
     name: Go tsnet
     runs-on: ubuntu-24.04
     timeout-minutes: 20
+    env:
+      CGO_ENABLED: "0"
     defaults:
       run:
         working-directory: transport/tsnet
@@ -42,7 +57,14 @@ jobs:
           go-version-file: transport/tsnet/go.mod
           cache: false
       - run: go test ./...
-      - run: go build
+      - run: go build -o tend-tsnet .
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-tsnet
+          path: transport/tsnet/tend-tsnet
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
 
   web:
     name: Web checks and build
@@ -64,3 +86,64 @@ jobs:
       - run: pnpm --dir web format:check
       - run: pnpm --dir web test
       - run: pnpm --dir web build
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ci-web
+          path: web/dist/
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
+
+  package:
+    name: Package Linux deployment artifacts
+    if: github.ref == 'refs/heads/main'
+    needs: [rust, tsnet, web]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-rust
+          path: components/rust
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-tsnet
+          path: components/tsnet
+      - uses: actions/download-artifact@v8
+        with:
+          name: ci-web
+          path: components/web
+      - run: bash .github/scripts/package-main-build.sh components deployment
+      - uses: actions/upload-artifact@v7
+        with:
+          name: tend-ng-linux-amd64-${{ github.sha }}
+          path: deployment/
+          compression-level: 0
+          if-no-files-found: error
+          overwrite: true
+
+  publish:
+    name: Update main build prerelease
+    if: github.ref == 'refs/heads/main'
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    concurrency:
+      group: main-build-release
+      queue: max
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: tend-ng-linux-amd64-${{ github.sha }}
+          path: deployment
+      - run: bash .github/scripts/publish-main-build.sh deployment
+        env:
+          GH_TOKEN: ${{ github.token }}
