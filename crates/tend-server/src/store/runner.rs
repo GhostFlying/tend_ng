@@ -189,6 +189,18 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
 }
 
 impl Store {
+    pub fn registered_repo_ids(&self) -> Result<Vec<String>> {
+        let mut statement = self.db.prepare(
+            "SELECT DISTINCT repo.value FROM runners r CROSS JOIN json_each(r.profile, '$.repos') repo
+             WHERE NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
+             ORDER BY repo.value",
+        )?;
+        let ids = statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        Ok(ids)
+    }
+
     pub fn agent_candidates(&self, query: &AgentQuery) -> Result<Vec<AgentCandidate>> {
         let available: std::collections::HashSet<_> = available_runners(&self.db)?
             .into_iter()

@@ -27,8 +27,11 @@ BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
 cases[BOARD_WAITING] = {"dispatch": True}
 RECORD_ISSUE = "先记下稍后整理发布说明。"
 START_ISSUE = "开始刚才记下的发布说明。"
+REGISTERED_REVIEW = "review Lynx MR !75573"
 cases[RECORD_ISSUE] = {"answer": "已记下，稍后再做。"}
 cases[START_ISSUE] = {"answer": "已经安排原 Issue 开工。"}
+cases[REGISTERED_REVIEW] = {"answer": "I’ve queued the read-only review."}
+cases["Is UnregisteredRepo in the list?"] = {"answer": "No, that repository is not registered."}
 cases[ISSUE_CHAT_REQUEST] = {"dispatch": True}
 cases[ISSUE_CHAT_RELAY] = {"answer": "我已把补充要求交给负责指南的 Agent。"}
 cases[WEB_REQUEST] = {"dispatch": True}
@@ -42,7 +45,9 @@ cases["这项工作现在到哪一步了？"] = {"answer": "负责的 Agent 已�
 cases["好，发我一份原文件就行。"] = {"answer": "收到。文件同步后，我会把下载入口发到这里。"}
 database = sqlite3.connect(sys.argv[1], timeout=5)
 database.executescript("""
-    CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, tools TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, tools TEXT NOT NULL, instructions TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS resumes (thread_id TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS tool_calls (thread_id TEXT NOT NULL, turn_id TEXT NOT NULL, tool TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS turns (
         seq INTEGER PRIMARY KEY,
         thread_id TEXT NOT NULL,
@@ -66,6 +71,14 @@ def respond(request, payload):
 
 def notify(method, **params):
     print(json.dumps({"method": method, "params": params}), flush=True)
+
+
+def tool_call(request_id, params):
+    with database:
+        database.execute("INSERT INTO tool_calls VALUES (?, ?, ?)",
+                         (params["threadId"], params["turnId"], params["tool"]))
+    print(json.dumps({"id": request_id, "method": "item/tool/call", "params": params}), flush=True)
+
 
 def missing_thread(request):
     thread_id = request["params"]["threadId"]
@@ -111,14 +124,14 @@ def dispatch(thread_id, turn_id, token, *, remaining=False, guide=False, pending
             title="Prepare release notes", objective="Summarize the separate release work."
         )
     # The start response is lost. The native input event supplies its identity.
-    print(json.dumps({"id": "first-call", "method": "item/tool/call", "params": params}), flush=True)
+    tool_call("first-call", params)
     notify("item/started", threadId=thread_id, turnId=turn_id, item={
         "type": "userMessage", "clientId": token,
     })
     result = json.loads(sys.stdin.readline())
     assert result["id"] == "first-call" and result["result"]["success"], result
     receipt = json.loads(result["result"]["contentItems"][0]["text"])
-    print(json.dumps({"id": "replay-call", "method": "item/tool/call", "params": params}), flush=True)
+    tool_call("replay-call", params)
     replay = json.loads(sys.stdin.readline())
     assert replay["id"] == "replay-call" and replay["result"]["success"], replay
     repeated = json.loads(replay["result"]["contentItems"][0]["text"])
@@ -131,14 +144,11 @@ def read_dispatch(thread_id, turn_id, token, operation_id):
     notify("item/started", threadId=thread_id, turnId=turn_id, item={
         "type": "userMessage", "clientId": token,
     })
-    print(json.dumps({
-        "id": "read-receipt", "method": "item/tool/call",
-        "params": {
-            "threadId": thread_id, "turnId": turn_id, "callId": "read-work",
-            "tool": "tend_read_dispatch", "namespace": None,
-            "arguments": {"operation_id": operation_id},
-        },
-    }), flush=True)
+    tool_call("read-receipt", {
+        "threadId": thread_id, "turnId": turn_id, "callId": "read-work",
+        "tool": "tend_read_dispatch", "namespace": None,
+        "arguments": {"operation_id": operation_id},
+    })
     result = json.loads(sys.stdin.readline())
     assert result["id"] == "read-receipt" and result["result"]["success"], result
     return json.loads(result["result"]["contentItems"][0]["text"])
@@ -147,13 +157,10 @@ def read_dispatch(thread_id, turn_id, token, operation_id):
 def decision_tool(name, args, thread, turn, token, *, success=True):
     notify("item/started", threadId=thread, turnId=turn,
            item={"type": "userMessage", "clientId": token})
-    print(json.dumps({
-        "id": name, "method": "item/tool/call",
-        "params": {
-            "threadId": thread, "turnId": turn, "callId": name,
-            "tool": name, "arguments": args,
-        },
-    }), flush=True)
+    tool_call(name, {
+        "threadId": thread, "turnId": turn, "callId": name,
+        "tool": name, "arguments": args,
+    })
     result = json.loads(sys.stdin.readline())
     assert result["id"] == name and result["result"]["success"] == success, result
     return json.loads(result["result"]["contentItems"][0]["text"])
@@ -176,14 +183,16 @@ for line in sys.stdin:
             thread_id = str(uuid.uuid4())
             with database:
                 database.execute(
-                    "INSERT INTO threads VALUES (?, ?)",
-                    (thread_id, json.dumps(params.get("dynamicTools", []))),
+                    "INSERT INTO threads VALUES (?, ?, ?)",
+                    (thread_id, json.dumps(params.get("dynamicTools", [])), instructions),
                 )
             respond(request, {"thread": {"id": thread_id}})
         case "thread/resume":
             if database.execute(
                 "SELECT 1 FROM turns WHERE thread_id = ?", (params["threadId"],)
             ).fetchone():
+                with database:
+                    database.execute("INSERT INTO resumes VALUES (?)", (params["threadId"],))
                 respond(request, {"thread": {"id": params["threadId"]}})
             else:
                 missing_thread(request)
@@ -340,6 +349,14 @@ for line in sys.stdin:
                                                 params["clientUserMessageId"])
                 assert receipt["issue_id"] == issue and receipt["text"] == text
                 assert receipt["short_number"] == number
+                answer = case["answer"]
+            elif text == REGISTERED_REVIEW:
+                decision_tool("tend_dispatch_issue", {
+                    "title": "Review Lynx MR !75573",
+                    "objective": "Review Lynx MR !75573 read-only. Report review findings and stop. "
+                                 "Do not modify or merge the MR.",
+                    "repo_ids": ["lynx"],
+                }, thread_id, turn_id, params["clientUserMessageId"])
                 answer = case["answer"]
             elif case.get("dispatch"):
                 if starts == 1:

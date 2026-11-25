@@ -13,11 +13,19 @@ use std::{
 };
 
 const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 15;
+const TOOL_REVISION: i64 = 16;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
     "Preserve the user's original goal, authorization, and stopping point in the dispatch. Add only the context needed to carry out that work. ",
+    "For new work the user asks to start now, when the user explicitly names a repository in the Tend registered repository IDs list, ",
+    "call tend_dispatch_issue exactly once for that request with the matching canonical repo_ids from the list. ",
+    "You may match the name case-insensitively, but pass the ID exactly as listed. ",
+    "For this direct dispatch, do not call tend_agent_candidates, look up or verify the MR or PR, or pin an Agent or Runner. ",
+    "Leave base_refs unset unless the user explicitly provides them. ",
+    "The Work Agent uses its own repository access and permissions to locate the MR or PR. ",
+    "For a review-only request, make the objective read-only and have the Work Agent stop after reporting findings without modifying or merging the MR or PR. ",
+    "If the user does not explicitly name a registered repository, use the ordinary routing rules. ",
     "Keep read-only investigations and recommendations pending confirmation read-only. Stop before implementation unless the user authorizes it. ",
     "When the user explicitly asks this Issue to deliver a plan, report, or attachment and then wait in place for confirmation or review, treat it as a stage delivery. ",
     "In the persistent dispatch objective, describe the stage delivery and waiting for the user's decision as part of the work. Do not make receipt of the delivery the completion condition. ",
@@ -26,10 +34,11 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
     "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
     "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
-    "When a named configuration matters, use tend_agent_candidates before specifying the Agent and Runner. ",
+    "For other dispatches, when a named configuration matters, use tend_agent_candidates before specifying the Agent and Runner. ",
     "Tend may supply a replay record before the request. It means the following text is the same original input. ",
     "Compare the user's goals against the committed dispatches. Confirm existing work with tend_read_dispatch ",
-    "using its operation_id and report its actual status. Create a dispatch only for a distinct goal that still needs one. ",
+    "using its operation_id and report its actual status. Do not repeat a committed direct dispatch. ",
+    "Create a dispatch only for a distinct goal that still needs one. ",
     "Use tend_relay_issue_message to deliver the current user message to a related existing Issue when its Owner needs to act. ",
     "Use tend_list_issues to locate recent related work in this Chat and tend_read_issue to check current work facts before answering a follow-up. ",
     "If the remaining work is unclear, explain what Tend has already saved or ask a focused question. ",
@@ -255,10 +264,16 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
         } else {
             None
         };
-        let (thread_id, context) = match previous_thread {
-            Some(id) if loaded_thread.as_ref() == Some(&id) || client.resume_thread(&id)? => {
-                (id, input.reply_context.clone())
-            }
+        let mut context = Vec::new();
+        let repo_ids = store.registered_repo_ids()?;
+        if !repo_ids.is_empty() {
+            context.push(format!(
+                "Tend registered repository IDs: {}",
+                serde_json::to_string(&repo_ids)?
+            ));
+        }
+        let thread_id = match previous_thread {
+            Some(id) if loaded_thread.as_ref() == Some(&id) || client.resume_thread(&id)? => id,
             _ => {
                 let id = client.start_thread(
                     &config.cwd,
@@ -267,29 +282,25 @@ fn consume(config: &Config, chat: &str) -> Result<()> {
                     config.model.as_deref(),
                 )?;
                 store.save_thread(chat, &id, TOOL_REVISION, config.model.as_deref())?;
-                let context: Vec<_> = [
-                    store.recent_context(
-                        chat,
-                        if input.report_id.is_some()
-                            || input.attention_id.is_some()
-                            || input.external_batch.is_some()
-                        {
-                            i64::MAX
-                        } else {
-                            input.message_seq
-                        },
-                    )?,
-                    input.reply_context.clone(),
-                    (number > 1)
-                        .then(|| replay_context(&store, &input, number))
-                        .transpose()?,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                (id, (!context.is_empty()).then(|| context.join("\n\n")))
+                context.extend(store.recent_context(
+                    chat,
+                    if input.report_id.is_some()
+                        || input.attention_id.is_some()
+                        || input.external_batch.is_some()
+                    {
+                        i64::MAX
+                    } else {
+                        input.message_seq
+                    },
+                )?);
+                id
             }
         };
+        context.extend(input.reply_context.iter().cloned());
+        if number > 1 {
+            context.push(replay_context(&store, &input, number)?);
+        }
+        let context = (!context.is_empty()).then(|| context.join("\n\n"));
         loaded_thread = Some(thread_id.clone());
         let attempt_id = store.start_attempt(input.seq, number, &thread_id, &process)?;
         let turn = client.run_turn(
