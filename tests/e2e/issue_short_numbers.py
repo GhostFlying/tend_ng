@@ -46,7 +46,7 @@ def legacy_inventory(root):
 
 
 def readback(db, expected):
-    assert db.execute("PRAGMA user_version").fetchone() == (30,)
+    assert db.execute("PRAGMA user_version").fetchone() == (31,)
     assert db.execute("PRAGMA foreign_key_check").fetchall() == []
     assert number_map(db) == expected
 

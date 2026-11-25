@@ -63,26 +63,35 @@ def lose_first_response(upstream, drop_when=lambda _reply: True):
             pass
 
         def do_POST(self):
+            self.forward(drop=True)
+
+        def do_PUT(self):
+            self.forward(drop=False)
+
+        def forward(self, drop):
             request = self.rfile.read(int(self.headers["Content-Length"]))
             with_connection = http.client.HTTPConnection(upstream, timeout=5)
             try:
-                with_connection.request("POST", self.path, request, {
+                with_connection.request(self.command, self.path, request, {
                     "Authorization": self.headers["Authorization"],
-                    "Content-Type": "application/json",
+                    "Content-Type": self.headers["Content-Type"],
                 })
                 response = with_connection.getresponse()
                 body = response.read()
-                reply = json.loads(body)
-                posted.append((json.loads(request), response.status, reply))
-                if not dropped and drop_when(reply):
-                    dropped.append(reply)
-                    self.close_connection = True
-                    return
+                if drop:
+                    reply = json.loads(body)
+                    posted.append((json.loads(request), response.status, reply))
+                    if not dropped and drop_when(reply):
+                        dropped.append(reply)
+                        self.close_connection = True
+                        return
                 self.send_response(response.status)
-                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Type", response.getheader("Content-Type", "application/octet-stream"))
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
                 self.wfile.write(body)
+            except (ConnectionError, TimeoutError):
+                self.close_connection = True
             finally:
                 with_connection.close()
 

@@ -204,6 +204,7 @@ fn report_unstarted_stop(db: &Connection, task: &str, control: &str) -> Result<(
     super::tend_review::finish(
         db,
         task,
+        None,
         control,
         None,
         None,

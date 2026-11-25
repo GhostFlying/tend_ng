@@ -31,7 +31,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-const SCHEMA_VERSION: i64 = 30;
+const SCHEMA_VERSION: i64 = 31;
 
 pub struct Store {
     db: Connection,
@@ -227,6 +227,9 @@ impl Store {
         }
         if version < 30 {
             web_sessions::migrate(&tx)?;
+        }
+        if version < 31 {
+            tend_review::migrate_rounds(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

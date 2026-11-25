@@ -46,20 +46,22 @@ struct AvailableRunner {
     protocol: u32,
 }
 
-fn available_runners(db: &Connection) -> Result<Vec<AvailableRunner>> {
+fn available_runners(db: &Connection, include_full: bool) -> Result<Vec<AvailableRunner>> {
     let mut statement = db.prepare(
         "SELECT r.profile, r.last_seen, r.protocol FROM runners r
          WHERE r.last_seen > unixepoch() - ?1
            AND NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
            AND (coalesce(json_extract(r.profile, '$.standby'), 0) = 0 OR
                 EXISTS(SELECT 1 FROM runner_replacements p WHERE p.successor = r.id))
-           AND json_extract(r.profile, '$.available_for_assignment') > (
+           AND ((?2 AND json_extract(r.profile, '$.shared_reviews') = 1 AND r.protocol >= 2
+                     AND json_extract(r.profile, '$.slot_limit') > 0)
+             OR json_extract(r.profile, '$.available_for_assignment') > (
                 SELECT COUNT(*) FROM runner_assignments a
                 WHERE a.runner_id = r.id AND a.state IN ('reserved', 'issued')
-           )
+           ))
          ORDER BY r.id",
     )?;
-    let rows = statement.query_map([FRESH_SECONDS], |row| {
+    let rows = statement.query_map(params![FRESH_SECONDS, include_full], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
@@ -77,7 +79,16 @@ fn available_runners(db: &Connection) -> Result<Vec<AvailableRunner>> {
     .collect()
 }
 
-pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
+pub(super) fn assign_task(db: &Connection, task: &str) -> Result<()> {
+    let dispatch = db.query_row(
+        &format!("{DISPATCH_QUERY} WHERE t.id = ?1"),
+        [task],
+        read_dispatch,
+    )?;
+    assign(db, dispatch)
+}
+
+pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()> {
     if dispatch.status != "awaiting_assignment" {
         return Ok(());
     }
@@ -97,17 +108,30 @@ pub(super) fn assign(db: &Connection, dispatch: IssueDispatch) -> Result<()> {
                   row.get::<_, Option<String>>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, Option<String>>(4)?)),
     )?;
     let review = super::tend_review::binding(db, &dispatch.task_id)?;
+    if let Some(review) = &review {
+        // A handoff may allocate the same Task after round one. Its new
+        // contract must describe the active round, not the original pins.
+        dispatch.work = super::tend_review::work_for_round(db, review)?;
+    }
     let bound_author = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM tend_reviews WHERE author_task_id = ?1)",
         [&dispatch.task_id],
         |row| row.get::<_, bool>(0),
     )?;
-    for available in available_runners(db)? {
-        if available.protocol < 2 && (review.is_some() || bound_author) {
+    for available in available_runners(db, review.is_some())? {
+        if available.protocol < 2 && (dispatch.category == "review" || bound_author) {
             continue;
         }
         let profile = available.profile;
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
+            continue;
+        }
+        if let Some(review) = &review
+            && (!profile.shared_reviews || !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
+                  WHERE t.id = ?1 AND a.state = 'accepted' AND a.runner_id = ?2)",
+                params![review.author_task_id, profile.runner_id], |row| row.get::<_, bool>(0),
+            )?) {
             continue;
         }
         if db.query_row(
@@ -202,7 +226,7 @@ impl Store {
     }
 
     pub fn agent_candidates(&self, query: &AgentQuery) -> Result<Vec<AgentCandidate>> {
-        let available: std::collections::HashSet<_> = available_runners(&self.db)?
+        let available: std::collections::HashSet<_> = available_runners(&self.db, false)?
             .into_iter()
             .map(|runner| runner.profile.runner_id)
             .collect();
@@ -270,7 +294,7 @@ impl Store {
             super::board::commit(tx)?;
         }
 
-        let runners = available_runners(&self.db)?;
+        let runners = available_runners(&self.db, true)?;
         if runners.is_empty() {
             *after = 0;
             return Ok(());
@@ -378,7 +402,13 @@ impl Store {
                 },
                 confirmed_reclaims: Vec::new(),
                 assignments: if task.is_none() {
-                    assignments_to_send(&self.db, &profile.runner_id, false)?
+                    assignments_to_send(
+                        &self.db,
+                        &profile.runner_id,
+                        false,
+                        request.protocol,
+                        profile.shared_reviews,
+                    )?
                 } else {
                     Vec::new()
                 },
@@ -390,6 +420,7 @@ impl Store {
                     &profile.runner_id,
                     task,
                     request.protocol,
+                    profile.shared_reviews,
                 )?,
                 controls: super::control::pending(&self.db, &profile.runner_id, task)?,
                 drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
@@ -514,7 +545,13 @@ impl Store {
             Vec::new()
         };
         let assignments = if task.is_none() {
-            assignments_to_send(&tx, &profile.runner_id, true)?
+            assignments_to_send(
+                &tx,
+                &profile.runner_id,
+                true,
+                request.protocol,
+                profile.shared_reviews,
+            )?
         } else {
             Vec::new()
         };
@@ -530,7 +567,13 @@ impl Store {
                 )?;
             }
         }
-        let inputs = coordination::pending_inputs(&tx, &profile.runner_id, task, request.protocol)?;
+        let inputs = coordination::pending_inputs(
+            &tx,
+            &profile.runner_id,
+            task,
+            request.protocol,
+            profile.shared_reviews,
+        )?;
         let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
         let controls = super::control::pending(&tx, &profile.runner_id, task)?;
         let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;
@@ -581,16 +624,67 @@ fn assignments_to_send(
     db: &Connection,
     runner: &str,
     include_reserved: bool,
+    version: u32,
+    shared_reviews: bool,
 ) -> Result<Vec<TaskAssignment>> {
     let mut statement = db.prepare(
         "SELECT contract FROM runner_assignments WHERE runner_id = ?1 AND
          (state = 'issued' OR (?2 AND state = 'reserved' AND expires_at > unixepoch()))
+         AND (?4 >= 2 OR json_extract(contract, '$.placement.agent.category') != 'review')
+         AND (?5 OR json_extract(contract, '$.review.author_workspace') IS NULL)
          ORDER BY rowid LIMIT ?3",
     )?;
     statement
-        .query_map(params![runner, include_reserved, PAGE_SIZE], |row| {
-            row.get::<_, String>(0)
-        })?
+        .query_map(
+            params![runner, include_reserved, PAGE_SIZE, version, shared_reviews],
+            |row| row.get::<_, String>(0),
+        )?
         .map(|contract| Ok(serde_json::from_str(&contract?)?))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn review_delivery_respects_v1_and_the_v2_capability() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch("CREATE TABLE runner_assignments (runner_id TEXT, contract TEXT, state TEXT, expires_at INTEGER)")?;
+        for (task, category, review) in [
+            ("work", "implementation", serde_json::Value::Null),
+            (
+                "legacy",
+                "review",
+                json!({"request_id":"legacy-op", "author_issue_id":"work", "author_task_id":"work", "candidate":"old", "scope":"scope"}),
+            ),
+            (
+                "shared",
+                "review",
+                json!({"request_id":"shared-op", "author_issue_id":"work", "author_task_id":"work", "candidate":"new", "scope":"scope", "author_workspace":"tasks/work"}),
+            ),
+        ] {
+            let contract = json!({
+                "placement": {"runner_id":"runner", "host_id":"host", "assignment_id":task,
+                    "agent":{"id":"agent", "category":category, "revision":"revision"}},
+                "task_id":task, "issue_id":task, "source_message_id":"message", "chat_id":"main",
+                "work":{"title":"title", "objective":"objective"}, "review":review,
+            });
+            db.execute(
+                "INSERT INTO runner_assignments VALUES ('runner', ?1, 'issued', 0)",
+                [contract.to_string()],
+            )?;
+        }
+        let ids = |protocol, shared| -> Result<Vec<String>> {
+            Ok(assignments_to_send(&db, "runner", true, protocol, shared)?
+                .into_iter()
+                .map(|task| task.task_id)
+                .collect())
+        };
+        assert_eq!(ids(1, false)?, ["work"]);
+        assert_eq!(ids(2, false)?, ["work", "legacy"]);
+        assert_eq!(ids(2, true)?, ["work", "legacy", "shared"]);
+        Ok(())
+    }
 }

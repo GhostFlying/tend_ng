@@ -59,7 +59,7 @@ Issue Agent 取得本地委派回执并处理完手头工作后可结束本轮�
 
 Work Agent 可在任意阶段提交产物。各 Issue 的 Owner 显式决定自己负责的 Issue 何时结案。父 Issue 可在子 Issue 仍在推进时由 Issue Agent 结案，子 Issue 继续按各自的实际状态记录。调查默认直接交付，复杂实现的预置 prompt 指引 Work Agent 寻求对实际候选的独立审阅。Codex 原生 subagent 的审阅记录保存在当前工作子 Issue，委派给 Review Agent 则创建 `review` 子 Issue。 [工作委派与结案](task-lifecycle.md#工作委派与-issue-结案) · [独立审阅](task-lifecycle.md#独立审阅)
 
-由 Tend 委派的审阅将所审候选、结论和证据回传发起方，并按原委派关系逐级上报。发起方按实际发现决定后续修复或复审。审阅执行按通用 Task 规则结算，审阅结论以实际交付的记录为准。 [独立审阅](task-lifecycle.md#独立审阅)
+由 Tend 委派的审阅在双方 Run 不重叠的前提下复用原作者的 workspace。候选、结论和证据按每轮请求回传原作者 Task。作者可按发现修订并提交下一候选，沿原 Review Issue 和 Task 复审。普通 Issue 事实仍按原委派关系上报。 [独立审阅](task-lifecycle.md#独立审阅)
 
 取消整个 Issue 时，Issue Agent 沿委派关系逐级转达，预期停止取消范围内的工作。停止控制发出后，Issue Agent 可以记录父 Issue 已取消。子执行保持真实状态，由 Runner 根据停妥证据更新。父 Issue 可以在旧子执行停止待确认时重开，旧停止控制继续作用于原执行。 [取消与逐级停止](task-lifecycle.md#取消与逐级停止) · [重开后的接续](task-lifecycle.md#重开后的接续)
 

@@ -72,9 +72,13 @@ Runner 通过 App Server 观察实际执行，记录发起线程和子线程的�
 
 Work Agent 显式登记候选提交或产物、审阅范围及结论，引用 Runner 观察到的子线程和本次审阅结果。记录随原工作子 Issue 持久保存，通过现有 Runner 与 Server 同步回传，Issue 详情按需读取。
 
-确需由 Tend 单独安排时，发起方用 `tend_request_review` 绑定候选、范围、原作者 Issue/Task 和审阅 Issue/Task。若作者是工作子项，审阅作为同一协调父 Issue 的子项单独归属。审阅使用独立 workspace，无原作者 workspace 的写入准入。作者结束本轮后，在确认停妥的基础上归还 slot，并保留原 workspace 独占。审阅方用 `tend_deliver_review` 保存结论和证据，Server 沿绑定立即直接回传原作者 Task，同时普通结案和留言仍按父级窗口送达。审阅不能改变任何 Owner 或授权，已经终结的原作者 Task 不自动重开。终结无结论以原审阅 Task 的停止事实回报。要求修改也是有效结论，普通修订在原作者 Task 内完成。用户确认仍走原 Chat 的 Attention。
+确需由 Tend 单独安排时，发起方用 `tend_request_review` 绑定候选、范围、原作者 Issue/Task 和审阅 Issue/Task。若作者是工作子项，审阅作为同一协调父 Issue 的子项单独归属。审阅在作者所属 Runner 本地排队。作者可在请求被持久受理后继续本轮，Runner 确认实际停妥后才允许审阅取得同一 workspace。审阅结论可先送达原作者 Task，作者仍须等审阅 Run 实际停妥才可开工。原 PR/CI 等待的目录保留不受此交接影响。 [Workspace 分配](server-runner.md#workspace-分配)
 
-审阅 Task 和 Run 按通用规则结算。Run 正常结束且实际停妥时，可以在零份交付的情况下结算 Task。执行失败时保留原错误，确认停妥后归还 slot。审阅结论以实际登记的记录为准，发起方按结论或原执行结果决定后续。 [Task 结算](#run-正常结束时的-task-结算) · [执行失败后的接手](#执行失败后的接手)
+`tend_deliver_review` 将结论、证据和来源绑定到本 Run 所审的请求。无结论终结回报对应轮次的原停止或准备失败事实。每轮至多一条直接作者输入，不重开已终结的作者 Task。普通结案和留言仍沿父级投递，用户确认仍走原 Chat Attention。
+
+作者根据结果在原作者 Task 内修订。需要复审时，用 `tend_request_review` 提交不同候选并带结果中的 `child_task_id` 作为 `review_task_id`。已有审阅实际停妥并结算后，新输入让同一 Review Issue、Task 和 Reviewer 再次排队。两轮间归还 slot。审阅 Issue 保持 Owner 原先决定的 open/closed 状态，复审不代为重开或改变 Owner，已取消的审阅不重新执行。原 Task 的普通讨论继续持久保存，结束后的讨论不代替复审请求。候选、范围、请求、证据及结果身份逐轮保留。
+
+在原 Runner 和兼容配置内优先继续同一原生 thread。明确无法读取原 thread 时，从持久的本轮输入和历史回执新开 session，Issue/Task 不变。连接中断、临时异常或未知恢复结果不证明原 thread 不可用，保留相同准备 Run 重试。 [Task 结算](#run-正常结束时的-task-结算) · [Session 接续](agent-tools.md#session-接续)
 
 ## PR / CI 的 subscribe 和 waitfor
 

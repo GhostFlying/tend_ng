@@ -81,7 +81,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
 
     let source = db
         .query_row(
-            "SELECT i.id, i.source_seq, i.parent_issue_id, t.category, t.id
+            "SELECT i.id, i.source_seq, i.parent_issue_id, t.category, t.id, a.contract
          FROM task_runs r JOIN runner_assignments a ON a.id = r.assignment_id
          JOIN tasks t ON t.id = r.task_id
          JOIN issues i ON i.id = t.issue_id
@@ -94,11 +94,14 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                     row.get::<_, Option<String>>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             },
         )
         .optional()?;
-    let Some((source_issue, source_message, parent_issue, category, source_task)) = source else {
+    let Some((source_issue, source_message, parent_issue, category, source_task, contract)) =
+        source
+    else {
         return Ok(false);
     };
     if let WorkAction::Delegate {
@@ -123,10 +126,21 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             candidate,
             scope,
             work,
+            rereview,
         } if category == "review"
             || !protocol::valid_id(issue_id)
             || !protocol::valid_id(task_id)
             || !protocol::valid_tend_review(candidate, scope, work)
+            || *rereview
+                && (work.agent.is_some()
+                    || !super::tend_review::can_request_again(
+                        db,
+                        task_id,
+                        issue_id,
+                        &source_task,
+                        candidate,
+                        &operation.run_id,
+                    )?)
             || !work.repo_ids.iter().all(|repo| {
                 db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM tasks WHERE id = ?1
@@ -139,12 +153,17 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
         {
             return Ok(false);
         }
-        WorkAction::DeliverReview { result }
+        WorkAction::DeliverReview { result, request_id } => {
+            let bound = super::tend_review::request_for_run(db, &operation.run_id)?;
             if category != "review"
                 || !result.valid()
-                || super::tend_review::binding(db, &source_task)?.is_none() =>
-        {
-            return Ok(false);
+                || bound.is_none()
+                || request_id
+                    .as_ref()
+                    .is_some_and(|id| Some(id) != bound.as_ref())
+            {
+                return Ok(false);
+            }
         }
         _ => {}
     }
@@ -179,7 +198,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 issue_id,
                 task_id,
                 requested,
-                *isolated_workspace,
+                isolated_workspace.then_some(issue_id.as_str()),
                 work,
             )?;
         }
@@ -189,21 +208,26 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             candidate,
             scope,
             work,
+            rereview,
         } => {
-            let coordination_parent = parent_issue.as_deref().unwrap_or(&source_issue);
-            delegate(
-                db,
-                runner,
-                operation,
-                coordination_parent,
-                &source_task,
-                source_message,
-                issue_id,
-                task_id,
-                "review",
-                true,
-                work,
-            )?;
+            let author: TaskAssignment = serde_json::from_str(&contract)?;
+            let workspace = author.workspace_path();
+            if !rereview {
+                let coordination_parent = parent_issue.as_deref().unwrap_or(&source_issue);
+                delegate(
+                    db,
+                    runner,
+                    operation,
+                    coordination_parent,
+                    &source_task,
+                    source_message,
+                    issue_id,
+                    task_id,
+                    "review",
+                    workspace.strip_prefix("workspaces/"),
+                    work,
+                )?;
+            }
             super::tend_review::bind(
                 db,
                 &operation.operation_id,
@@ -213,12 +237,20 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
                 task_id,
                 candidate,
                 scope,
+                &workspace,
             )?;
+            if *rereview {
+                super::tend_review::request_again(db, runner, operation, issue_id, task_id, work)?;
+            } else {
+                super::runner::assign_task(db, task_id)?;
+            }
         }
-        WorkAction::DeliverReview { result } => {
+        WorkAction::DeliverReview { result, .. } => {
+            let request = super::tend_review::request_for_run(db, &operation.run_id)?;
             super::tend_review::finish(
                 db,
                 &source_task,
+                request.as_deref(),
                 &operation.operation_id,
                 Some(&operation.run_id),
                 Some(result),
@@ -418,7 +450,7 @@ fn delegate(
     issue_id: &str,
     task_id: &str,
     requested: &str,
-    isolated_workspace: bool,
+    workspace_key: Option<&str>,
     work: &protocol::DispatchIssue,
 ) -> Result<()> {
     let runner_id = &runner.runner_id;
@@ -438,7 +470,7 @@ fn delegate(
                             pinned_runner_id, workspace_key, base_refs, requested_agent, pinned_agent_id)
          VALUES (?1, ?2, ?3, 'awaiting_assignment', ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
         params![task_id, issue_id, requested, serde_json::to_string(&work.repo_ids)?,
-                serde_json::to_string(&work.required_capabilities)?, runner_id, isolated_workspace.then_some(issue_id),
+                serde_json::to_string(&work.required_capabilities)?, runner_id, workspace_key,
                 serde_json::to_string(&work.base_refs)?, work.agent.as_ref().map(serde_json::to_string).transpose()?,
                 work.agent.as_ref().map(|agent| &agent.id)],
     )?;
@@ -458,13 +490,14 @@ fn delegate(
         &work.objective,
         None,
     )?;
-    if matching_task_agent(
-        runner,
-        requested,
-        work,
-        work.agent.as_ref().map(|agent| agent.id.as_str()),
-    )
-    .is_none()
+    if requested == "review" && !runner.shared_reviews
+        || matching_task_agent(
+            runner,
+            requested,
+            work,
+            work.agent.as_ref().map(|agent| agent.id.as_str()),
+        )
+        .is_none()
     {
         let missing_repo_ids = work
             .repo_ids
@@ -485,9 +518,15 @@ fn delegate(
                     required_capabilities: work.required_capabilities.clone(),
                     agent_id: work.agent.as_ref().map(|agent| agent.id.clone()),
                 },
-                summary: format!(
-                    "Runner {runner_id} currently has no matching configuration. The original dispatch remains pending."
-                ),
+                summary: if requested == "review" && !runner.shared_reviews {
+                    format!(
+                        "Runner {runner_id} does not yet support shared review. The original dispatch remains pending."
+                    )
+                } else {
+                    format!(
+                        "Runner {runner_id} currently has no matching configuration. The original dispatch remains pending."
+                    )
+                },
             },
         )?;
     }
@@ -522,16 +561,19 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
         },
     )?;
     let (child_issue_id, parent_issue, state) = child;
-    super::tend_review::finish(
-        db,
-        &observation.task_id,
-        &observation.event_id,
-        Some(&observation.run_id),
-        None,
-        error
-            .as_deref()
-            .unwrap_or("Review Task stopped without a structured conclusion."),
-    )?;
+    if let Some(request) = super::tend_review::request_for_run(db, &observation.run_id)? {
+        super::tend_review::finish(
+            db,
+            &observation.task_id,
+            Some(&request),
+            &observation.event_id,
+            Some(&observation.run_id),
+            None,
+            error
+                .as_deref()
+                .unwrap_or("Review Task stopped without a structured conclusion."),
+        )?;
+    }
     if *outcome != RunOutcome::Cancelled
         && db.query_row(
             "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
@@ -614,6 +656,11 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
         return Ok(None);
     };
     if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+        return Ok(Some(previous));
+    }
+    if super::tend_review::binding(db, &previous)?.is_some() {
+        // Keep discussion on the original Task, but only an explicit
+        // candidate can bring a completed bound review off the queue boundary.
         return Ok(Some(previous));
     }
     let Some(contract) = contract else {
@@ -703,6 +750,7 @@ const DUE_TERMINAL: &str = "SELECT DISTINCT t.issue_id FROM issue_inputs p
      JOIN tasks t ON t.id = p.task_id JOIN issues i ON i.id = t.issue_id
      WHERE p.run_id IS NULL AND p.wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)
        AND t.status IN ('completed', 'failed', 'cancelled') AND t.current_assignment IS NOT NULL
+       AND NOT EXISTS (SELECT 1 FROM tend_reviews v WHERE v.review_task_id = t.id)
        AND i.state != 'cancelled' LIMIT 32";
 
 fn release_terminal_windows(db: &Connection) -> Result<()> {
@@ -730,9 +778,10 @@ pub fn pending_inputs(
     runner: &str,
     task: Option<&str>,
     protocol: u32,
+    shared_reviews: bool,
 ) -> Result<Vec<IssueDelivery>> {
     let now = db.query_row(&format!("SELECT {NOW_MS}"), [], |row| row.get(0))?;
-    pending_inputs_at(db, runner, task, protocol, now)
+    pending_inputs_at(db, runner, task, protocol, shared_reviews, now)
 }
 
 fn pending_inputs_at(
@@ -740,6 +789,7 @@ fn pending_inputs_at(
     runner: &str,
     task: Option<&str>,
     protocol: u32,
+    shared_reviews: bool,
     now: i64,
 ) -> Result<Vec<IssueDelivery>> {
     let mut statement = db.prepare(
@@ -749,7 +799,8 @@ fn pending_inputs_at(
            JOIN runner_assignments a ON a.id = t.current_assignment
            WHERE i.run_id IS NULL AND a.runner_id = ?1 AND (?3 IS NULL OR t.id = ?3)
              AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
-             AND (?4 >= 2 OR json_extract(i.payload, '$.kind') != 'review_finished')
+             AND (?4 >= 2 OR json_extract(i.payload, '$.kind') NOT IN ('review_finished','review_requested'))
+             AND (?6 OR json_extract(i.payload, '$.kind') != 'review_requested')
              AND (i.wake_at IS NULL OR i.wake_at <= ?5)
          ), page AS MATERIALIZED (
            SELECT seq, task_id, wake_at FROM ready ORDER BY wake_at IS NOT NULL, seq LIMIT ?2
@@ -761,7 +812,14 @@ fn pending_inputs_at(
     )?;
     statement
         .query_map(
-            params![runner, RUNNER_SYNC_BATCH, task, protocol, now],
+            params![
+                runner,
+                RUNNER_SYNC_BATCH,
+                task,
+                protocol,
+                now,
+                shared_reviews
+            ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?
         .map(|value| {
@@ -907,7 +965,7 @@ mod tests {
         )?;
 
         let keys = |now| -> Result<Vec<String>> {
-            Ok(pending_inputs_at(&db, "runner", None, 2, now)?
+            Ok(pending_inputs_at(&db, "runner", None, 2, true, now)?
                 .into_iter()
                 .map(|delivery| delivery.input.input_id)
                 .collect())

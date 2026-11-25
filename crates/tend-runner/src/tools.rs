@@ -118,7 +118,7 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
     let review_handoff = if category == "review" {
         json!({
             "type": "function", "name": DELIVER_REVIEW,
-            "description": "Return the conclusion and evidence for this bound review to the exact author Task.",
+            "description": "Return the conclusion and evidence for this Run's bound request and candidate to the exact author Task. Retries return the original receipt.",
             "inputSchema": {"type":"object", "properties":{
                 "conclusion":{"type":"string"}, "evidence":{"type":"string"}
             }, "required":["conclusion","evidence"], "additionalProperties":false}
@@ -126,10 +126,11 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
     } else {
         json!({
             "type": "function", "name": REQUEST_REVIEW,
-            "description": "Request optional independent Tend review of an immutable candidate. End the turn when ready to yield; the result resumes this exact author Task. Use artifact:<file_id> for a submitted file, or exact Git commit base_refs to mount code in a separate workspace.",
+            "description": "Request independent Tend review in your existing workspace. You may finish the turn before yielding; the reviewer starts after you stop. Use artifact:<file_id> or exact Git commit base_refs. For a new candidate after a result, pass its child_task_id as review_task_id to reuse the same Review Issue, Task and Reviewer. Omit agent_id on a re-review.",
             "inputSchema": {"type":"object", "properties":{
                 "candidate":{"type":"string"}, "scope":{"type":"string"},
                 "agent_id":{"type":"string"},
+                "review_task_id":{"type":"string"},
                 "base_refs":{"type":"object","additionalProperties":{"type":"string"}}
             }, "required":["candidate","scope"], "additionalProperties":false}
         })
@@ -287,6 +288,7 @@ struct ReviewRequest {
     candidate: String,
     scope: String,
     agent_id: Option<String>,
+    review_task_id: Option<String>,
     #[serde(default)]
     base_refs: std::collections::BTreeMap<String, String>,
 }
@@ -365,6 +367,14 @@ pub fn action(
     match call.tool.as_str() {
         REQUEST_REVIEW if run.assignment.placement.agent.category != "review" => {
             let args: ReviewRequest = serde_json::from_value(call.arguments.clone())?;
+            let rereview = args.review_task_id.is_some();
+            ensure!(
+                args.review_task_id
+                    .as_deref()
+                    .is_none_or(protocol::valid_id)
+                    && (!rereview || args.agent_id.is_none()),
+                "Use the original review_task_id without a new agent_id for re-review"
+            );
             let work = DispatchIssue {
                 title: format!("Independent review of {}", run.assignment.work.title),
                 objective: format!(
@@ -381,6 +391,7 @@ pub fn action(
             };
             ensure!(
                 protocol::valid_tend_review(&args.candidate, &args.scope, &work)
+                    && protocol::valid_shared_review_target(&args.candidate, &work)
                     && work
                         .repo_ids
                         .iter()
@@ -388,11 +399,16 @@ pub fn action(
                 "Supply the candidate and scope, and pin any assigned repositories by exact commit"
             );
             Ok(WorkAction::RequestReview {
-                issue_id: protocol::new_id(),
-                task_id: protocol::new_id(),
+                issue_id: if rereview {
+                    String::new()
+                } else {
+                    protocol::new_id()
+                },
+                task_id: args.review_task_id.unwrap_or_else(protocol::new_id),
                 candidate: args.candidate,
                 scope: args.scope,
                 work,
+                rereview,
             })
         }
         DELIVER_REVIEW
@@ -405,7 +421,14 @@ pub fn action(
                 result.valid(),
                 "Provide the actual conclusion and associated evidence"
             );
-            Ok(WorkAction::DeliverReview { result })
+            Ok(WorkAction::DeliverReview {
+                result,
+                request_id: run
+                    .assignment
+                    .review
+                    .as_ref()
+                    .map(|review| review.request_id.clone()),
+            })
         }
         "tend_record_review" => {
             let review: protocol::ReviewConclusion =

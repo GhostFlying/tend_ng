@@ -87,6 +87,11 @@ impl Store {
                 "waiting_external" => HandoffPhase::WaitingExternal,
                 _ => HandoffPhase::Finished,
             };
+            let stamp: Option<String> = tx.query_row(
+                "SELECT coalesce((SELECT workspace_stamp FROM local_runs WHERE assignment_id = a.id AND turn_id IS NOT NULL
+                   ORDER BY rowid DESC LIMIT 1), json_extract(a.contract, '$.handoff.workspace_stamp'))
+                   FROM received_assignments a WHERE a.id = ?1", [&id], |row| row.get(0),
+            )?;
             let operations = if phase == HandoffPhase::Finished {
                 Vec::new()
             } else {
@@ -128,7 +133,11 @@ impl Store {
                 assignment_id: id.clone(),
                 task_id,
                 successor: successor.clone(),
-                context: HandoffContext { phase, operations },
+                context: HandoffContext {
+                    phase,
+                    operations,
+                    workspace_stamp: stamp.as_deref().map(serde_json::from_str).transpose()?,
+                },
             };
             tx.execute("UPDATE received_assignments SET execution_state = 'handed_off', retains_workspace = 0 WHERE id = ?1", [&id])?;
             tx.execute(

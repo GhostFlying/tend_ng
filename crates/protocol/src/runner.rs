@@ -80,6 +80,8 @@ pub struct RunnerProfile {
     pub workspace_root: Option<String>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub standby: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub shared_reviews: bool,
 }
 
 impl RunnerProfile {
@@ -123,6 +125,19 @@ pub struct TaskAssignment {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<crate::TendReview>,
     pub work: DispatchIssue,
+}
+
+impl TaskAssignment {
+    pub fn workspace_path(&self) -> String {
+        match self
+            .workspace_key
+            .as_deref()
+            .or(self.parent_issue_id.as_deref())
+        {
+            Some(key) => format!("workspaces/{key}"),
+            None => format!("tasks/{}", self.task_id),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -223,9 +238,13 @@ pub enum WorkAction {
         candidate: String,
         scope: String,
         work: DispatchIssue,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        rereview: bool,
     },
     DeliverReview {
         result: crate::TendReviewConclusion,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        request_id: Option<String>,
     },
     StopTask {
         task_id: String,
@@ -343,6 +362,10 @@ pub enum IssueInputCause {
         result: Option<crate::TendReviewConclusion>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         run_id: Option<String>,
+    },
+    ReviewRequested {
+        review: crate::TendReview,
+        base_refs: std::collections::BTreeMap<String, String>,
     },
     TaskCancelled {
         control_id: String,

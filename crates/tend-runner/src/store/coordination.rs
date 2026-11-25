@@ -31,8 +31,17 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
 }
 
 impl Store {
-    pub fn coordination_context(&self, run: &LocalRun, resumed: bool) -> Result<Option<String>> {
-        if run.inputs.is_empty() && run.assignment.followup.is_none() && resumed {
+    pub fn coordination_context(
+        &self,
+        run: &LocalRun,
+        resumed: bool,
+        review_artifact: Option<&std::path::Path>,
+    ) -> Result<Option<String>> {
+        if run.inputs.is_empty()
+            && run.assignment.followup.is_none()
+            && resumed
+            && review_artifact.is_none()
+        {
             return Ok(None);
         }
         let mut statement = self.0.prepare(
@@ -87,7 +96,11 @@ impl Store {
         } else {
             None
         };
-        if run.inputs.is_empty() && followup.is_none() && recovery.is_none() {
+        if run.inputs.is_empty()
+            && followup.is_none()
+            && recovery.is_none()
+            && review_artifact.is_none()
+        {
             return Ok(None);
         }
         let records = serde_json::json!({
@@ -95,6 +108,7 @@ impl Store {
             "previous_delegations": delegations,
             "followup": followup,
             "recovery": recovery,
+            "bound_review_artifact": review_artifact,
         });
         Ok(Some(format!(
             "Read these durable coordination records, including any previous Task and current Issue state.\n{records}"
@@ -123,6 +137,72 @@ impl Store {
 
         let operation_id = protocol::new_id();
         let mut action = build(&operation_id)?;
+        let assignment_id = &run.assignment.placement.assignment_id;
+        if let WorkAction::RequestReview {
+            issue_id,
+            task_id,
+            candidate,
+            rereview: true,
+            ..
+        } = &mut action
+        {
+            let prior: Option<String> = self.0.query_row(
+                "SELECT payload FROM local_issue_inputs WHERE assignment_id = ?1 AND run_id IS NOT NULL
+                  AND json_extract(payload, '$.kind') = 'review_finished' AND json_extract(payload, '$.child_task_id') = ?2
+                 ORDER BY rowid DESC LIMIT 1",
+                params![assignment_id, task_id.as_str()], |row| row.get(0),
+            ).optional()?;
+            let prior: IssueInput = serde_json::from_str(prior.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Use the Review Task ID from a completed review returned to this author Task"
+                )
+            })?)?;
+            if let protocol::IssueInputCause::ReviewFinished { review, .. } = prior.cause {
+                ensure!(
+                    review.author_task_id == run.assignment.task_id
+                        && review.candidate != *candidate,
+                    "Submit a new candidate for a review requested by this author Task"
+                );
+            }
+            *issue_id = prior.child_issue_id;
+            let requests = self.0.prepare(
+                "SELECT operation FROM local_work_operations WHERE run_id = ?1 AND json_extract(operation, '$.action.kind') = 'request_review'
+                     AND json_extract(operation, '$.action.task_id') = ?2",
+            )?.query_map(params![run.id, task_id.as_str()], |row| row.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if let Some(original) = requests.first() {
+                let original: WorkOperation = serde_json::from_str(original)?;
+                ensure!(
+                    original.action == action,
+                    "This Run already requested a round on that Review Task"
+                );
+                return Ok(Some(original));
+            }
+        }
+        if let WorkAction::DeliverReview {
+            request_id: Some(request),
+            result,
+        } = &action
+        {
+            let prior: Option<String> = self
+                .0
+                .query_row(
+                    "SELECT operation FROM local_work_operations WHERE assignment_id = ?1
+                  AND json_extract(operation, '$.action.kind') = 'deliver_review'
+                  AND json_extract(operation, '$.action.request_id') = ?2 ORDER BY rowid LIMIT 1",
+                    params![assignment_id, request],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(prior) = prior {
+                let prior: WorkOperation = serde_json::from_str(&prior)?;
+                ensure!(
+                    matches!(&prior.action, WorkAction::DeliverReview { result: original, .. } if original == result),
+                    "The original round already has a different recorded conclusion"
+                );
+                return Ok(Some(prior));
+            }
+        }
         if let WorkAction::RequestReview { candidate, .. } = &action
             && let Some(id) = candidate.strip_prefix("artifact:")
         {
@@ -331,8 +411,15 @@ pub(super) fn accept_input(db: &Connection, delivery: &IssueDelivery) -> Result<
     }
     db.execute(
         "UPDATE received_assignments SET execution_state = 'queued'
-         WHERE id = ?1 AND execution_state IN ('waiting', 'waiting_external')",
-        [assignment_id],
+         WHERE id = ?1 AND (execution_state IN ('waiting', 'waiting_external')
+            OR (?2 AND execution_state = 'finished'))",
+        params![
+            assignment_id,
+            matches!(
+                input.cause,
+                protocol::IssueInputCause::ReviewRequested { .. }
+            )
+        ],
     )?;
     Ok(())
 }

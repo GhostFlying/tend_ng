@@ -34,6 +34,9 @@ pub struct TendReview {
     pub author_task_id: String,
     pub candidate: String,
     pub scope: String,
+    /// Relative to the original Runner's workspace root, including the namespace.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author_workspace: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
@@ -65,4 +68,19 @@ pub fn valid_tend_review(candidate: &str, scope: &str, work: &crate::DispatchIss
                 matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
             })
         })
+}
+
+/// The legacy v2 shape allowed opaque text with no Git mounts. A shared
+/// review must be able to locate the object independently of mutable HEAD.
+pub fn valid_shared_review_target(candidate: &str, work: &crate::DispatchIssue) -> bool {
+    if let Some(id) = candidate.strip_prefix("artifact:") {
+        return crate::valid_id(id);
+    }
+    !work.base_refs.is_empty()
+        && (!(matches!(candidate.len(), 40 | 64)
+            && candidate.bytes().all(|b| b.is_ascii_hexdigit()))
+            || work
+                .base_refs
+                .values()
+                .any(|sha| sha.eq_ignore_ascii_case(candidate)))
 }

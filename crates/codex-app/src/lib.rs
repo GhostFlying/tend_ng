@@ -233,6 +233,7 @@ impl Client {
         cwd: &Path,
         model: Option<&str>,
         require_idle: bool,
+        confirmed_unavailable_only: bool,
     ) -> Result<WorkThreadResume> {
         let response = match self.call(
             "thread/resume",
@@ -242,7 +243,11 @@ impl Client {
             }),
         ) {
             Ok(response) => response,
-            Err(error) if error.downcast_ref::<RpcError>().is_some() => {
+            Err(error)
+                if missing_thread(&error, thread_id)
+                    || (!confirmed_unavailable_only
+                        && error.downcast_ref::<RpcError>().is_some()) =>
+            {
                 return Ok(WorkThreadResume::Unavailable);
             }
             Err(error) => return Err(error),
@@ -251,7 +256,7 @@ impl Client {
         if status == Some("active") {
             return Ok(WorkThreadResume::Active);
         }
-        if (!require_idle || status == Some("idle"))
+        if (!(require_idle || confirmed_unavailable_only) || status == Some("idle"))
             && status != Some("systemError")
             && response["thread"]["id"] == thread_id
             && response["cwd"]
@@ -264,6 +269,8 @@ impl Client {
             })
         {
             Ok(WorkThreadResume::Ready)
+        } else if confirmed_unavailable_only {
+            anyhow::bail!("App Server did not confirm the original thread is ready to resume");
         } else {
             Ok(WorkThreadResume::Unavailable)
         }

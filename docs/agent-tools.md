@@ -13,7 +13,9 @@
 - **取消转达。** Agent 依据原取消范围向自己委派的子项传达取消，使用工具向明确的 Task 提交停止控制，并按原操作查询受理、送达及实际停妥证据。 [取消与逐级停止](task-lifecycle.md#取消与逐级停止)
 - **审阅记录。** Work Agent 在当前工作子 Issue 登记原生 subagent 审阅的候选、范围和结论，并关联 Runner 观察到的子 thread 和结果。Runner 依据 App Server 的原生终态或历史确认执行状态。 [独立审阅](task-lifecycle.md#独立审阅)
 
-`tend_request_review` 由原作者提交候选和范围。Git 挂载只接受作者已分配 repo 的完整提交 SHA。提交文件可用 `artifact:<file_id>` 引用作者 Task 自己的原件。Runner 持久受理后，作者结束当前 turn 才能依据实际停妥归还 slot。指定审阅用 `tend_deliver_review` 回传结论、证据与真实审阅来源。Runner 和 Server 核对原绑定，重复调用不产生新的作者输入。普通讨论或结案不替代结构化审阅证据，用户授权也不走该工具。
+`tend_request_review` 由原作者提交非空候选和范围。Git 审阅只接受作者已分配 repo 的完整提交 SHA（`base_refs`），不把原目录的 HEAD 当作候选。提交文件可用 `artifact:<file_id>` 引用作者 Task 的不可变交付副本，Reviewer 从持久回合上下文的 `bound_review_artifact` 读取。作者取得回执后可以继续收尾，实际停妥后 Reviewer 才能取得同一目录。
+
+收到结果后如需复审，作者提交新候选并传入结果的 `child_task_id` 作为 `review_task_id`，不传 `agent_id`。该输入进入原 Review Issue、Task 和 Reviewer。Reviewer 用 `tend_deliver_review` 回传结论和证据，Runner 从当前 Run 填入确切的请求身份。重复调用沿原回执对账，只有本轮第一条结果产生作者输入。普通讨论或结案不替代结构化证据，用户授权也不走该工具。
 
 派发方可以直接提交工作要求，也可以用本机工具查询合格候选再指名。候选信息来自已同步的清单，Server 应用时按当前事实确认。 [具名 Agent 与任务分配](agent-selection.md)
 

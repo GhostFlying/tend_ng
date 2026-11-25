@@ -62,12 +62,11 @@ impl Store {
 
     pub fn unfinished(&self) -> Result<u32> {
         Ok(self.0.query_row(
-            "SELECT COUNT(*) FROM received_assignments a WHERE a.execution_state = 'active'
+            "SELECT COUNT(*) FROM local_workspace_claims a WHERE a.execution_state = 'active'
                 OR (a.execution_state = 'queued' AND NOT EXISTS (
-                    SELECT 1 FROM received_assignments holder
-                    WHERE holder.id != a.id AND holder.retains_workspace = 1
-                    AND coalesce(json_extract(holder.contract, '$.workspace_key'), json_extract(holder.contract, '$.parent_issue_id'))
-                        = coalesce(json_extract(a.contract, '$.workspace_key'), json_extract(a.contract, '$.parent_issue_id'))
+                    SELECT 1 FROM local_workspace_claims holder
+                    WHERE holder.id != a.id AND holder.path = a.path AND (holder.retains_workspace = 1
+                      OR (holder.pending_review AND holder.task_id IS NOT a.author_task))
                 ))",
             [],
             |row| row.get(0),
@@ -194,11 +193,18 @@ impl Store {
                     serde_json::to_string(&decision)?,
                     state,
                     state == "waiting_external"
-                        || assignment.handoff.as_ref().is_some_and(|handoff| {
-                            handoff.operations.iter().any(|op| {
-                                matches!(op.action, protocol::WorkAction::RequestReview { .. })
-                            })
-                        }),
+                        || state == "queued"
+                            && assignment.handoff.as_ref().is_some_and(|handoff| {
+                                handoff.operations.iter().any(|op| {
+                                    matches!(
+                                        op.action,
+                                        protocol::WorkAction::WatchExternal {
+                                            mode: protocol::WatchMode::Wait,
+                                            ..
+                                        }
+                                    )
+                                })
+                            }),
                     app_server
                 ],
             )?;

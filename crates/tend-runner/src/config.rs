@@ -139,6 +139,7 @@ impl Config {
                 .and_then(|path| path.to_str())
                 .map(str::to_owned),
             standby: self.standby,
+            shared_reviews: true,
         }
     }
 

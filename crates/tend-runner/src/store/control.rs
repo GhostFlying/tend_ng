@@ -35,7 +35,8 @@ pub fn accept(db: &Connection, control: &RunnerControl) -> Result<()> {
         ControlAction::Stop if status != "active" => {
             db.execute(
                 "UPDATE received_assignments SET execution_state = 'cancelled', retains_workspace = 0
-                 WHERE id = ?1 AND execution_state IN ('queued','waiting','waiting_external')",
+                 WHERE id = ?1 AND (execution_state IN ('queued','waiting','waiting_external')
+                     OR (execution_state = 'finished' AND json_extract(contract, '$.review') IS NOT NULL))",
                 [&control.assignment_id],
             )?;
             finish(db, control, ControlState::Stopped)?;

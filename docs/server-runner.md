@@ -22,7 +22,7 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 ### Server 升级兼容窗口
 
-**已确认。** Server 当前协议代为 `N` 时，接受 `N` 和 `N−1` 两代 Runner 通信协议。首次发布只有 `v1`。当前为 `v2`，仍接受 `v1` 的既有同步。绑定审阅分配和回传仅走 `v2`，组内超过旧 Runner 单页上限时须使用 `v2` 才能完整同批收件。Runner 在普通同步请求中声明使用的协议，Server 按同一窗口校验新登记和重连。
+**已确认。** Server 当前协议代为 `N` 时，接受 `N` 和 `N−1` 两代 Runner 通信协议。首次发布只有 `v1`。当前为 `v2`，仍接受 `v1` 的既有同步。绑定审阅分配和回传仅走 `v2`。共享目录分配和复审输入还要求 Runner 上报可选的 `shared_reviews` 支持，不向旧 Runner 派发新绑定审阅。既有操作和已发放的原绑定继续沿原身份对账。组内超过旧 Runner 单页上限时须使用 `v2` 才能完整同批收件。Runner 在普通同步请求中声明使用的协议，Server 按同一窗口校验新登记和重连。
 
 以目标 Server 的协议代确定升代窗口。在停止当前 Server 前，预检读取本机数据库中各未退役 Runner 的协议登记，包括暂时离线及仍在收尾的实例。若仍有 Runner 使用 `N−2` 或更早的协议，拒绝本次 Server 升级，报告 Host、Runner、已登记协议和目标兼容范围。窗口内的 Runner 可以带着已领取的工作跨过 Server 重启。
 
@@ -106,7 +106,9 @@ Server 首次返回任务前，在同一个短事务中确认分配仍可投递�
 
 角色 Skill 指引 Work Agent 使用已分配的目录。工作中发现需要独立 worktree 时，Work Agent 向上级提出，由上层 Issue Agent 决定并在派发中指定。Git 命令保持可用，Agent 按仓库约定使用。 [Agent 工具与本地受理](agent-tools.md#调用接口)
 
-Runner 持久记录各托管工作目录当前由哪个 Task 独占。`waitfor` 等待及待续跑期间，原 Task 继续独占该目录。等待绑定审阅的原作者同样保有写入独占。其他要用同一目录的 Task 保持排队，分配到独立工作区的 Review Agent 可以使用已归还的 slot。Git 审阅目录使用完整提交对应的 detached worktree，且核对实际 HEAD，文件候选从原 Runner 的不可变交付副本复制到审阅目录。若同机接替后本地原件不可用，沿原审阅 Task 报告准备失败，不借用作者 workspace。Task 结束后，Runner 根据实际退出或隔离证据释放占用。 [共享 worktree 的占用](design-questions.md#共享-worktree-的占用)
+Runner 以实际目录路径判定独占。`waitfor` 等待及待续跑期间，原 Task 继续独占该目录。绑定审阅按作者分配解析同一个目录，依次取 `workspace_key`、父 Issue，或 `tasks/<author_task_id>`。即使 slot 已满，合格的同 Runner 审阅也可先进入本地队列。确认作者停妥后，队列允许绑定 Reviewer 取得原目录，普通目录竞争者继续等待。PR/CI 等待的保留锁不能被 Reviewer 绕过。Reviewer 停妥前，作者不能重新取得目录。
+
+Reviewer 验证作者原目录和 Git 挂载，从对象库按完整 SHA 读取候选，不新建 worktree、刷新或切换 HEAD。文件候选直接读取原 Runner 的不可变交付副本。目录、精确提交或原件缺失或无法确认时，沿原审阅 Task 报告准备失败，不从其他目录或远端补建。Task 结束后，Runner 根据实际退出或隔离证据释放占用。 [共享 worktree 的占用](design-questions.md#共享-worktree-的占用)
 
 同机并行接替期间，两代 Runner 按同一份 workspace 占用事实准入。前驱仍在使用的目录继续由原 Task 独占。该 Task 交接后，后继以原占用接续，其他需要同一目录的 Task 继续排队。 [同机 Run 交接](#同机接替时的-run-交接)
 

@@ -13,6 +13,17 @@ pub enum HandoffPhase {
 pub struct HandoffContext {
     pub phase: HandoffPhase,
     pub operations: Vec<crate::WorkOperation>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_stamp: Option<WorkspaceStamp>,
+}
+
+/// Identity of the directory a Runner actually launched in. Used only for
+/// same-host verification after a stopped Run, never to choose another path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceStamp {
+    pub path: std::path::PathBuf,
+    pub device: u64,
+    pub inode: u64,
 }
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -25,10 +25,10 @@ impl Store {
     pub fn next_reclaim(&self) -> Result<Option<WorkspaceReclaim>> {
         let raw: Option<String> = self.0.query_row(
             "SELECT c.command FROM local_workspace_reclaims c WHERE c.receipt IS NULL AND NOT EXISTS (
-                SELECT 1 FROM received_assignments a
+                SELECT 1 FROM local_workspace_claims a
                  WHERE (a.execution_state IN ('queued','active','waiting','waiting_external') OR a.retains_workspace = 1)
-                   AND coalesce(json_extract(a.contract, '$.workspace_key'), json_extract(a.contract, '$.parent_issue_id')) IN (
-                     SELECT value FROM json_each(c.command, '$.keys')
+                   AND a.path IN (
+                     SELECT 'workspaces/' || value FROM json_each(c.command, '$.keys')
                    )
             ) ORDER BY c.rowid LIMIT 1", [], |row| row.get(0),
         ).optional()?;

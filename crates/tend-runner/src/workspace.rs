@@ -3,6 +3,7 @@ use anyhow::{Context, Result, bail, ensure};
 use serde::{Deserialize, Serialize};
 use std::{
     fs,
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
 };
@@ -15,10 +16,11 @@ struct Mount {
 }
 
 pub fn directory(root: &Path, run: &LocalRun) -> PathBuf {
-    match workspace_key(run) {
-        Some(issue) => root.join("workspaces").join(issue),
-        None => root.join("tasks").join(&run.assignment.task_id),
-    }
+    root.join(
+        run.review_workspace
+            .clone()
+            .unwrap_or_else(|| run.assignment.workspace_path()),
+    )
 }
 
 fn workspace_key(run: &LocalRun) -> Option<&str> {
@@ -29,6 +31,10 @@ fn workspace_key(run: &LocalRun) -> Option<&str> {
 }
 
 pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
+    ensure!(
+        run.assignment.review.is_none(),
+        "bound reviews cannot prepare a new worktree"
+    );
     let path = directory(root, run);
     fs::create_dir_all(&path)?;
     let path = path.canonicalize()?;
@@ -54,7 +60,6 @@ pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
                 .base_refs
                 .get(&repo.id)
                 .map(String::as_str),
-            run.assignment.review.is_some(),
         )?;
         if !mounts.iter().any(|mount| mount.repo_id == repo.id) {
             mounts.push(Mount {
@@ -82,8 +87,103 @@ pub fn prepare(root: &Path, run: &LocalRun) -> Result<PathBuf> {
     Ok(path)
 }
 
+pub fn stamp(path: &Path) -> Result<protocol::WorkspaceStamp> {
+    let metadata = fs::metadata(path)?;
+    ensure!(metadata.is_dir(), "workspace is not a directory");
+    Ok(protocol::WorkspaceStamp {
+        path: path.to_owned(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+    })
+}
+
+pub fn existing_author_directory(root: &Path, run: &LocalRun) -> Result<PathBuf> {
+    let relative = run
+        .review_workspace
+        .as_deref()
+        .context("cannot verify the original author workspace on this Runner")?;
+    let (namespace, key) = relative
+        .split_once('/')
+        .context("invalid author workspace binding")?;
+    ensure!(
+        matches!(namespace, "workspaces" | "tasks") && protocol::valid_id(key),
+        "invalid author workspace binding"
+    );
+    let expected = root.canonicalize()?.join(relative);
+    let path = expected
+        .canonicalize()
+        .context("original author workspace is missing")?;
+    ensure!(
+        path == expected && path.is_dir(),
+        "original author workspace path changed"
+    );
+    let proof = run
+        .author_workspace_stamp
+        .as_ref()
+        .context("original author workspace identity is not available")?;
+    ensure!(
+        &stamp(&path)? == proof,
+        "original author workspace identity changed"
+    );
+    Ok(path)
+}
+
+pub fn verify_review(root: &Path, run: &LocalRun, repos: &[Repo]) -> Result<PathBuf> {
+    let path = existing_author_directory(root, run)?;
+    let review = run
+        .assignment
+        .review
+        .as_ref()
+        .context("missing bound review request")?;
+    ensure!(
+        protocol::valid_shared_review_target(&review.candidate, &run.assignment.work),
+        "review candidate does not identify a local artifact or exact Git object"
+    );
+    if !run.assignment.work.base_refs.is_empty() {
+        let mounts: Vec<Mount> = serde_json::from_slice(
+            &fs::read(path.join("mounts.json"))
+                .context("read original author workspace mount manifest")?,
+        )?;
+        for (id, sha) in &run.assignment.work.base_refs {
+            let repo = repos
+                .iter()
+                .find(|repo| &repo.id == id)
+                .context("original Git registration is unavailable")?;
+            let relative = PathBuf::from("repos").join(component(id));
+            ensure!(
+                mounts
+                    .iter()
+                    .any(|mount| &mount.repo_id == id && mount.path == relative),
+                "original author worktree for {id} is not mounted"
+            );
+            let target = path.join(relative);
+            ensure!(
+                target.canonicalize()? == target && target.join(".git").is_file(),
+                "original author worktree path for {id} changed"
+            );
+            verify_registration(repo, &target)?;
+            ensure!(
+                Path::new(&git(&target, &["rev-parse", "--show-toplevel"])?) == target,
+                "original Git worktree root for {id} changed"
+            );
+            let object = format!("{sha}^{{commit}}");
+            let commit = git_command(
+                &target,
+                &["rev-parse", "--verify", "--end-of-options", &object],
+                true,
+            )
+            .with_context(|| format!("bound commit for {id} is not available locally"))?;
+            ensure!(
+                sha.eq_ignore_ascii_case(&commit),
+                "review reference for {id} did not resolve to the exact commit"
+            );
+        }
+    }
+    Ok(path)
+}
+
 pub fn branches(run: &LocalRun, cwd: &Path) -> Vec<protocol::WorkBranch> {
-    if run.assignment.parent_issue_id.is_none() {
+    if run.assignment.parent_issue_id.is_none() || run.assignment.review.is_some() {
         return Vec::new();
     }
     run.repos
@@ -126,42 +226,13 @@ fn prepare_repository(
     target: &Path,
     issue: &str,
     reference: Option<&str>,
-    exact: bool,
 ) -> Result<String> {
     if target.exists() {
-        let origin = git(
-            &repo.path,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        let existing = git(
-            target,
-            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-        )?;
-        ensure!(
-            existing == origin && target.join(".git").is_file(),
-            "workspace has a different Git registration"
-        );
-        let head = git(target, &["rev-parse", "HEAD"])?;
-        ensure!(
-            !exact || reference.is_some_and(|sha| sha.eq_ignore_ascii_case(&head)),
-            "review workspace HEAD no longer matches the bound candidate"
-        );
-        return Ok(head);
+        verify_registration(repo, target)?;
+        return git(target, &["rev-parse", "HEAD"]);
     }
     git(&repo.path, &["fetch", "origin"])?;
-    let base = if exact {
-        let sha = reference.context("review mount needs a bound commit")?;
-        let object = format!("{sha}^{{commit}}");
-        let base = git(
-            &repo.path,
-            &["rev-parse", "--verify", "--end-of-options", &object],
-        )?;
-        ensure!(
-            sha.eq_ignore_ascii_case(&base),
-            "review reference did not resolve to the exact commit"
-        );
-        base
-    } else if let Some(reference) = reference {
+    let base = if let Some(reference) = reference {
         let fetched = format!("refs/remotes/origin/{reference}^{{commit}}");
         let explicit = format!("{reference}^{{commit}}");
         git(
@@ -198,19 +269,6 @@ fn prepare_repository(
             .with_context(|| format!("resolve fetched default branch for {}", repo.id))?
     };
     let target_path = target.to_str().context("workspace path must be UTF-8")?;
-    if exact {
-        // A durable review must never follow an older mutable work branch.
-        git(
-            &repo.path,
-            &["worktree", "add", "--detach", target_path, &base],
-        )?;
-        let head = git(target, &["rev-parse", "HEAD"])?;
-        ensure!(
-            head == base,
-            "prepared review HEAD does not match the bound candidate"
-        );
-        return Ok(head);
-    }
     let name = format!("tend/{issue}/{}", component(&repo.id));
     if git(
         &repo.path,
@@ -233,6 +291,15 @@ fn prepare_repository(
     Ok(base)
 }
 
+fn verify_registration(repo: &Repo, target: &Path) -> Result<()> {
+    let args = ["rev-parse", "--path-format=absolute", "--git-common-dir"];
+    ensure!(
+        git(&repo.path, &args)? == git(target, &args)? && target.join(".git").is_file(),
+        "workspace has a different Git registration"
+    );
+    Ok(())
+}
+
 fn component(value: &str) -> String {
     let mut name = String::new();
     for byte in value.bytes() {
@@ -246,7 +313,16 @@ fn component(value: &str) -> String {
 }
 
 fn git(cwd: &Path, arguments: &[&str]) -> Result<String> {
-    let output = Command::new("git")
+    git_command(cwd, arguments, false)
+}
+
+fn git_command(cwd: &Path, arguments: &[&str], review: bool) -> Result<String> {
+    let mut git = Command::new("git");
+    if review {
+        git.env("GIT_NO_REPLACE_OBJECTS", "1")
+            .env("GIT_NO_LAZY_FETCH", "1");
+    }
+    let output = git
         .args(arguments)
         .current_dir(cwd)
         .output()

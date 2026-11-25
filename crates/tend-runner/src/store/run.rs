@@ -19,12 +19,14 @@ pub struct LocalRun {
     pub app_server: Option<AppServer>,
     pub resume_guard: Option<String>,
     pub resume_retry_at: i64,
+    pub review_workspace: Option<String>,
+    pub author_workspace_stamp: Option<protocol::WorkspaceStamp>,
 }
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 7,
+        version <= 8,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -45,6 +47,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 7 {
             migrate_native_context(db)?;
+        }
+        if version < 8 {
+            migrate_shared_reviews(db)?;
         }
         return Ok(());
     }
@@ -106,6 +111,55 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     super::reclaim::migrate(db)?;
     migrate_app_servers(db)?;
     migrate_native_context(db)?;
+    migrate_shared_reviews(db)?;
+    Ok(())
+}
+
+fn migrate_shared_reviews(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE local_runs ADD COLUMN workspace_stamp TEXT;
+         CREATE VIEW local_workspace_paths AS
+         SELECT a.id, a.task_id, a.execution_state, a.retains_workspace,
+                json_extract(a.contract, '$.review.author_task_id') AS author_task,
+                coalesce('workspaces/' || coalesce(json_extract(a.contract, '$.workspace_key'),
+                                                  json_extract(a.contract, '$.parent_issue_id')),
+                         'tasks/' || a.task_id) AS own_path,
+                json_extract(a.contract, '$.review.author_workspace') AS bound_path
+           FROM received_assignments a;
+         CREATE VIEW local_workspace_claims AS
+         SELECT a.*, CASE WHEN a.author_task IS NULL THEN a.own_path ELSE coalesce(a.bound_path, (
+                    SELECT author.own_path FROM local_workspace_paths author
+                    WHERE author.task_id = a.author_task AND author.execution_state NOT IN ('rejected','handed_off')
+                    ORDER BY author.id LIMIT 1
+                )) END AS path,
+                (a.execution_state IN ('waiting','queued') AND EXISTS(
+                    SELECT 1 FROM local_task_intents o
+                     WHERE o.assignment_id = a.id AND json_extract(o.operation, '$.action.kind') = 'request_review'
+                       AND NOT EXISTS(SELECT 1 FROM local_work_operations c WHERE c.assignment_id = a.id
+                         AND c.rowid > o.rowid AND json_extract(c.operation, '$.action.kind') = 'close_issue')
+                       AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = a.id
+                         AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'review_finished'
+                         AND json_extract(i.payload, '$.review.request_id') = o.id)
+                )) AS pending_review
+           FROM local_workspace_paths a;",
+    )?;
+    // v7 used the hard retention bit for both kinds of wait. Preserve all
+    // external waits, including the ones already queued or assigned in handoff.
+    let retained = {
+        let mut query = db.prepare("SELECT id FROM received_assignments WHERE retains_workspace = 1 AND execution_state != 'waiting_external'")?;
+        query
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in retained {
+        if !coordination::waiting_for_external(db, &id)? {
+            db.execute(
+                "UPDATE received_assignments SET retains_workspace = 0 WHERE id = ?1",
+                [&id],
+            )?;
+        }
+    }
+    db.pragma_update(None, "user_version", 8)?;
     Ok(())
 }
 
@@ -133,6 +187,23 @@ fn migrate_waits(db: &Connection) -> Result<()> {
     )?;
     db.pragma_update(None, "user_version", 2)?;
     Ok(())
+}
+
+fn ready_assignment(db: &Connection) -> Result<Option<String>> {
+    Ok(db.query_row(
+            "SELECT a.id FROM local_workspace_claims a JOIN received_assignments original ON original.id = a.id
+               WHERE a.execution_state = 'queued'
+                 AND NOT EXISTS (SELECT 1 FROM local_workspace_claims holder
+                    WHERE holder.id != a.id AND holder.path = a.path AND (
+                        holder.retains_workspace = 1 OR holder.execution_state = 'active'
+                        OR (holder.pending_review AND holder.task_id IS NOT a.author_task)
+                        OR (holder.execution_state = 'queued' AND holder.author_task = a.task_id
+                            AND a.pending_review AND a.retains_workspace = 0)
+                    ))
+               ORDER BY original.rowid LIMIT 1",
+            [],
+            |row| row.get::<_, String>(0),
+    ).optional()?)
 }
 
 impl Store {
@@ -167,23 +238,18 @@ impl Store {
     }
 
     pub fn next_queued_run(&mut self) -> Result<Option<LocalRun>> {
-        let queued = self.0.query_row(
-            "SELECT a.id FROM received_assignments a WHERE a.execution_state = 'queued'
-               AND NOT EXISTS (SELECT 1 FROM received_assignments holder
-                   WHERE holder.id != a.id AND (holder.retains_workspace = 1 OR holder.execution_state = 'active')
-                     AND coalesce(json_extract(holder.contract, '$.workspace_key'), json_extract(holder.contract, '$.parent_issue_id'))
-                         = coalesce(json_extract(a.contract, '$.workspace_key'), json_extract(a.contract, '$.parent_issue_id')))
-               ORDER BY a.rowid LIMIT 1",
-            [],
-            |row| row.get::<_, String>(0),
-        ).optional()?;
-        let Some(assignment_id) = queued else {
+        // Idle and blocked queues need no writer. Recheck under the same
+        // transaction that installs the exclusive Run.
+        if ready_assignment(&self.0)?.is_none() {
             return Ok(None);
-        };
-
+        }
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(assignment_id) = ready_assignment(&tx)? else {
+            return Ok(None);
+        };
+
         let acquired = tx.execute(
             "UPDATE received_assignments SET execution_state = 'active'
               WHERE id = ?1 AND execution_state = 'queued'
@@ -224,9 +290,52 @@ impl Store {
                     row.get::<_, Option<String>>(6)?, row.get(7)?, row.get(8)?))
             },
         )?;
+        let mut assignment: TaskAssignment = serde_json::from_str(&contract)?;
+        if assignment.review.is_some() {
+            let request = self.0.query_row(
+                "SELECT i.payload FROM local_issue_inputs i JOIN local_runs prior ON prior.id = i.run_id
+                   JOIN local_runs r ON r.id = ?1 AND r.assignment_id = prior.assignment_id
+                   WHERE prior.rowid <= r.rowid AND json_extract(i.payload, '$.kind') = 'review_requested'
+                   ORDER BY prior.rowid DESC LIMIT 1",
+                [id], |row| row.get::<_, String>(0),
+            ).optional()?;
+            if let Some(request) = request {
+                let input: IssueInput = serde_json::from_str(&request)?;
+                if let protocol::IssueInputCause::ReviewRequested { review, base_refs } =
+                    input.cause
+                {
+                    assignment.work.objective = format!(
+                        "Independently review {}. Scope: {}.",
+                        review.candidate, review.scope
+                    );
+                    assignment.work.repo_ids = base_refs.keys().cloned().collect();
+                    assignment.work.base_refs = base_refs;
+                    assignment.review = Some(review);
+                }
+            }
+        }
+        let author_workspace = if let Some(review) = &assignment.review {
+            self.0.query_row(
+                "SELECT p.own_path, coalesce((
+                       SELECT r.workspace_stamp FROM local_runs r WHERE r.assignment_id = a.id AND r.turn_id IS NOT NULL
+                       ORDER BY r.rowid DESC LIMIT 1
+                     ), json_extract(a.contract, '$.handoff.workspace_stamp'))
+                   FROM local_workspace_paths p JOIN received_assignments a ON a.id = p.id
+                   WHERE p.task_id = ?1 AND json_extract(a.contract, '$.issue_id') = ?2
+                     AND a.execution_state NOT IN ('rejected','handed_off','active')
+                     AND (EXISTS(SELECT 1 FROM local_runs r WHERE r.assignment_id = a.id AND r.turn_id IS NOT NULL)
+                          OR json_extract(a.contract, '$.handoff') IS NOT NULL)
+                   ORDER BY a.rowid DESC LIMIT 1",
+                params![review.author_task_id, review.author_issue_id], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+            ).optional()?.filter(|(path, _)| review.author_workspace.as_ref().is_none_or(|bound| bound == path))
+        } else {
+            None
+        };
+        let (review_workspace, stamp) =
+            author_workspace.map_or((None, None), |(path, stamp)| (Some(path), stamp));
         Ok(LocalRun {
             id: id.to_owned(),
-            assignment: serde_json::from_str(&contract)?,
+            assignment,
             repos: serde_json::from_str(&repositories)?,
             thread_id,
             turn_id,
@@ -235,6 +344,8 @@ impl Store {
             inputs: coordination::run_inputs(&self.0, id)?,
             resume_guard,
             resume_retry_at,
+            review_workspace,
+            author_workspace_stamp: stamp.as_deref().map(serde_json::from_str).transpose()?,
         })
     }
 
@@ -245,8 +356,13 @@ impl Store {
             .0
             .query_row(
                 "SELECT state, thread_id, turn_id, native_context FROM local_runs
-             WHERE assignment_id = ?1 AND id != ?2 ORDER BY rowid DESC LIMIT 1",
-                params![run.assignment.placement.assignment_id, run.id],
+             WHERE assignment_id = ?1 AND id != ?2 AND (NOT ?3 OR turn_id IS NOT NULL)
+             ORDER BY rowid DESC LIMIT 1",
+                params![
+                    run.assignment.placement.assignment_id,
+                    run.id,
+                    run.assignment.review.is_some()
+                ],
                 |row| {
                     Ok((
                         row.get::<_, String>(0)?,
@@ -277,6 +393,18 @@ impl Store {
         Ok(())
     }
 
+    pub fn retry_resume(&self, run_id: &str) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET resume_retry_at = unixepoch() + 2
+              WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL",
+                [run_id],
+            )? == 1,
+            "cannot retry the original prepared Run"
+        );
+        Ok(())
+    }
+
     pub fn attach_process(
         &self,
         run_id: &str,
@@ -284,13 +412,14 @@ impl Store {
         process: &ProcessIdentity,
         native_context: &str,
         app_server: Option<&AppServer>,
+        workspace_stamp: &protocol::WorkspaceStamp,
     ) -> Result<()> {
         ensure!(
             self.0.execute(
-                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4, native_context = ?5, app_server = ?6, resume_guard = NULL, resume_retry_at = 0
+                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4, native_context = ?5, app_server = ?6, workspace_stamp = ?7, resume_guard = NULL, resume_retry_at = 0
              WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL",
                 params![run_id, thread_id, process.pid, process.started_at, native_context,
-                    app_server.map(serde_json::to_string).transpose()?],
+                    app_server.map(serde_json::to_string).transpose()?, serde_json::to_string(workspace_stamp)?],
             )? == 1,
             "original Run is already attached"
         );
@@ -385,7 +514,7 @@ impl Store {
         };
         tx.execute(
             "UPDATE received_assignments SET execution_state = ?2, retains_workspace = ?3 WHERE id = ?1",
-            params![assignment_id, next_state, waiting_for_external || waiting_for_review],
+            params![assignment_id, next_state, waiting_for_external],
         )?;
         save_event(
             &tx,

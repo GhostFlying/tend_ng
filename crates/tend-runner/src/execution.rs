@@ -103,7 +103,12 @@ fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         );
     }
     if run.process.is_some() {
-        let result = recover(runtime, run, &cwd);
+        let result = if run.assignment.review.is_some() {
+            workspace::existing_author_directory(&runtime.root, run)
+                .and_then(|path| recover(runtime, run, &path))
+        } else {
+            recover(runtime, run, &cwd)
+        };
         settle(&mut store, run, &cwd, result, true)?;
     } else {
         launch(&mut store, runtime, run, config)?;
@@ -208,39 +213,39 @@ fn native_context(
 
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
+    let is_review = run.assignment.review.is_some();
     let started = config
         .native_agent(&run.assignment)
         .and_then(|agent| {
             let app_server = agent.app_server.as_ref().map(|id| &config.app_servers[id]);
-            let directory =
-                workspace::prepare(&runtime.root, run).context("prepare Tend workspace")?;
+            let directory = if is_review {
+                workspace::verify_review(&runtime.root, run, &config.repos)
+            } else {
+                workspace::prepare(&runtime.root, run)
+            }
+            .context("prepare Tend workspace")?;
             Ok((agent, app_server, directory))
         })
         .and_then(|(agent, app_server, directory)| {
-            if let Some(file) = run
+            let artifact = if let Some(file) = run
                 .assignment
                 .review
                 .as_ref()
                 .and_then(|review| review.candidate.strip_prefix("artifact:"))
             {
                 anyhow::ensure!(protocol::valid_id(file), "invalid review artifact");
-                let review_dir = directory.join("review-input");
-                std::fs::create_dir_all(&review_dir)?;
-                let destination = review_dir.join(file);
-                // Never use the author's workspace to stage the candidate.
-                let staged = review_dir.join(format!("{file}.staging"));
-                std::fs::copy(runtime.artifacts.join(file), &staged)
-                    .context("immutable review artifact is missing from this Runner")?;
-                std::fs::rename(staged, destination)?;
-            }
-            Ok((
-                client(runtime, &directory, app_server)?,
-                directory,
-                agent,
-                app_server,
-            ))
+                let path = runtime.artifacts.canonicalize()?.join(file);
+                anyhow::ensure!(
+                    path.canonicalize().ok().as_ref() == Some(&path) && path.is_file(),
+                    "immutable review artifact is missing from this Runner"
+                );
+                Some(path)
+            } else {
+                None
+            };
+            Ok((directory, agent, app_server, artifact))
         });
-    let (mut app, cwd, agent, app_server) = match started {
+    let (cwd, agent, app_server, artifact) = match started {
         Ok(started) => started,
         Err(error) => {
             if let Some(thread) = &run.resume_guard {
@@ -262,15 +267,26 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         && previous.as_ref() != Some(guarded)
     {
         // Configuration drift cannot clear an unresolved active-thread fence.
-        app.stop()?;
         return store.defer_active_resume(&run.id, guarded);
     }
+    let mut app = match client(runtime, &cwd, app_server) {
+        Ok(app) => app,
+        Err(error) if is_review && previous.is_some() => {
+            eprintln!(
+                "Retry native App Server for Review Task {}: {error:#}",
+                run.assignment.task_id
+            );
+            return store.retry_resume(&run.id);
+        }
+        Err(error) => return settle(store, run, &cwd, Err(error), false),
+    };
     let reused = if let Some(thread) = &previous {
         match app.resume_work_thread(
             thread,
             &cwd,
             agent.model.as_deref(),
             run.resume_guard.is_some(),
+            is_review,
         ) {
             Ok(WorkThreadResume::Ready) => true,
             Ok(WorkThreadResume::Active) => {
@@ -291,6 +307,14 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 return store.defer_active_resume(&run.id, thread);
             }
             Ok(WorkThreadResume::Unavailable) => false,
+            Err(error) if is_review => {
+                app.stop()?;
+                eprintln!(
+                    "Retry native thread for Review Task {}: {error:#}",
+                    run.assignment.task_id
+                );
+                return store.retry_resume(&run.id);
+            }
             Err(error) => {
                 // Resume has not submitted any turn. Fence this App Server
                 // before trying a fresh session, unlike an unknown turn/start.
@@ -325,9 +349,10 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
             &app.process_identity()?,
             &native_context,
             app_server,
+            &workspace::stamp(&cwd)?,
         )?;
         let input = serde_json::to_string(&run.assignment)?;
-        let context = store.coordination_context(run, reused)?;
+        let context = store.coordination_context(run, reused, artifact.as_deref())?;
         app.run_turn(
             TurnInput {
                 thread_id: &thread_id,

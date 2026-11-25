@@ -152,7 +152,7 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     store.prepare_web_sessions(&[0; 32], 0)?;
     let sql = Connection::open(path)?;
     let version = sql.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
-    assert_eq!(version, 30);
+    assert_eq!(version, 31);
     assert_eq!(before, reply_schema(&sql)?);
     Ok(())
 }
