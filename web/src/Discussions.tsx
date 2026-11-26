@@ -24,6 +24,7 @@ import type {
 } from "./discussionApi";
 import { HandoffDialog } from "./DiscussionHandoff";
 import { discussionError, useReferenceSearch } from "./discussionSearch";
+import { navigate } from "./navigation";
 import "./discussions.css";
 
 const DISCUSSION_LIST_CHANGED = "tend-discussion-list-changed";
@@ -116,9 +117,13 @@ export function DiscussionPage({
   onReachable: (online: boolean) => void;
 }) {
   return chat ? (
-    <DiscussionView chat={chat} onReachable={onReachable} />
+    <DiscussionView key={chat} chat={chat} onReachable={onReachable} />
   ) : (
-    <DiscussionIndex archived={archived} onReachable={onReachable} />
+    <DiscussionIndex
+      key={String(archived)}
+      archived={archived}
+      onReachable={onReachable}
+    />
   );
 }
 
@@ -306,20 +311,24 @@ function DiscussionView({
   }
 
   async function changeArchive(archived: boolean) {
+    const from = window.location.href;
     setSavingArchive(true);
     setError("");
     try {
       await setDiscussionArchived(chat, archived);
       poll.current?.abort();
+      previousArchived.current = archived;
       setMeta((prev) => prev && { ...prev, archived });
       setRefresh((value) => value + 1);
+      window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
     } catch (error) {
       setError(discussionError(error));
       return;
     } finally {
       setSavingArchive(false);
     }
-    if (archived) window.location.assign(discussionIndexLink());
+    if (archived && window.location.href === from)
+      navigate(discussionIndexLink());
   }
 
   if (!meta)

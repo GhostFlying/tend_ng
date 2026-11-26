@@ -16,10 +16,7 @@ const {
 } = process.env;
 const open = "先聊聊演示项目的快速上手说明。";
 const errors = [];
-const browser = await chromium.launch({
-  channel: "chromium",
-  ignoreDefaultArgs: ["--disable-back-forward-cache"],
-});
+const browser = await chromium.launch({ channel: "chromium" });
 
 function cli(...args) {
   return JSON.parse(
@@ -64,6 +61,58 @@ async function createOne(page, activate) {
   return chat;
 }
 
+async function sendAcrossNavigation(
+  page,
+  chat,
+  composer,
+  text,
+  leaveAndReturn,
+) {
+  const path = `${base}/api/v1/chats/${chat}/messages`;
+  const accepted = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const posts = [];
+  const handler = async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    posts.push(route.request().postDataJSON());
+    const response = await route.fetch();
+    accepted.resolve(response.ok());
+    await release.promise;
+    await route.fulfill({ response });
+  };
+  await page.route(path, handler);
+  try {
+    await composer.fill(text);
+    await composer.press("Enter");
+    assert.equal(await accepted.promise, true);
+    await leaveAndReturn();
+    // The server has accepted the POST but the original composer did not
+    // receive the receipt yet. Enter on the remounted composer must not resend.
+    await visible(composer.and(page.locator(":read-only")));
+    assert.equal(await composer.inputValue(), text);
+    await composer.press("Enter");
+    release.resolve();
+    await page.waitForFunction(
+      (label) =>
+        document.querySelector(`textarea[aria-label="${label}"]`)?.value === "",
+      await composer.getAttribute("aria-label"),
+    );
+    assert.equal(posts.length, 1);
+    assert.equal(posts[0].text, text);
+    const messages = JSON.parse(
+      execFileSync(cliPath, ["chat", "read", chat], { encoding: "utf8" }),
+    ).messages;
+    assert.equal(
+      messages.filter((row) => row.author === "user" && row.text === text)
+        .length,
+      1,
+    );
+  } finally {
+    release.resolve();
+    await page.unroute(path, handler);
+  }
+}
+
 try {
   for (const [name, viewport] of Object.entries({
     desktop: { width: 1440, height: 960 },
@@ -73,17 +122,21 @@ try {
       name === "desktop"
         ? "只整理一页上手说明，先交草案，不部署。"
         : "先交一页上手说明草案，只覆盖安装与首次运行。";
-    const page = await browser.newPage({
+    const context = await browser.newContext({
       viewport,
       isMobile: name === "mobile",
       hasTouch: name === "mobile",
       locale: "zh-CN",
       colorScheme: "light",
     });
+    const page = await context.newPage();
     await page.addInitScript(() => {
-      globalThis.addEventListener("pageshow", (event) => {
-        document.documentElement.dataset.bfcache = String(event.persisted);
-      });
+      globalThis.tendTestDocument = globalThis.crypto.randomUUID();
+    });
+    const documentRequests = [];
+    page.on("request", (request) => {
+      if (request.resourceType() === "document")
+        documentRequests.push(request.url());
     });
     page.on("pageerror", (error) => errors.push(error.message));
     page.on("console", (message) => {
@@ -100,12 +153,24 @@ try {
       }
     });
     await page.goto(base);
+    const originalDocument = await page.evaluate(
+      () => globalThis.tendTestDocument,
+    );
+    async function assertSameDocument() {
+      assert.equal(
+        await page.evaluate(() => globalThis.tendTestDocument),
+        originalDocument,
+      );
+      assert.deepEqual(documentRequests, [`${base}/`]);
+    }
     await page.getByLabel("访问令牌").fill(token);
     await page.getByRole("button", { name: "连接", exact: true }).click();
     const menu = page.getByRole("navigation", {
       name: name === "mobile" ? "手机导航" : "主导航",
     });
     const directory = menu.getByRole("link", { name: "讨论", exact: true });
+    const chatNav = menu.getByRole("link", { name: "对话", exact: true });
+    const activate = (link) => (name === "mobile" ? link.tap() : link.click());
     const navCreate = menu.getByRole("button", {
       name: "新建讨论",
       exact: true,
@@ -122,6 +187,7 @@ try {
     await page.waitForURL(`${base}/discussions`);
     assert.deepEqual(cliList(), beforeNavigation);
     assert.match(await page.title(), /Tend/i);
+    await assertSameDocument();
     const main = page.getByRole("main");
     const currentList = main.getByRole("list", {
       name: "讨论列表",
@@ -278,15 +344,69 @@ try {
     await page.getByRole("button", { name: "保存", exact: true }).click();
     await visible(page.getByRole("heading", { name: title }));
     const composer = page.getByRole("textbox", { name: "在讨论中发消息" });
-    await composer.fill(open);
-    await page.getByRole("button", { name: "发送", exact: true }).click();
+    const mainComposer = page.getByRole("textbox", { name: "发消息给 Tend" });
+    const recent = currentList.locator(`a[href="/discussions?chat=${chat}"]`);
+    await sendAcrossNavigation(page, chat, composer, open, async () => {
+      await activate(chatNav);
+      await page.waitForURL(`${base}/`);
+      await visible(mainComposer);
+      assert.equal(await chatNav.getAttribute("aria-current"), "page");
+      await activate(directory);
+      await page.waitForURL(`${base}/discussions`);
+      await activate(recent);
+      await page.waitForURL(discussion);
+      await visible(page.getByRole("heading", { name: title }));
+    });
     await visible(
       main.getByText("可以。先区分要讨论的想法与之后可能交给 Router 的工作。"),
     );
-    await page.reload();
-    assert.equal(page.url(), discussion);
+    await page.goBack({ waitUntil: "commit" });
+    await page.waitForURL(`${base}/discussions`);
+    await visible(recent);
+    await page.goForward({ waitUntil: "commit" });
+    await page.waitForURL(discussion);
     await visible(page.getByRole("heading", { name: title }));
     await visible(main.getByText(open, { exact: true }));
+    assert.equal(await main.getByText(open, { exact: true }).count(), 1);
+    await assertSameDocument();
+    if (name === "desktop") {
+      const messageInChat =
+        "Storage measurement · 切换页面后仍能看到已发送消息";
+      await activate(chatNav);
+      await sendAcrossNavigation(
+        page,
+        "main",
+        mainComposer,
+        messageInChat,
+        async () => {
+          await activate(directory);
+          await visible(recent);
+          await activate(recent);
+          await visible(composer);
+          await activate(chatNav);
+          await visible(mainComposer);
+        },
+      );
+      await visible(main.getByText(messageInChat, { exact: true }));
+      await shoot(page, "discussion-desktop-navigation-chat");
+      await activate(directory);
+      const popup = context.waitForEvent("page");
+      await recent.click({
+        modifiers: [process.platform === "darwin" ? "Meta" : "Control"],
+      });
+      const newTab = await popup;
+      await newTab.waitForURL(discussion);
+      await visible(newTab.getByText(open, { exact: true }));
+      assert.equal(page.url(), `${base}/discussions`);
+      await newTab.close();
+      await activate(recent);
+    } else {
+      const direct = await context.newPage();
+      await direct.goto(discussion);
+      await visible(direct.getByText(open, { exact: true }));
+      await direct.close();
+      await shoot(page, "discussion-mobile-navigation-chat");
+    }
 
     await composer.fill("@exam");
     await page.getByRole("button", { name: "example 仓库" }).click();
@@ -403,17 +523,13 @@ try {
     assert.equal(cliList().length + cliList(true).length, count);
 
     const restore = page.getByRole("button", { name: "恢复讨论", exact: true });
-    // Exercise a real cached document, not a cold navigation to the old URL.
+    // Same-document Back must load the archived state of the original chat.
     await page.goBack({ waitUntil: "commit" });
-    assert.equal(page.url(), discussion);
-    await page.waitForFunction(
-      () => document.documentElement.dataset.bfcache === "true",
-      null,
-      { timeout: 5000 },
-    );
+    await page.waitForURL(discussion);
+    await assertSameDocument();
     await visible(restore.and(page.locator(":enabled")));
     await page.goForward({ waitUntil: "commit" });
-    assert.equal(page.url(), `${base}/discussions`);
+    await page.waitForURL(`${base}/discussions`);
 
     await main.getByRole("link", { name: "已归档", exact: true }).click();
     await page.waitForURL(`${base}/discussions?archived=true`);
@@ -472,22 +588,23 @@ try {
     assert.equal(page.url(), discussion);
     await visible(main.getByText(open, { exact: true }));
 
+    const issueLink = references.getByRole("link", {
+      name: new RegExp(`#${referenceIssue}`),
+    });
+    await activate(issueLink);
+    await page.waitForURL(`${base}/issues/${referenceIssue}`);
+    const issueEntries = page.getByRole("navigation", { name: "Issue 入口" });
+    await visible(issueEntries.getByRole("link", { name: "查看原消息" }));
+    assert.equal(
+      await page.getByRole("button", { name: "带入讨论", exact: true }).count(),
+      0,
+    );
+    await shoot(page, `discussion-${name}-issue-title`);
+    await page.goBack({ waitUntil: "commit" });
+    await page.waitForURL(discussion);
+    await visible(issueLink);
     if (name === "desktop") {
-      await page.goto(`${base}/issues/${targetIssue}`);
-      await page.getByRole("button", { name: "带入讨论" }).click();
-      await page.waitForURL(/\/discussions\?chat=/);
-      await visible(
-        page
-          .getByRole("region", { name: "当前讨论" })
-          .getByRole("link", { name: new RegExp(`#${targetIssue}`) })
-          .first(),
-      );
-      cli(
-        "rename",
-        new URL(page.url()).searchParams.get("chat"),
-        "从 Issue 带入的讨论",
-      );
-      await page.goto(base);
+      await activate(chatNav);
       await page.getByRole("button", { name: "带入讨论" }).first().click();
       await page.waitForURL(/\/discussions\?chat=/);
       await visible(page.getByRole("link", { name: "主 Chat 消息" }));
@@ -497,11 +614,12 @@ try {
         "从主 Chat 带入的讨论",
       );
     }
-    await page.close();
+    await assertSameDocument();
+    await context.close();
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS discussion desktop and mobile Chromium, separate navigation and creation with mouse, keyboard and touch, hover and focus, unique selection, BFCache Back, live Web/CLI archive and restore, references, draft, explicit send and bidirectional links",
+    "PASS desktop and mobile Chromium: separate plus, zero document loads on client navigation, Back/Forward, native new tab and deep link, one POST per in-flight send, archive/restore, no Issue header entry, manual Issue references, handoff and backlinks",
   );
 } finally {
   await browser.close();

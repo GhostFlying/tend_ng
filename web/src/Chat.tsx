@@ -3,6 +3,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -113,13 +114,56 @@ function pendingKey(chat: string, issue?: string) {
     : `tend.pending-message.v1:${chat}`;
 }
 
+type SendOutcome = "received" | "retry" | "retry-unsaved";
+type ActiveSend = { message: PendingMessage; receipt: Promise<SendOutcome> };
+
+// A client navigation can replace the composer without ending its POST.
+const activeSends = new Map<string, ActiveSend>();
+
 function savedMessage(chat: string, issue?: string): PendingMessage | null {
+  const key = pendingKey(chat, issue);
+  const active = activeSends.get(key);
+  if (active) return active.message;
   try {
-    const value = sessionStorage.getItem(pendingKey(chat, issue));
+    const value = sessionStorage.getItem(key);
     return value ? (JSON.parse(value) as PendingMessage) : null;
   } catch {
     return null;
   }
+}
+
+function startMessageSend(
+  key: string,
+  message: PendingMessage,
+  issue: string | undefined,
+  chat: string,
+): ActiveSend {
+  let saved = true;
+  try {
+    sessionStorage.setItem(key, JSON.stringify(message));
+  } catch {
+    saved = false;
+  }
+  const receipt = sendMessage(message, issue, chat)
+    .then<SendOutcome, SendOutcome>(
+      () => {
+        if (saved) {
+          try {
+            sessionStorage.removeItem(key);
+          } catch {
+            // The Server already accepted the message.
+          }
+        }
+        return "received";
+      },
+      () => (saved ? "retry" : "retry-unsaved"),
+    )
+    .finally(() => {
+      activeSends.delete(key);
+    });
+  const delivery = { message, receipt };
+  activeSends.set(key, delivery);
+  return delivery;
 }
 
 function errorText(error: unknown) {
@@ -403,56 +447,56 @@ function Composer({
   onSent: (reply: string | null) => void;
   standalone?: Standalone;
 }) {
+  const key = pendingKey(chatId, issue);
   const [pending] = useState(() => savedMessage(chatId, issue));
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
-  const [sending, setSending] = useState(false);
+  const [delivery, setDelivery] = useState(() => activeSends.get(key));
+  const sending = delivery !== undefined;
   const [error, setError] = useState("");
 
   const mention = standalone && /(?:^|\s)@([^\s@]*)$/.exec(text);
 
-  async function submit(event: FormEvent<HTMLFormElement>) {
+  const finishSend = useEffectEvent(
+    (outcome: SendOutcome, sent: PendingMessage) => {
+      if (outcome === "received") {
+        attempt.current = null;
+        setText("");
+        onSent(sent.reply_to ?? null);
+      } else {
+        setError(
+          outcome === "retry"
+            ? "暂时无法确认收件，再次发送会沿原消息重试。"
+            : "暂时无法确认收件，浏览器未保存草稿。请留在本页并重试。",
+        );
+      }
+      setDelivery(undefined);
+    },
+  );
+
+  useEffect(() => {
+    if (!delivery) return;
+    let mounted = true;
+    void delivery.receipt.then((outcome) => {
+      if (mounted) finishSend(outcome, delivery.message);
+    });
+    return () => {
+      mounted = false;
+    };
+  }, [delivery]);
+
+  function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = text.trim();
-    if (!value || sending) return;
+    if (!value || sending || activeSends.has(key)) return;
     const quote = replyId ?? undefined;
     const message =
       attempt.current?.text === value && attempt.current.reply_to === quote
         ? attempt.current
         : { operation_id: operationId(), text: value, reply_to: quote };
     attempt.current = message;
-    let saved = true;
-    try {
-      sessionStorage.setItem(
-        pendingKey(chatId, issue),
-        JSON.stringify(message),
-      );
-    } catch {
-      saved = false;
-    }
-    setSending(true);
     setError("");
-    try {
-      await sendMessage(message, issue, chatId);
-      if (saved) {
-        try {
-          sessionStorage.removeItem(pendingKey(chatId, issue));
-        } catch {
-          // The Server already accepted the message.
-        }
-      }
-      attempt.current = null;
-      setText("");
-      onSent(replyId);
-    } catch {
-      setError(
-        saved
-          ? "暂时无法确认收件，再次发送会沿原消息重试。"
-          : "暂时无法确认收件，浏览器未保存草稿。请留在本页并重试。",
-      );
-    } finally {
-      setSending(false);
-    }
+    setDelivery(startMessageSend(key, message, issue, chatId));
   }
 
   return (

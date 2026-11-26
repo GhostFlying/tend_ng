@@ -1,5 +1,5 @@
 import { lazy, Suspense, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, MouseEvent } from "react";
 import { createRoot } from "react-dom/client";
 import { allowsWebLogin } from "./webSession";
 import { useWebSession } from "./useWebSession";
@@ -7,6 +7,7 @@ import { IssueBoard } from "./IssueBoard";
 import { Chat } from "./Chat";
 import { DiscussionStart } from "./DiscussionStart";
 import { Notifications } from "./Notifications";
+import { issuePath, navigate, pageLink, usePageURL } from "./navigation";
 import { Agents, Hosts } from "./Resources";
 import {
   MoreResources,
@@ -32,26 +33,24 @@ const DiscussionPage = lazy(() =>
   })),
 );
 
-const path = window.location.pathname;
-const board = path === "/issues";
-const discussions = path === "/discussions";
-const resourceTitle =
-  path === "/agents"
-    ? "Agents"
-    : path === "/hosts"
-      ? "执行主机"
-      : path === "/more"
-        ? "更多"
-        : "";
-const query = new URLSearchParams(window.location.search);
-const chatQuery = query.get("chat") ?? "";
-const archivedDiscussions = query.get("archived") === "true";
-const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
-const discussionChat = chatQuery && chatId !== "main" ? chatId : null;
-const issueRoute =
-  /^\/issues\/(%23[1-9][0-9]*|[a-zA-Z0-9_-]+)(?:\/overview)?$/.exec(path);
-const issue = issueRoute ? decodeURIComponent(issueRoute[1]) : undefined;
-const issueNumber = issue?.match(/^#?([1-9][0-9]*)$/)?.[1];
+function followPageLink(event: MouseEvent<HTMLDivElement>) {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey ||
+    !(event.target instanceof Element)
+  )
+    return;
+  const anchor = event.target.closest("a");
+  if (!(anchor instanceof HTMLAnchorElement)) return;
+  const href = pageLink(anchor);
+  if (!href) return;
+  event.preventDefault();
+  navigate(href);
+}
 
 function Connect({
   notice,
@@ -132,6 +131,25 @@ function App() {
   const { state, notice, ending, connect, disconnect } = useWebSession();
   const [reachable, setReachable] = useState<boolean | null>(null);
   const connected = state === "connected";
+  const { pathname: path, search, searchParams: query } = usePageURL();
+  const page = path + search;
+  const board = path === "/issues";
+  const discussions = path === "/discussions";
+  const resourceTitle =
+    path === "/agents"
+      ? "Agents"
+      : path === "/hosts"
+        ? "执行主机"
+        : path === "/more"
+          ? "更多"
+          : "";
+  const chatQuery = query.get("chat") ?? "";
+  const archivedDiscussions = query.get("archived") === "true";
+  const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
+  const discussionChat = chatId !== "main" ? chatId : null;
+  const issueRoute = issuePath.exec(path);
+  const issue = issueRoute ? decodeURIComponent(issueRoute[1]) : undefined;
+  const issueNumber = issue?.match(/^#?([1-9][0-9]*)$/)?.[1];
 
   async function handleConnect(token: string, remember: boolean) {
     await connect(token, remember);
@@ -139,7 +157,10 @@ function App() {
   }
 
   return (
-    <div className={connected ? "app connected" : "app"}>
+    <div
+      className={connected ? "app connected" : "app"}
+      onClick={followPageLink}
+    >
       {connected && (
         <aside className="sidebar">
           <div className="brand">
@@ -187,7 +208,7 @@ function App() {
             </div>
             {discussions && (
               <Suspense fallback={null}>
-                <DiscussionSidebar chat={discussionChat} />
+                <DiscussionSidebar key={discussionChat} chat={discussionChat} />
               </Suspense>
             )}
             <a
@@ -243,7 +264,7 @@ function App() {
           )}
           {connected && !resourceTitle && (
             <div className="header-actions">
-              <Notifications />
+              <Notifications key={page} />
               <button
                 type="button"
                 className="text-button"
@@ -272,6 +293,7 @@ function App() {
               }
             >
               <IssueDetail
+                key={`${issue}:${chatId}`}
                 issue={issue}
                 chatId={chatId}
                 onReachable={setReachable}
@@ -301,7 +323,7 @@ function App() {
               ending={ending}
             />
           ) : (
-            <Chat chatId={chatId} onReachable={setReachable} />
+            <Chat key={chatId} chatId={chatId} onReachable={setReachable} />
           )
         ) : state === "checking" ? (
           <main className="lane connect" role="status">
@@ -312,6 +334,7 @@ function App() {
         )}
         {connected && (
           <PhoneNavigation
+            key={page}
             resource={!!resourceTitle}
             board={board || !!issue}
             discussions={discussions}
