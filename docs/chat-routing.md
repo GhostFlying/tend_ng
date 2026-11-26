@@ -128,6 +128,6 @@ Issue 详情也可逐项回答已在原 Chat 发布、仍待用户回答且原 T
 
 Web 的「讨论」入口打开 `/discussions`，单个讨论使用 `/discussions?chat=<id>`。可从空白创建，或从主 Chat 选一条原消息、从 Issue 选一个明确来源来创建。标题及来源属于讨论，历史、原生 thread 和输入回执独立绑定该 Chat ID。现有普通 Chat 和 Issue Chat 的历史、收件及派发范围不变。
 
-普通讨论发言复用 `/api/v1/chats/<id>/messages`，日常收件、原生回合尝试和恢复沿现有 Chat 模式。讨论不进入普通 Router 工具集，不订阅工作事实，也不派发。已断开的 discussion App Server 有原尝试时先查原生历史。目录权限范围变化时，新 thread 从持久历史接续，保留原 Chat ID。只读配置缺失或未被 App Server 确认时显示失败，不回退到 Router。
+普通讨论发言复用 `/api/v1/chats/<id>/messages`，日常收件、原生回合尝试和恢复沿现有 Chat 模式。讨论不进入普通 Router 工具集，不订阅工作事实，也不派发。已断开的 discussion App Server 有原尝试时先查原生历史。添加、撤销或替换引用不改变同一 Chat 的原生 thread ID，重试也优先续用原 thread。若旧版已清除绑定但仍有原生尝试记录，按最近的尝试查找可续用的 ID，并恢复绑定。每轮在只读 profile 中重新绑定当前所选的本机目录，上一轮撤掉的目录不再可读，但已进入对话的内容不会被删除。只有原生 resume 明确报告已有历史缺失或不可用，才创建新 thread 并从原 Chat 的持久历史接续。只读配置缺失或未被 App Server 确认时不提交回合，也不回退到 Router。 [引用变化与线程接续](plans/discussion-thread-continuity.md)
 
 `/api/v1/discussions` 提供列表、幂等创建、标题、引用、候选查找、Task 工作目录选择和转交。用户以「交给 Router」显式请求模型形成可编辑的草稿，草稿回合独立保存在原讨论，不插入用户可见消息或主 Chat。用户检查目标、已明确决策、约束和授权终点，另选要发送的参考资料与确实要推进的 Issue。执行目标只接受主 Chat 范围内的 Issue，参考 Issue 可以从其他 Chat 附加。发送使用稳定操作 ID，每份草稿最多送达一次；同一请求重试返回原收件，不同请求复用原 ID 时返回冲突。主 Chat 收到正常用户消息，现有 Router 保留是否开工、推进或澄清的判断。主 Chat 消息和原讨论持久双向链接，普通答复和派发回执沿主 Chat 原逻辑返回。 [实施及验收计划](plans/discussion-router-handoff.md)

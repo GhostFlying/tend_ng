@@ -18,12 +18,18 @@ assert config["default_permissions"] == json.dumps(profile)
 assert config["permissions.tend-discussion.network.enabled"] == "false"
 assert config["shell_environment_policy"] == '{inherit="none"}'
 assert config["mcp_servers"] == "{}"
+cwd, program = Path.cwd(), Path(sys.argv[0]).resolve()
+filesystem = (":minimal", ":workspace_roots", str(cwd), str(program))
+assert config["permissions.tend-discussion.filesystem"] == (
+    "{" + ",".join(f'{json.dumps(path)}="read"' for path in filesystem) + "}"
+)
 assert config["features.plugins"] == config["features.apps"] == "false"
 ledger = sqlite3.connect(home / "fixture.sqlite")
 ledger.executescript("""
-CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, params TEXT, scope TEXT);
-CREATE TABLE IF NOT EXISTS resumes (id TEXT);
-CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, thread_id TEXT, text TEXT, context TEXT, history TEXT);
+CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, params TEXT);
+CREATE TABLE IF NOT EXISTS resumes (id TEXT, roots TEXT, found INTEGER);
+CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, thread_id TEXT, text TEXT, context TEXT, history TEXT, roots TEXT);
+CREATE TABLE IF NOT EXISTS dropped_turns (text TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tool_results (turn_id TEXT, arguments TEXT, tool TEXT, result TEXT);
 """)
 tools = {"tend_read_discussion_reference", "tend_read_discussion_delivery", "tend_read_discussion_history"}
@@ -41,14 +47,29 @@ def event(method, **params):
     output({"method": method, "params": params})
 
 
-def scope():
-    return config["permissions.tend-discussion.filesystem"]
+def scope(params):
+    assert params["permissions"] == profile and params["approvalPolicy"] == "never"
+    assert "sandbox" not in params and "sandboxPolicy" not in params
+    assert params["cwd"] == str(cwd)
+    roots = params["runtimeWorkspaceRoots"]
+    assert roots == sorted({str(Path(path).resolve(strict=True)) for path in roots}), roots
+    return roots
 
 
-def thread_result(thread):
+def mock_read(path, roots):
+    path = Path(path).resolve(strict=True)
+    if not any(path.is_relative_to(root) for root in roots):
+        return None
+    return path.read_text().strip()
+
+
+loaded = {}
+
+
+def thread_result(thread, roots):
     return {"thread": {"id": thread}, "approvalPolicy": "never",
             "sandbox": {"type": "readOnly", "networkAccess": False},
-            "activePermissionProfile": {"id": profile}}
+            "activePermissionProfile": {"id": profile}, "runtimeWorkspaceRoots": roots}
 
 
 def read(request, thread, turn, call_id, tool, arguments):
@@ -75,38 +96,59 @@ for line in sys.stdin:
         case "config/read":
             respond(request, {"config": {"mcp_servers": {}}})
         case "thread/start":
-            assert params["permissions"] == profile and params["approvalPolicy"] == "never"
-            assert "sandbox" not in params
+            roots = scope(params)
             assert set(tool["name"] for tool in params["dynamicTools"]) == tools
             assert "You cannot dispatch work" in params["developerInstructions"]
             thread = str(uuid.uuid4())
             with ledger:
-                ledger.execute("INSERT INTO threads VALUES (?,?,?)", (thread, json.dumps(params), scope()))
-            respond(request, thread_result(thread))
+                ledger.execute("INSERT INTO threads VALUES (?,?)", (thread, json.dumps(params)))
+            loaded[thread] = roots
+            respond(request, thread_result(thread, roots))
         case "thread/resume":
             thread = params["threadId"]
-            assert params["permissions"] == profile
-            assert ledger.execute("SELECT scope FROM threads WHERE id=?", (thread,)).fetchone() == (scope(),)
+            roots = scope(params)
+            if not ledger.execute("SELECT 1 FROM threads WHERE id=?", (thread,)).fetchone():
+                with ledger:
+                    ledger.execute("INSERT INTO resumes VALUES (?,?,0)", (thread, json.dumps(roots)))
+                output({"id": request["id"], "error": {
+                    "code": -32600, "message": f"no rollout found for thread id {thread}",
+                }})
+                continue
+            # Fault injection affects only confirmation, not the persisted thread.
+            if (home / "mismatch-roots").exists():
+                respond(request, thread_result(thread, [str(cwd)]))
+                continue
+            loaded[thread] = roots
             with ledger:
-                ledger.execute("INSERT INTO resumes VALUES (?)", (thread,))
-            respond(request, thread_result(thread))
+                ledger.execute("INSERT INTO resumes VALUES (?,?,1)", (thread, json.dumps(roots)))
+            respond(request, thread_result(thread, roots))
         case "thread/turns/list":
             turns = ledger.execute("SELECT history FROM turns WHERE thread_id=? ORDER BY rowid DESC", (params["threadId"],))
             respond(request, {"data": [json.loads(history) for history, in turns], "nextCursor": None})
         case "turn/start":
             thread, turn = params["threadId"], str(uuid.uuid4())
+            roots = scope(params)
+            assert roots == loaded[thread], (roots, loaded)
             client_id = params["clientUserMessageId"]
             text = params["input"][-1]["text"]
             context = params["input"][0]["text"]
             resources = json.loads(context.split("Earlier references do not grant access.\n")[-1])
             case = text.split(":", 1)[0]
+            if case == "Retry discussion":
+                with ledger:
+                    dropped = ledger.execute(
+                        "INSERT OR IGNORE INTO dropped_turns VALUES (?)", (text,)).rowcount
+                if dropped:
+                    sys.exit(0)
+            if case == "Exhaust discussion retries":
+                sys.exit(0)
             answer = "可以。先区分要讨论的想法与之后可能交给 Router 的工作。"
             respond(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
             if case == "Read attached":
                 issue_id, other_id, file_id, other_file_id = text.removeprefix("Read attached: ").split()
                 resource = next(row for row in resources if row["reference"]["kind"] == "repo")
                 checkout = Path(resource["checkout_path"])
-                assert str(checkout) in scope() and resource["status"] == "available"
+                assert str(checkout) in roots and resource["status"] == "available"
                 history = read(request, thread, turn, "history", "tend_read_discussion_history", {})
                 assert history["success"], history
                 history_text = json.loads(history["contentItems"][0]["text"])["messages"]
@@ -132,13 +174,18 @@ for line in sys.stdin:
                 pull = read(request, thread, turn, "pull", "tend_read_discussion_reference",
                             {"reference_id": "github:demo/quickstart:7"})
                 assert pull["success"] and "Synthetic PR body" in pull["contentItems"][0]["text"], pull
-                answer = (checkout / "README.md").read_text().strip()
+                answer = mock_read(checkout / "README.md", roots)
+            elif case == "Scope probe":
+                expected = json.loads(text.removeprefix("Scope probe: "))
+                actual = {path: mock_read(path, roots) for path in expected}
+                assert actual == expected, (actual, expected, roots)
+                answer = "Fixture scope matched."
             elif case == "Read mount":
                 resource = next(row for row in resources if row["reference"]["kind"] == "worktree"
                                 and row["status"] == "available")
                 checkout = Path(resource["checkout_path"])
-                assert str(checkout) in scope()
-                answer = (checkout / "README.md").read_text().strip()
+                assert str(checkout) in roots
+                answer = mock_read(checkout / "README.md", roots)
             elif text.startswith("Prepare the editable handoff draft"):
                 answer = json.dumps({
                     "goal": "整理演示仓库的上手说明",
@@ -154,8 +201,8 @@ for line in sys.stdin:
                      {"type": "agentMessage", "id": f"{turn}-answer", "phase": "final_answer", "text": answer}]
             history = {"id": turn, "status": "completed", "items": items}
             with ledger:
-                ledger.execute("INSERT INTO turns VALUES (?,?,?,?,?)",
-                               (turn, thread, text, context, json.dumps(history)))
+                ledger.execute("INSERT INTO turns VALUES (?,?,?,?,?,?)",
+                               (turn, thread, text, context, json.dumps(history), json.dumps(roots)))
             if case == "Recover discussion":
                 sys.exit(0)
             for item in items:

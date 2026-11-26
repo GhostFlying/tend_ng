@@ -317,6 +317,7 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
                 text: &input.text,
                 context: context.as_deref(),
                 effort: config.effort.as_deref(),
+                discussion_scope: None,
             },
             &mut DispatchHandler {
                 store: &mut store,

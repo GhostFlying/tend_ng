@@ -8,14 +8,15 @@ use crate::{
     },
 };
 use anyhow::{Context, Result, ensure};
-use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
+use codex_app::{
+    Client, DiscussionScope, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus,
+};
 use protocol::{
     DISCUSSION_PROFILE, DiscussionDraft, DiscussionMount, DiscussionReference, DiscussionSource,
     DiscussionWorkspace, GitHubPull,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
     env,
@@ -176,9 +177,12 @@ impl Service {
         api::serve(self, db)
     }
 
-    fn app(&self, settings: &Settings, roots: &BTreeSet<PathBuf>) -> Result<Client> {
-        let mut filesystem = vec!["\":minimal\"=\"read\"".to_owned()];
-        for path in roots.iter().chain([&settings.cwd, &settings.program]) {
+    fn app(&self, settings: &Settings) -> Result<Client> {
+        let mut filesystem = vec![
+            "\":minimal\"=\"read\"".to_owned(),
+            "\":workspace_roots\"=\"read\"".to_owned(),
+        ];
+        for path in [&settings.cwd, &settings.program] {
             let path = path.to_str().context("Discussion path is not UTF-8")?;
             ensure!(
                 !path.chars().any(char::is_control),
@@ -254,16 +258,11 @@ impl Service {
             .iter()
             .flat_map(|resource| resource.roots.iter().cloned())
             .collect();
-        let scope = format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(&(
-                &roots,
-                &settings.model,
-                &settings.codex_home,
-                &settings.program
-            ))?)
-        );
-        let mut client = match self.app(settings, &roots) {
+        let scope = DiscussionScope {
+            cwd: &settings.cwd,
+            roots: &roots,
+        };
+        let mut client = match self.app(settings) {
             Ok(client) => client,
             Err(error) if input.attempt.is_none() => {
                 eprintln!("Discussion App Server startup: {error:#}");
@@ -281,7 +280,6 @@ impl Service {
                 return finish(&mut store, &input, turn);
             }
             if attempt.number >= router::MAX_ATTEMPTS {
-                store.clear_thread(chat, &attempt.thread_id)?;
                 return store.finish(
                     input.seq,
                     &[],
@@ -292,24 +290,25 @@ impl Service {
         } else {
             1
         };
-        let thread = if number == 1 {
-            store.thread_id(chat, TOOL_REVISION, Some(&scope))?
-        } else {
-            None
-        };
+        let thread = store.discussion_thread_id(chat, TOOL_REVISION)?;
         let mut context = Vec::new();
         let setup = (|| -> Result<String> {
-            if let Some(thread) = thread
-                && client.resume_discussion_thread(
-                    &thread,
-                    &settings.cwd,
-                    settings.model.as_deref(),
-                )?
-            {
-                return Ok(thread);
+            let restore_binding = thread.is_none();
+            let prior_attempts = if restore_binding {
+                store.unbound_discussion_attempt_threads(chat)?
+            } else {
+                Vec::new()
+            };
+            for thread in thread.into_iter().chain(prior_attempts) {
+                if client.resume_discussion_thread(&thread, scope, settings.model.as_deref())? {
+                    if restore_binding {
+                        store.save_thread(chat, &thread, TOOL_REVISION, None)?;
+                    }
+                    return Ok(thread);
+                }
             }
             let thread = client.start_discussion_thread(
-                &settings.cwd,
+                scope,
                 INSTRUCTIONS,
                 &tool_specs(),
                 settings.model.as_deref(),
@@ -321,7 +320,7 @@ impl Service {
                 ));
             }
             context.extend(store.recent_context(chat, input.message_seq)?);
-            store.save_thread(chat, &thread, TOOL_REVISION, Some(&scope))?;
+            store.save_thread(chat, &thread, TOOL_REVISION, None)?;
             Ok(thread)
         })();
         let thread = match setup {
@@ -351,6 +350,7 @@ impl Service {
                 text: &input.text,
                 context: Some(&context),
                 effort: settings.effort.as_deref(),
+                discussion_scope: Some(scope),
             },
             &mut DiscussionTools {
                 store: &store,

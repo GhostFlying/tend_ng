@@ -13,6 +13,7 @@ import tempfile
 import threading
 from urllib.error import HTTPError
 from urllib.request import Request, urlopen
+from uuid import uuid4
 
 from chat import lose_first_response, server, wait_for
 from issue_chat import TESTS, WEB, free_port, prepare
@@ -190,16 +191,35 @@ def main():
         def messages(chat):
             return api(f"chats/{chat}/messages")["messages"]
 
-        def say(chat, text, response=None, operation=None):
+        def say(chat, text, response=None, operation=None, error=None):
             words = ("chat", "send", chat, text, operation) if operation else ("chat", "send", chat, text)
             message_id = cli(*words)["message_id"]
             rows = wait_for(lambda: messages(chat), lambda rows: any(
                 row["id"] == message_id and row["router_state"] in ("completed", "failed") for row in rows))
             user = next(row for row in rows if row["id"] == message_id)
+            if error:
+                assert user["router_state"] == "failed" and error in user["router_error"], user
+                return user
             assert user["router_state"] == "completed", user
             if response:
                 assert any(row["reply_to"] == message_id and row["text"] == response for row in rows), rows
             return user
+
+        def assert_scope(text, thread, *roots):
+            [(actual_thread, encoded)] = sql(native, "SELECT thread_id, roots FROM turns WHERE text=?", text)
+            assert actual_thread == thread
+            assert json.loads(encoded) == sorted({str(path) for path in roots}), encoded
+
+        def probe(chat, thread, expected, *roots):
+            text = "Scope probe: " + json.dumps({str(path): value for path, value in expected.items()})
+            say(chat, text, "Fixture scope matched.")
+            assert_scope(text, thread, *roots)
+
+        def worktree_roots(checkout):
+            aux = [Path(subprocess.check_output(["git", "-C", checkout, "rev-parse",
+                        "--path-format=absolute", flag], text=True).strip()).resolve()
+                   for flag in ("--git-dir", "--git-common-dir")]
+            return [checkout, *aux]
 
         def attach(chat, **source):
             return api(f"discussions/{chat}/references", "POST", source)
@@ -227,8 +247,13 @@ def main():
             assert sql(db,"SELECT count(*) FROM router_dispatches") == [(0,)]
             assert messages(chat)[-1]["author"] == "discussion"
             say(chat, "继续这个话题。", FIRST_ANSWER)
-            assert len(sql(native,"SELECT * FROM threads")) == 1
-            assert len(sql(native,"SELECT * FROM resumes")) == 1
+            [(original, params)] = sql(native, "SELECT id, params FROM threads")
+            assert json.loads(params)["runtimeWorkspaceRoots"] == []
+            assert sql(native, "SELECT id, roots FROM resumes") == [(original, "[]")]
+            assert_scope(first_text, original)
+            assert_scope("继续这个话题。", original)
+            # Simulate a binding left by the first release, before roots were removed from the key.
+            sql(db, "UPDATE router_threads SET model=? WHERE chat_id=?", "f" * 64, chat)
             cli("discussion", "rename", chat, "可恢复的讨论")
 
         with server(args.server, root, env, **options), runner_process(command, env, root):
@@ -238,6 +263,36 @@ def main():
             attempted = sql(db, """SELECT a.number,i.outcome FROM router_attempts a JOIN router_inputs i ON i.seq=a.seq
                                     JOIN chat_messages m ON m.seq=i.message_seq WHERE m.text='Recover discussion'""")
             assert attempted == [(1,"completed")], attempted
+            assert_scope("Recover discussion", original)
+            say(chat, "Retry discussion", FIRST_ANSWER)
+            assert_scope("Retry discussion", original)
+            say(chat, "Exhaust discussion retries", error="after two attempts")
+            attempted = sql(db, """SELECT m.text,a.number,a.thread_id FROM router_attempts a
+                        JOIN router_inputs i ON i.seq=a.seq JOIN chat_messages m ON m.seq=i.message_seq
+                        WHERE m.text IN ('Retry discussion','Exhaust discussion retries')
+                        ORDER BY m.seq,a.number""")
+            assert attempted == [(case, n, original) for case in (
+                "Retry discussion", "Exhaust discussion retries") for n in (1, 2)], attempted
+            assert sql(db, "SELECT thread_id FROM router_threads WHERE chat_id=?", chat) == [(original,)]
+
+            # Recreate the first release's exhausted retry: attempt 2 got a new ID
+            # but no native rollout. That release removed the binding, not the attempts.
+            missing_legacy_retry = str(uuid4())
+            sql(db, """UPDATE router_attempts SET thread_id=? WHERE number=2 AND seq=(
+                       SELECT i.seq FROM router_inputs i JOIN chat_messages m ON m.seq=i.message_seq
+                       WHERE i.chat_id=? AND m.text='Exhaust discussion retries')""",
+                missing_legacy_retry, chat)
+            sql(db, "DELETE FROM router_threads WHERE chat_id=? AND thread_id=?", chat, original)
+            assert sql(db, "SELECT thread_id FROM router_threads WHERE chat_id=?", chat) == []
+            revived = "Continue after legacy binding loss"
+            say(chat, revived, FIRST_ANSWER)
+            assert_scope(revived, original)
+            assert sql(native, "SELECT id, found FROM resumes ORDER BY rowid DESC LIMIT 2") == [
+                (original, 1), (missing_legacy_retry, 0)]
+            assert sql(native, "SELECT id FROM threads") == [(original,)]
+            assert sql(db, "SELECT thread_id, model FROM router_threads WHERE chat_id=?", chat) == [(original, None)]
+            [(context,)] = sql(native, "SELECT context FROM turns WHERE text=?", revived)
+            assert "先聊聊演示项目的目标" not in context, context
 
             parent = say("main", "请整理示例仓库的快速上手指南。")
             parent_id, = parent["issue_ids"]
@@ -268,12 +323,18 @@ def main():
             # Discoverability and attachment survive the absence of a Server checkout.
             sql(db,"UPDATE runners SET profile=json_insert(profile,'$.repos[#]','remote-only') WHERE id='demo-runner'")
             assert attach(chat,kind="repo",repo_id="remote-only")["status"] == "repo_not_readable_here"
-            say(chat, f"Read attached: {linked_id} {parent_id} readable-delivery unattached-delivery", INTRO)
-            latest = sql(native,"SELECT context FROM turns WHERE text LIKE 'Read attached:%'")[0][0]
-            assert "先聊聊演示项目的目标" in latest
-            assert str(root / "example") in latest
-            assert len(sql(native,"SELECT * FROM threads")) == 2
+            checkout = root / "example"
+            attached = f"Read attached: {linked_id} {parent_id} readable-delivery unattached-delivery"
+            say(chat, attached, INTRO)
+            assert_scope(attached, original, checkout)
+            latest = sql(native, "SELECT context FROM turns WHERE text=?", attached)[0][0]
+            assert "先聊聊演示项目的目标" not in latest  # No fallback replay on an ordinary resume.
+            assert str(checkout) in latest
+            assert sql(native, "SELECT id FROM threads") == [(original,)]
             assert len(sql(native,"SELECT * FROM tool_results")) == 7
+
+            cli("discussion", "detach", chat, repo["id"])
+            probe(chat, original, {checkout / "README.md": None})
             before = subprocess.check_output(["git","-C",root/"example","worktree","list","--porcelain"])
             parent_choice = cli("discussion", "workspaces", f"#{parent_number}")["choices"]
             child_choice = next(row for row in parent_choice if row["issue_id"] == child_id)
@@ -284,7 +345,9 @@ def main():
             assert child_ref["status"] == "available" and parent_ref["status"] == "no_registered_mount", (child_ref,parent_ref)
             assert "path" not in child_ref and str(root) not in json.dumps(child_ref)
             assert subprocess.check_output(["git","-C",root/"example","worktree","list","--porcelain"]) == before
+            mounted = root / "runner.runs" / "workspaces" / parent_id / "repos" / "example"
             say(chat, "Read mount", INTRO)
+            assert_scope("Read mount", original, *worktree_roots(mounted))
 
             task = child_choice["task_id"]
             add_fixture_task(root, task, "shared-task", "workspaces", "example", True, existing_key=parent_id)
@@ -302,9 +365,6 @@ def main():
             before = subprocess.check_output(["git","-C",root/"example","worktree","list","--porcelain"])
             assert status(chat, isolated_ref["id"]) == "available" and fallback.is_dir()
             assert subprocess.check_output(["git","-C",root/"example","worktree","list","--porcelain"]) == before
-            shutil.rmtree(isolated)
-            assert status(chat, isolated_ref["id"]) == "workspace_reclaimed_or_changed"
-
             with old_inspection() as url:
                 sql(db, "UPDATE runners SET host_id='other-host' WHERE id='demo-runner'")
                 assert status(chat, child_ref["id"]) == "different_host"
@@ -312,10 +372,31 @@ def main():
                 assert status(chat, child_ref["id"]) == "runner_workspace_query_unsupported"
                 sql(db, "UPDATE runners SET profile=json_set(profile,'$.inspect_url',?) WHERE id='demo-runner'", f"http://{inspect}")
 
+            replacement = isolated / "repos" / "example"
+            readme, stale, new = (path / "README.md" for path in (checkout, mounted, replacement))
+            probe(chat, original, {readme: None, stale: INTRO, new: INTRO},
+                  *worktree_roots(mounted), *worktree_roots(replacement))
+            for ref in (child_ref, shared_ref, review_ref):
+                cli("discussion", "detach", chat, ref["id"])
+            probe(chat, original, {readme: None, stale: None, new: INTRO}, *worktree_roots(replacement))
+
+            shutil.rmtree(isolated)
+            assert status(chat, isolated_ref["id"]) == "workspace_reclaimed_or_changed"
+            probe(chat, original, {stale: None})
+
+
             assert cli("discussion", "create", "--from-main", parent["id"])["chat_id"] != chat
             origin = cli("discussion", "create", "--from-issue", f"#{linked_number}")["chat_id"]
             assert api(f"discussions/{origin}")["references"][0]["id"] == issue["id"]
-            cli("discussion", "detach", chat, child_ref["id"])
+
+            # An unexpected permission confirmation must never start a turn or replace the binding.
+            mismatch = root / "app-home" / "mismatch-roots"
+            mismatch.touch()
+            say(chat, "Reject incorrect roots", error="Could not establish the read-only Discussion thread")
+            assert not sql(native, "SELECT id FROM turns WHERE text='Reject incorrect roots'")
+            assert sql(native, "SELECT id FROM threads") == [(original,)]
+            assert sql(db, "SELECT thread_id FROM router_threads WHERE chat_id=?", chat) == [(original,)]
+            mismatch.unlink()
 
             before_count = sql(db,"SELECT count(*) FROM router_dispatches")
             cli("discussion", "draft", chat, "draft-once")
@@ -342,6 +423,20 @@ def main():
             assert cli("discussion", "read", chat)["handoffs"][0]["href"] == f"/#message-{row['id']}"
             assert sql(db,"SELECT count(*) FROM router_dispatches") == before_count
 
+            assert sql(native, "SELECT DISTINCT thread_id FROM turns") == [(original,)]
+            assert sql(native, "SELECT DISTINCT id FROM resumes WHERE found=1") == [(original,)]
+            assert sql(native, "SELECT id FROM threads") == [(original,)]
+            # Only the explicit native 'no rollout found' response permits replacement and replay.
+            sql(native, "DELETE FROM threads WHERE id=?", original)
+            say(chat, "Continue after native history loss", FIRST_ANSWER)
+            [(replacement_id, recovery_context)] = sql(
+                native, "SELECT thread_id, context FROM turns WHERE text='Continue after native history loss'")
+            assert replacement_id != original
+            assert sql(native, "SELECT id, found FROM resumes ORDER BY rowid DESC LIMIT 1") == [(original, 0)]
+            assert "Fixture scope matched." in recovery_context, recovery_context
+            assert sql(db, "SELECT thread_id, model FROM router_threads WHERE chat_id=?", chat) == [(replacement_id, None)]
+            assert_scope("Continue after native history loss", replacement_id)
+
             if args.screenshots:
                 args.screenshots.mkdir(parents=True,exist_ok=True)
                 subprocess.run([args.node,WEB/"tests/discussions.mjs"], check=True, timeout=90,
@@ -355,7 +450,7 @@ def main():
             failed = wait_for(lambda: messages(unavailable), lambda rows: bool(rows and rows[0]["router_state"] == "failed"))
             assert len(failed) == 1 and failed[0]["id"] == msg and "not configured" in failed[0]["router_error"]
 
-    print("PASS Discussion persistence and recovery, named permissions and tools, scoped references, Runner worktree cases, handoff idempotency and Router receipt")
+    print("PASS Discussion original thread, legacy binding recovery, retry and missing-history fallback, exact turn scopes, Runner worktree switches, and Router handoff")
 
 
 if __name__ == "__main__":

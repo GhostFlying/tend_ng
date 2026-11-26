@@ -6,6 +6,7 @@ use protocol::{
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
+use std::collections::HashSet;
 
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -98,6 +99,54 @@ const WORKSPACE_CHOICES: &str = "SELECT t.id, i.id, i.title, n.number, t.repo_id
     LEFT JOIN runners r ON r.id=a.runner_id";
 
 impl Store {
+    pub fn discussion_thread_id(&self, chat: &str, revision: i64) -> Result<Option<String>> {
+        // Older Discussion bindings stored an attachment-scope hash in model.
+        // The binding is still valid; current permissions are applied on resume.
+        Ok(self
+            .db
+            .query_row(
+                "SELECT thread_id FROM router_threads WHERE chat_id = ?1 AND tool_revision = ?2",
+                params![chat, revision],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
+    pub fn unbound_discussion_attempt_threads(&self, chat: &str) -> Result<Vec<String>> {
+        // Do not bypass a binding with a different tool revision. Older releases
+        // removed the binding on retry exhaustion but retained the attempts.
+        let bound: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM router_threads WHERE chat_id = ?1)",
+            [chat],
+            |row| row.get(0),
+        )?;
+        if bound {
+            return Ok(Vec::new());
+        }
+
+        // Keep both branches on their per-chat partial indexes. In particular,
+        // an old retry can have a newer ID without a native rollout of its own.
+        let mut query = self.db.prepare(
+            "SELECT a.thread_id, i.seq, a.number
+               FROM router_inputs i JOIN router_attempts a ON a.seq = i.seq
+              WHERE i.chat_id = ?1 AND i.outcome IS NULL
+             UNION ALL
+             SELECT a.thread_id, i.seq, a.number
+               FROM router_inputs i JOIN router_attempts a ON a.seq = i.seq
+              WHERE i.chat_id = ?1 AND i.outcome IS NOT NULL
+             ORDER BY i.seq DESC, a.number DESC",
+        )?;
+        let mut threads = Vec::new();
+        let mut seen = HashSet::new();
+        for thread in query.query_map([chat], |row| row.get::<_, String>(0))? {
+            let thread = thread?;
+            if seen.insert(thread.clone()) {
+                threads.push(thread);
+            }
+        }
+        Ok(threads)
+    }
+
     pub fn workspace_choices(&self, issue: &str) -> Result<Vec<WorkspaceChoice>> {
         let mut statement = self.db.prepare(&format!(
             "WITH RECURSIVE tree(id) AS (SELECT id FROM issues WHERE id=?1 UNION ALL

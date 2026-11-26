@@ -7,7 +7,7 @@
 ## 实现顺序
 
 1. 在 Server 显式登记 discussion Chat 类型。沿用 Chat 的消息、回合收件、尝试和恢复表，调度时按持久类型选独立的讨论 App Server、独立原生 thread 和讨论工具清单。缺执行配置时显示明确状态，绝不回退主 Router。建立空白创建、列表、标题及消息入口。
-2. 按稳定身份保存多项引用并去重。仓库由显式本机映射与已登记 repo ID 共同校验。回合可以在原生只读约束下搜索和读取当前 checkout。移除资料时也更新下一回合的原生访问范围。优先续用权限范围相同的 thread，变更后从同一 Chat 的持久消息接续。Issue 投影与交付读取只接受已附加 Issue 授权范围，PR/MR 只走已支持的 provider 读取，未配置或无权时保留引用及原因。
+2. 按稳定身份保存多项引用并去重。仓库由显式本机映射与已登记 repo ID 共同校验。回合可以在原生只读约束下搜索和读取当前 checkout。移除资料时也更新下一回合的原生访问范围。同一 Chat 在引用变化和正常重试后续用原 thread，使用稳定的只读 profile 按回合绑定 `:workspace_roots`。只有 App Server 明确报告原生历史不可恢复时，才新建 thread 并从同一 Chat 的持久消息接续。见[引用变化与线程接续](discussion-thread-continuity.md)。Issue 投影与交付读取只接受已附加 Issue 授权范围，PR/MR 只走已支持的 provider 读取，未配置或无权时保留引用及原因。
 3. 在既有鉴权的 Runner inspection 通道加可选只读路径查询。Server 从 Issue 树列出实际 Task/repo；按 Task 已领取归属查询其 Runner，先验官方 Host，复核返回身份、路径和 inode，不暴露路径给用户。Runner 从本地 assignment、原 Run 或接替记录及 mount 解析实际目录，不准备工作区、不 fetch、不持取工作锁。旧 Runner 和已回收路径可见为不可用，不改同步协议版本。
 4. 用讨论专用回合生成结构化草稿。草稿字段独立区分目标、已明确决策、约束、授权终点、所选资料和用户确认的目标 Issue。显式发送绑定稳定操作 ID；收件、普通 Router input 与双向链接在同一 SQLite 事务写入，重传查原收件。主 Chat 和 Issue Chat 行为保持原样。Web 和 CLI 走同一用户 API。
 5. 把已确认行为、运行配置和失败边界写回专题契约。固定候选独立复核，按发现修订，再直推 main 和回读远端。

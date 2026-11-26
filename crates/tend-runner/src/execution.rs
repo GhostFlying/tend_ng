@@ -360,6 +360,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 text: &input,
                 context: context.as_deref(),
                 effort: agent.reasoning_effort.as_deref(),
+                discussion_scope: None,
             },
             &mut Handler {
                 store,

@@ -78,7 +78,7 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 ## 独立讨论工具
 
-独立讨论使用 Server 配置的单独本地 App Server。启动和续用确认原生 `tend-discussion` 权限配置、无审批及无网络的只读沙箱。原生 shell 可读系统最小运行环境、空白工作目录及当轮明确附加的本机仓库或挂载。服务模型认证在独立 Codex home 或该服务指定的模型密钥文件内。App Server 不继承 Server 或 Router 凭据，原生 shell 不继承该服务环境。讨论不注入工作、发送、Attention、外部订阅或 Issue/Task 修改工具。受控工具是：
+独立讨论使用 Server 配置的单独本地 App Server。同一讨论 Chat 续用原生 thread，不因引用变化而切换。启动、续用和回合启动都显式选择 `tend-discussion` 权限配置，以 `runtimeWorkspaceRoots` 将当轮目录绑定到只读 `:workspace_roots`。启动和续用时核对 App Server 确认的根目录集合、无审批及无网络的只读沙箱。原生 shell 可读系统最小运行环境、空白工作目录及当轮明确附加的本机仓库或挂载（含验证过的 Git 元数据路径）。服务模型认证在独立 Codex home 或该服务指定的模型密钥文件内。App Server 不继承 Server 或 Router 凭据，原生 shell 不继承该服务环境。讨论不注入工作、发送、Attention、外部订阅或 Issue/Task 修改工具。受控工具是：
 
 - `tend_read_discussion_history` 分页读本讨论当前输入以前的可见消息，不能传 Chat ID。
 - `tend_read_discussion_reference` 用同一讨论已附加的身份读精确 Issue 的事实、对话、交付索引，或查询已配置的 GitHub provider。工作目录只由原生文件系统读取。

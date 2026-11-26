@@ -149,7 +149,7 @@ Web 的「讨论」与 `tend discussion --help` 使用相同用户 API。要启�
 }
 ```
 
-`host_id` 必须与同机 Runner 登记的官方 Host ID 一致。仓库映射取 Server 本机实际 checkout，只有同一 repo ID 已登记才可附加和读取。主 Chat 继续使用自己的原配置。讨论需要 Linux 和支持自定义原生只读权限的 Codex App Server（以 0.172.0 的受限沙箱验证），使用独立 Codex home（不放在 `/tmp`）和空白工作目录。该 home 仅配置讨论服务的模型认证，不复制主 Router 的配置、插件或 MCP。可在讨论配置内用 `model`、`effort` 指定模型，或用 `model_api_keys` 把模型服务所需的 `*_API_KEY` 环境名称映射到独立 Codex home 内的密钥文件；不从 Server 环境继承。资料只读权限由实际 App Server 确认。同机 Task worktree 还需要 Runner 的已有 `inspect` 配置。
+`host_id` 必须与同机 Runner 登记的官方 Host ID 一致。仓库映射取 Server 本机实际 checkout，只有同一 repo ID 已登记才可附加和读取。主 Chat 继续使用自己的原配置。讨论需要 Linux 和支持自定义原生只读 profile 与 `runtimeWorkspaceRoots` 的 Codex App Server（以 0.172.0 的受限沙箱验证），使用独立 Codex home（不放在 `/tmp`）和空白工作目录。该 home 仅配置讨论服务的模型认证，不复制主 Router 的配置、插件或 MCP。可在讨论配置内用 `model`、`effort` 指定模型，或用 `model_api_keys` 把模型服务所需的 `*_API_KEY` 环境名称映射到独立 Codex home 内的密钥文件；不从 Server 环境继承。资料只读权限由实际 App Server 确认。同机 Task worktree 还需要 Runner 的已有 `inspect` 配置。
 
 ```sh
 tend discussion create "整理想法"

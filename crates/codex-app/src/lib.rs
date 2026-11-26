@@ -5,16 +5,17 @@ pub use process::ProcessIdentity;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{
-    collections::VecDeque,
+    collections::{BTreeSet, VecDeque},
     fmt,
     io::{BufRead, BufReader, Write},
-    path::Path,
+    path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
     sync::mpsc::{self, Receiver, RecvTimeoutError},
     thread,
     time::{Duration, Instant},
 };
 
+const DISCUSSION_PROFILE: &str = "tend-discussion";
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +67,25 @@ pub struct TurnInput<'a> {
     pub text: &'a str,
     pub context: Option<&'a str>,
     pub effort: Option<&'a str>,
+    pub discussion_scope: Option<DiscussionScope<'a>>,
+}
+
+#[derive(Clone, Copy)]
+pub struct DiscussionScope<'a> {
+    pub cwd: &'a Path,
+    // The Discussion service has already resolved and approved these canonical paths.
+    pub roots: &'a BTreeSet<PathBuf>,
+}
+
+impl DiscussionScope<'_> {
+    fn apply(self, params: &mut Value) -> Result<()> {
+        params["cwd"] = serde_json::to_value(self.cwd)?;
+        params["permissions"] = json!(DISCUSSION_PROFILE);
+        params["approvalPolicy"] = json!("never");
+        // An empty set is explicit so it also revokes the previous turn's roots.
+        params["runtimeWorkspaceRoots"] = serde_json::to_value(self.roots)?;
+        Ok(())
+    }
 }
 
 #[derive(Deserialize)]
@@ -228,20 +248,18 @@ impl Client {
 
     pub fn start_discussion_thread(
         &mut self,
-        cwd: &Path,
+        scope: DiscussionScope<'_>,
         instructions: &str,
         tools: &[Value],
         model: Option<&str>,
     ) -> Result<String> {
-        let response = self.call(
-            "thread/start",
-            json!({
-                "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
-                "permissions": "tend-discussion", "approvalPolicy": "never",
-                "developerInstructions": instructions, "dynamicTools": tools, "model": model,
-            }),
-        )?;
-        verify_discussion_permissions(&response)?;
+        let mut params = json!({
+            "ephemeral": false, "historyMode": "legacy",
+            "developerInstructions": instructions, "dynamicTools": tools, "model": model,
+        });
+        scope.apply(&mut params)?;
+        let response = self.call("thread/start", params)?;
+        verify_discussion_permissions(&response, scope.roots)?;
         Ok(response["thread"]["id"]
             .as_str()
             .context("thread/start missing thread ID")?
@@ -251,18 +269,14 @@ impl Client {
     pub fn resume_discussion_thread(
         &mut self,
         thread_id: &str,
-        cwd: &Path,
+        scope: DiscussionScope<'_>,
         model: Option<&str>,
     ) -> Result<bool> {
-        match self.call(
-            "thread/resume",
-            json!({
-                "threadId": thread_id, "excludeTurns": true, "cwd": cwd, "model": model,
-                "permissions": "tend-discussion", "approvalPolicy": "never"
-            }),
-        ) {
+        let mut params = json!({ "threadId": thread_id, "excludeTurns": true, "model": model });
+        scope.apply(&mut params)?;
+        match self.call("thread/resume", params) {
             Ok(response) => {
-                verify_discussion_permissions(&response)?;
+                verify_discussion_permissions(&response, scope.roots)?;
                 ensure!(
                     response["thread"]["id"] == thread_id,
                     "resumed an unexpected Discussion thread"
@@ -421,19 +435,21 @@ impl Client {
             text,
             context,
             effort,
+            discussion_scope,
         } = input;
         let mut items = Vec::new();
         if let Some(context) = context {
             items.push(json!({ "type": "text", "text": context, "text_elements": [] }));
         }
         items.push(json!({ "type": "text", "text": text, "text_elements": [] }));
-        let request_id = self.send_request(
-            "turn/start",
-            json!({
-                "threadId": thread_id, "clientUserMessageId": client_id, "input": items,
-                "effort": effort
-            }),
-        )?;
+        let mut params = json!({
+            "threadId": thread_id, "clientUserMessageId": client_id, "input": items,
+            "effort": effort,
+        });
+        if let Some(scope) = discussion_scope {
+            scope.apply(&mut params)?;
+        }
+        let request_id = self.send_request("turn/start", params)?;
         let startup_deadline = Instant::now() + RPC_TIMEOUT;
         let mut turn_id: Option<String> = None;
         let mut before_start = VecDeque::new();
@@ -638,14 +654,35 @@ impl Client {
     }
 }
 
-fn verify_discussion_permissions(response: &Value) -> Result<()> {
+fn verify_discussion_permissions(response: &Value, roots: &BTreeSet<PathBuf>) -> Result<()> {
     ensure!(
-        response["activePermissionProfile"]["id"] == "tend-discussion"
+        response["activePermissionProfile"]["id"] == DISCUSSION_PROFILE
             && response["activePermissionProfile"]["extends"].is_null()
             && response["approvalPolicy"] == "never"
             && response["sandbox"]["type"] == "readOnly"
             && response["sandbox"]["networkAccess"] == false,
         "App Server did not confirm the read-only Discussion permission profile"
+    );
+    let actual: BTreeSet<_> = response["runtimeWorkspaceRoots"]
+        .as_array()
+        .context("App Server did not confirm Discussion runtime workspace roots")?
+        .iter()
+        .map(|root| -> Result<_> {
+            let root = Path::new(
+                root.as_str()
+                    .context("invalid Discussion runtime workspace root")?,
+            );
+            ensure!(
+                root.is_absolute(),
+                "relative Discussion runtime workspace root"
+            );
+            root.canonicalize()
+                .context("could not resolve Discussion runtime workspace root")
+        })
+        .collect::<Result<_>>()?;
+    ensure!(
+        &actual == roots,
+        "App Server returned unexpected Discussion runtime workspace roots"
     );
     Ok(())
 }
@@ -685,6 +722,33 @@ impl Client {
         }
         self.child.kill()?;
         self.child.wait()?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod discussion_tests {
+    use super::*;
+
+    #[test]
+    fn discussion_responses_confirm_exact_canonical_workspace_roots() -> Result<()> {
+        let cwd = std::env::current_dir()?.canonicalize()?;
+        let parent = cwd.parent().context("test cwd has no parent")?.to_owned();
+        let expected = BTreeSet::from([cwd.clone(), parent.clone()]);
+        let mut response = json!({
+            "activePermissionProfile": {"id": DISCUSSION_PROFILE, "extends": null},
+            "approvalPolicy": "never",
+            "sandbox": {"type": "readOnly", "networkAccess": false},
+        });
+        assert!(verify_discussion_permissions(&response, &BTreeSet::new()).is_err());
+        response["runtimeWorkspaceRoots"] = json!([]);
+        verify_discussion_permissions(&response, &BTreeSet::new())?;
+        assert!(verify_discussion_permissions(&response, &expected).is_err());
+        response["runtimeWorkspaceRoots"] = json!([cwd.join("."), parent]);
+        verify_discussion_permissions(&response, &expected)?;
+        assert!(verify_discussion_permissions(&response, &BTreeSet::from([cwd])).is_err());
+        response["sandbox"]["networkAccess"] = json!(true);
+        assert!(verify_discussion_permissions(&response, &expected).is_err());
         Ok(())
     }
 }
