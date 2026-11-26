@@ -341,15 +341,11 @@ impl Store {
                 );
             }
         }
-        if let WorkAction::AskAttention {
-            after_report_id: Some(report),
-            ..
-        } = &action
-        {
+        if let WorkAction::AskStageAttention { report_id, .. } = &action {
             let known = self.0.query_row(
                 "SELECT EXISTS(SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
                  WHERE o.id = ?1 AND a.task_id = ?2 AND json_extract(o.operation, '$.action.kind') = 'report_issue')",
-                params![report, run.assignment.task_id],
+                params![report_id, run.assignment.task_id],
                 |row| row.get::<_, bool>(0),
             )?;
             ensure!(
@@ -475,7 +471,7 @@ pub(super) fn has_unread_input(db: &Connection, assignment: &str) -> Result<bool
 pub(super) fn waiting_for_attention(db: &Connection, assignment: &str) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM local_task_intents o
-         WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') = 'ask_attention'
+         WHERE o.assignment_id = ?1 AND json_extract(o.operation, '$.action.kind') IN ('ask_attention', 'ask_stage_attention')
            AND json_extract(o.operation, '$.action.proposal.replaces') IS NULL
            AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i
                 WHERE i.assignment_id = o.assignment_id AND i.run_id IS NOT NULL

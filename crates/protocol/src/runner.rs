@@ -225,6 +225,8 @@ pub struct RunnerSyncReply {
     pub drain_acknowledged: Option<bool>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub proposal_approval: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stage_attention: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_reclaims: Vec<crate::WorkspaceReclaim>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -321,8 +323,12 @@ pub enum WorkAction {
         request: AttentionRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposal: Option<crate::ProposalRequest>,
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        after_report_id: Option<String>,
+    },
+    // A distinct tag makes an unnegotiated transfer fail, not silently
+    // become a question without a delivery dependency on an older Server.
+    AskStageAttention {
+        request: AttentionRequest,
+        report_id: String,
     },
     EscalateAttention {
         attention_id: String,

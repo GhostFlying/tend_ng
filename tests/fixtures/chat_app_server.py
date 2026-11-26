@@ -38,11 +38,13 @@ DIRECT_CASES = {
     "Investigate example and get an independent review if necessary.": ("review", "investigation"),
     "Deliver an example plan, then wait for my decision.": ("stage", "investigation"),
     "Dispatch legacy example work.": ("legacy", "issue-router"),
+    "Check stage support across a Server upgrade.": ("stage-compat", "issue-router"),
 }
 DIRECT_REVIEW_REPLY = "Review the example candidate."
 DIRECT_STAGE_REPLY = "Close the delivered example plan."
 DIRECT_STAGE_PROBE = "Probe blocked stage Attention."
-for answer in (DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY):
+COMPAT_REPLIES = ("Resume the example after the upgrade.", "Accept the bound report.")
+for answer in (DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY, *COMPAT_REPLIES):
     cases[answer] = {"answer": "Decision delivered to the owner."}
 cases[DIRECT_STAGE_PROBE] = {"answer": "The stage question is still pending."}
 for prompt in DIRECT_CASES:
@@ -292,6 +294,9 @@ for line in sys.stdin:
                     case = {"answer": report["summary"], "handoff_background": report}
                 elif report["original_request"] in DIRECT_CASES:
                     case = {"answer": report["summary"]}
+                    if report["summary"] in {"The example plan is ready.", "The original compatibility report."}:
+                        # Both native report attempts disappear, forcing terminal failure.
+                        case["drop_before_start"] = 2
                 elif report["original_request"] == PROPOSAL_REQUEST:
                     case = {"answer": report["summary"]}
                 elif report["original_request"] == STAGE_REQUEST:
@@ -506,7 +511,7 @@ for line in sys.stdin:
                 decision_tool("tend_publish_attention", {"attention_id": fact["id"], "text": "Close the delivered plan?"},
                               thread_id, turn_id, token, success=False)
                 answer = case["answer"]
-            elif text in {DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY}:
+            elif text in {DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY, *COMPAT_REPLIES}:
                 assert context and "explicitly replies to this Tend Attention" in context
                 fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
                 decision_tool("tend_answer_attention", {"attention_id": fact["id"], "answer": text},
@@ -554,22 +559,26 @@ for line in sys.stdin:
                 answer = case["answer"]
             elif text in DIRECT_CASES:
                 title, category = DIRECT_CASES[text]
-                catalogue, instructions = database.execute(
-                    "SELECT tools, instructions FROM threads WHERE id = ?", (thread_id,)
-                ).fetchone()
-                schema = next(tool["inputSchema"] for tool in json.loads(catalogue)
-                              if tool["name"] == "tend_dispatch_issue")
-                assert category in schema["properties"]["category"]["enum"]
-                for rule in ("one person can deliver the outcome", "verified remote main SHA",
-                             "only when the user explicitly asks for that endpoint",
-                             "one responsible Agent observe"):
-                    assert rule in instructions, rule
-                args = {"title": title, "objective": text, "repo_ids": ["example"]}
-                if title != "legacy":
-                    args["category"] = category
-                receipt = decision_tool("tend_dispatch_issue", args, thread_id, turn_id,
-                                        params["clientUserMessageId"])
-                assert receipt["category"] == category and "parent_issue_id" not in receipt
+                if title == "stage-compat":
+                    decision_tool("tend_dispatch_issue", {"title": title, "objective": text, "repo_ids": ["example"]},
+                                  thread_id, turn_id, params["clientUserMessageId"])
+                else:
+                    catalogue, instructions = database.execute(
+                        "SELECT tools, instructions FROM threads WHERE id = ?", (thread_id,)
+                    ).fetchone()
+                    schema = next(tool["inputSchema"] for tool in json.loads(catalogue)
+                                  if tool["name"] == "tend_dispatch_issue")
+                    assert category in schema["properties"]["category"]["enum"]
+                    for rule in ("one person can deliver the outcome", "verified remote main SHA",
+                                 "only when the user explicitly asks for that endpoint",
+                                 "one responsible Agent observe"):
+                        assert rule in instructions, rule
+                    args = {"title": title, "objective": text, "repo_ids": ["example"]}
+                    if title != "legacy":
+                        args["category"] = category
+                    receipt = decision_tool("tend_dispatch_issue", args, thread_id, turn_id,
+                                            params["clientUserMessageId"])
+                    assert receipt["category"] == category and "parent_issue_id" not in receipt
                 answer = case["answer"]
             elif text == REGISTERED_REVIEW:
                 decision_tool("tend_dispatch_issue", {

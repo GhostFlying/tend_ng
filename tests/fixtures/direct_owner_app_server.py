@@ -22,14 +22,14 @@ def respond(request, result):
     send(id=request["id"], result=result)
 
 
-def tool(name, **arguments):
+def tool(name, *, accepted=True, **arguments):
     assert name in tools, name
     call = str(uuid.uuid4())
     send(id=call, method="item/tool/call", params={
         "threadId": thread, "turnId": turn, "callId": call, "tool": name, "arguments": arguments,
     })
     response = line()
-    assert response["id"] == call and response["result"]["success"], response
+    assert response["id"] == call and response["result"]["success"] is accepted, response
     return json.loads(response["result"]["contentItems"][0]["text"])
 
 
@@ -51,7 +51,7 @@ if start["method"] == "thread/resume":
     send(id=start["id"], error={"code": -32600, "message": "no rollout found for thread id"})
     start = line()
 assert start["method"] == "thread/start", start
-tools = {entry["name"] for entry in start["params"]["dynamicTools"]}
+tools = {entry["name"]: entry for entry in start["params"]["dynamicTools"]}
 instructions = start["params"]["developerInstructions"]
 thread, turn = str(uuid.uuid4()), str(uuid.uuid4())
 respond(start, {"thread": {"id": thread}})
@@ -70,7 +70,7 @@ respond(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
 
 if direct:
     assert {"tend_report_result", "tend_delegate_work", "tend_submit_artifact", "tend_request_attention",
-            "tend_find_pull_request", "tend_link_pull_request", "tend_request_review"} <= tools
+            "tend_find_pull_request", "tend_link_pull_request", "tend_request_review"} <= tools.keys()
     assert "direct Owner of this top-level Issue" in instructions
     assert "Do not create a placeholder child" in instructions
     assert Path.cwd() == root / "runner.runs" / "workspaces" / issue
@@ -131,6 +131,29 @@ elif title == "stage":
         [decision] = [item for item in inputs if item["kind"] == "attention_answered"]
         assert decision["user_message_id"], decision
         publish("The delivered plan was confirmed.")
+elif title == "stage-compat":
+    assert owner["category"] == "issue-router"
+    properties = tools["tend_request_attention"]["inputSchema"]["properties"]
+    id_path = root / "compat-report-id"
+    if not inputs:
+        assert "after_report_id" not in properties
+        stage = tool("tend_report_result", summary="The original compatibility report.")
+        id_path.write_text(stage["operation_id"])
+        bad = tool("tend_request_attention", accepted=False, question="Must not silently publish.",
+                   after_report_id=stage["operation_id"])
+        assert "does not support report-bound Attention" in bad["error"], bad
+        tool("tend_request_attention", question="Resume after the Server upgrade?",
+             options=["Resume the example after the upgrade."])
+    else:
+        [decision] = [item for item in inputs if item["kind"] == "attention_answered"]
+        assert decision["user_message_id"], decision
+        assert "after_report_id" in properties
+        if decision["user_text"] == "Resume the example after the upgrade.":
+            tool("tend_request_attention", question="Accept the exact compatibility report?",
+                 after_report_id=id_path.read_text(), options=["Accept the bound report."])
+        else:
+            assert decision["user_text"] == "Accept the bound report."
+            publish("The bound report was accepted after upgrade.")
 elif title == "legacy":
     assert owner["category"] == "issue-router" and "tend_submit_artifact" not in tools
     assert "workspace_key" not in assignment

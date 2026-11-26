@@ -26,6 +26,7 @@ use std::{
 #[derive(Clone)]
 pub struct Runtime {
     pub proposal_approval: Arc<AtomicBool>,
+    pub stage_attention: Arc<AtomicBool>,
     pub root: PathBuf,
     pub artifacts: crate::artifacts::Transfer,
     pub program: OsString,
@@ -297,6 +298,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     let (instructions, tools) = tools::catalogue(
         &run.assignment,
         runtime.proposal_approval.load(Ordering::Relaxed),
+        runtime.stage_attention.load(Ordering::Relaxed),
     );
     let native_context =
         native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;
@@ -411,6 +413,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
             cwd: &cwd,
             artifacts: &runtime.artifacts.root,
             proposal_approval: &runtime.proposal_approval,
+            stage_attention: &runtime.stage_attention,
             branches: &branches,
             config,
             collector,
@@ -488,6 +491,7 @@ struct Handler<'a> {
     cwd: &'a Path,
     artifacts: &'a Path,
     proposal_approval: &'a AtomicBool,
+    stage_attention: &'a AtomicBool,
     branches: &'a [protocol::WorkBranch],
     config: &'a Config,
     collector: Option<crate::usage::Collector>,
@@ -632,6 +636,7 @@ impl TurnHandler for Handler<'_> {
                 self.artifacts,
                 id,
                 self.proposal_approval.load(Ordering::Relaxed),
+                self.stage_attention.load(Ordering::Relaxed),
             )
         }) {
             Ok(Some(operation)) => Ok(ToolOutput {

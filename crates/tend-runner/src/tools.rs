@@ -24,6 +24,7 @@ const POST: &str = "tend_post_issue_message";
 pub fn catalogue(
     assignment: &protocol::TaskAssignment,
     proposal_approval: bool,
+    stage_attention: bool,
 ) -> (&'static str, Vec<Value>) {
     let category = assignment.placement.agent.category.as_str();
     let post = json!({
@@ -119,7 +120,7 @@ pub fn catalogue(
             "additionalProperties": false
         }
     });
-    if assignment.owns_root() {
+    if assignment.owns_root() && stage_attention {
         ask["inputSchema"]["properties"]["after_report_id"] = json!({
             "type":"string",
             "description":"For a decision that must follow a stage delivery, use the operation ID returned by this Task's tend_report_result. Tend publishes the question only after that report reaches the original Chat."
@@ -353,6 +354,7 @@ pub fn action(
     artifacts: &Path,
     operation: &str,
     proposal_approval: bool,
+    stage_attention: bool,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
         REQUEST_REVIEW if run.assignment.placement.agent.category != "review" => {
@@ -610,7 +612,6 @@ pub fn action(
                     due_at: None,
                 },
                 proposal: Some(proposal),
-                after_report_id: None,
             })
         }
         ASK => {
@@ -626,15 +627,21 @@ pub fn action(
                     .is_none_or(|id| { run.assignment.owns_root() && protocol::valid_id(id) }),
                 "A stage Attention needs this top-level Task's original report operation ID"
             );
+            ensure!(
+                after_report_id.is_none() || stage_attention,
+                "The connected Server does not support report-bound Attention. Do not replace it with an independent question."
+            );
             let request: AttentionRequest = serde_json::from_value(arguments)?;
             ensure!(
                 !request.question.trim().is_empty(),
                 "Specify the decision needed"
             );
-            Ok(WorkAction::AskAttention {
-                request,
-                proposal: None,
-                after_report_id,
+            Ok(match after_report_id {
+                Some(report_id) => WorkAction::AskStageAttention { request, report_id },
+                None => WorkAction::AskAttention {
+                    request,
+                    proposal: None,
+                },
             })
         }
         ESCALATE if run.assignment.owns_root() => {

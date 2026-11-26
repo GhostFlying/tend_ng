@@ -110,7 +110,7 @@ impl Store {
                          AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
                            AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'review_finished'
                            AND json_extract(i.payload, '$.review.request_id') = o.id))
-                       OR (json_extract(o.operation, '$.action.kind') = 'ask_attention'
+                       OR (json_extract(o.operation, '$.action.kind') IN ('ask_attention', 'ask_stage_attention')
                          AND json_extract(o.operation, '$.action.proposal.replaces') IS NULL
                          AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1 AND i.run_id IS NOT NULL
                            AND json_extract(i.payload, '$.kind') = 'attention_answered' AND json_extract(i.payload, '$.attention_id') = o.id))
@@ -126,10 +126,17 @@ impl Store {
                     .map(|raw| {
                         let mut operation: protocol::WorkOperation = serde_json::from_str(&raw?)?;
                         // Only the original wait obligation is handed to a successor.
-                        if let protocol::WorkAction::AskAttention { proposal, .. } =
-                            &mut operation.action
-                        {
-                            *proposal = None;
+                        // The Server owns the already accepted report dependency,
+                        // just as it owns an already accepted structured proposal.
+                        match &mut operation.action {
+                            protocol::WorkAction::AskStageAttention { request, .. } => {
+                                operation.action = protocol::WorkAction::AskAttention {
+                                    request: request.clone(),
+                                    proposal: None,
+                                };
+                            }
+                            protocol::WorkAction::AskAttention { proposal, .. } => *proposal = None,
+                            _ => {}
                         }
                         Ok(operation)
                     })

@@ -237,6 +237,8 @@ def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
 
             hold_upload.clear()
             report_msg = report(stage_message, "The example plan is ready.")
+            assert report_msg["text"].startswith("The Router could not relay this report.")
+            assert sql("server", "SELECT outcome FROM router_inputs WHERE report_id=?", stage_report) == [("failed",)]
             [stage_file] = report_msg["artifacts"]
             assert cli("artifact", "download", stage_file["id"], raw=True) == b"The isolated stage plan.\n"
             question = report(stage_message, "Close the delivered plan?")

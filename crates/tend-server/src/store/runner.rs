@@ -583,6 +583,7 @@ impl Store {
                 execution_slot_limit: super::handoff::execution_slot_limit(&snapshot, profile)?,
                 drain_acknowledged: None,
                 proposal_approval: true,
+                stage_attention: true,
                 workspace_reclaims: if task.is_none() {
                     super::reclaim::pending(&snapshot, &profile.runner_id)?
                 } else {
@@ -844,6 +845,7 @@ impl Store {
             execution_slot_limit,
             drain_acknowledged,
             proposal_approval: true,
+            stage_attention: true,
             workspace_reclaims,
             confirmed_reclaims,
             assignments,

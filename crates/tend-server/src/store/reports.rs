@@ -144,6 +144,33 @@ pub fn context(
     ))
 }
 
+// A report-bound question needs the authored stage result even when Router
+// has exhausted recovery or emitted no answer. Publish once via the normal
+// report mapping and attachment path, without changing the Router outcome.
+pub(super) fn publish_stage_fallback(db: &Connection, input: i64) -> Result<()> {
+    let id = protocol::new_id();
+    if db.execute(
+        "INSERT INTO chat_messages (id, chat_id, text, reply_to)
+         SELECT ?2, source.chat_id,
+                CASE i.outcome WHEN 'failed' THEN
+                    'The Router could not relay this report. The original Issue report follows.'
+                    ELSE 'Original Issue report' END || char(10) || char(10) || r.summary,
+                source.id
+         FROM router_inputs i JOIN issue_reports r ON r.id = i.report_id
+         JOIN chat_messages source ON source.seq = i.message_seq
+         WHERE i.seq = ?1 AND i.outcome IS NOT NULL
+           AND EXISTS (SELECT 1 FROM attention_report_dependencies d WHERE d.report_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM issue_report_publications p WHERE p.report_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM report_artifacts link JOIN artifacts a ON a.id = link.artifact_id
+                           WHERE link.report_id = r.id AND a.published = 0)",
+        params![input, id],
+    )? == 1
+    {
+        attach(db, &id, input)?;
+    }
+    Ok(())
+}
+
 pub fn attach(db: &Connection, message: &str, input: i64) -> Result<()> {
     db.execute(
         "INSERT INTO issue_report_publications (message_id, report_id)

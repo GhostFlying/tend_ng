@@ -326,7 +326,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS handoff_proofs_by_assignment ON runner_handoff_proofs(predecessor, json_extract(proof, '$.assignment_id'));
              CREATE INDEX IF NOT EXISTS chat_artifacts_by_file ON chat_artifacts(artifact_id, message_id);
              CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);
-             CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",
+             CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);
+             CREATE INDEX IF NOT EXISTS attention_report_dependencies_by_report ON attention_report_dependencies(report_id);",
         )?;
         token_usage::rebuild::abandon(&tx)?;
         execution_hosts::install_index(&tx)?;
@@ -790,6 +791,9 @@ impl Store {
         )?;
         if updated == 0 {
             return Ok(());
+        }
+        if answers.is_empty() {
+            reports::publish_stage_fallback(&tx, seq)?;
         }
         for (index, answer) in answers.iter().enumerate() {
             let id = protocol::new_id();

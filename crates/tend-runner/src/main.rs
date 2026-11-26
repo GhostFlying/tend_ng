@@ -153,6 +153,7 @@ fn main() -> Result<()> {
     let auth = format!("Bearer {token}");
     let server = Arc::new(Server {
         proposal_approval: Arc::new(AtomicBool::new(false)),
+        stage_attention: Arc::new(AtomicBool::new(false)),
         legacy_token_server: AtomicBool::new(false),
         base: base.trim_end_matches('/').to_owned(),
         auth: auth.clone(),
@@ -198,6 +199,7 @@ fn main() -> Result<()> {
     );
     let runtime = execution::Runtime {
         proposal_approval: Arc::clone(&server.proposal_approval),
+        stage_attention: Arc::clone(&server.stage_attention),
         root: workspace_root,
         artifacts: transfer,
         program,
@@ -287,6 +289,7 @@ fn sync(
 
 struct Server {
     proposal_approval: Arc<AtomicBool>,
+    stage_attention: Arc<AtomicBool>,
     legacy_token_server: AtomicBool,
     base: String,
     auth: String,
@@ -379,12 +382,15 @@ impl Server {
             reply.execution_slot_limit = None;
         }
         let legacy = !reply.token_usage_supported;
+        let supports_stage_attention = reply.stage_attention;
         let work = reply.token_backfill.take();
         store.apply_sync(config, reply)?;
         if let Some(worker) = backfill {
             worker.accept(work);
         }
         if matches!(scope, SyncScope::Runner) {
+            self.stage_attention
+                .store(supports_stage_attention, Ordering::Relaxed);
             self.legacy_token_server.store(legacy, Ordering::Relaxed);
         }
         Ok((uploads, drain_acknowledged))

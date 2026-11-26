@@ -133,19 +133,14 @@ pub fn apply(
     {
         return Ok(false);
     }
-    if let WorkAction::AskAttention {
-        after_report_id: Some(report),
-        proposal,
-        ..
-    } = &operation.action
+    if let WorkAction::AskStageAttention { report_id, .. } = &operation.action
         && (!owns_root
-            || proposal.is_some()
             || !db.query_row(
                 "SELECT EXISTS(SELECT 1 FROM issue_reports report
                  JOIN runner_operations op ON op.id = report.id
                  JOIN task_runs run ON run.id = json_extract(op.operation, '$.run_id')
                  WHERE report.id = ?1 AND report.issue_id = ?2 AND run.task_id = ?3)",
-                params![report, source_issue, source_task],
+                params![report_id, source_issue, source_task],
                 |row| row.get::<_, bool>(0),
             )?)
     {
@@ -396,8 +391,8 @@ pub fn apply(
         WorkAction::AskAttention {
             request,
             proposal: None,
-            after_report_id,
-        } => {
+        }
+        | WorkAction::AskStageAttention { request, .. } => {
             super::attention::register(
                 db,
                 &operation.operation_id,
@@ -407,11 +402,19 @@ pub fn apply(
                 parent_issue.as_deref(),
                 request,
             )?;
-            if let Some(report) = after_report_id {
+            if let WorkAction::AskStageAttention { report_id, .. } = &operation.action {
                 db.execute(
                     "INSERT INTO attention_report_dependencies (attention_id, report_id) VALUES (?1, ?2)",
-                    params![operation.operation_id, report],
+                    params![operation.operation_id, report_id],
                 )?;
+                // The report and Attention can land in two sync batches.
+                // A report already settled without a reply now has a dependent.
+                if let Some(input) = db.query_row(
+                    "SELECT seq FROM router_inputs WHERE report_id = ?1 AND outcome IS NOT NULL",
+                    [report_id], |row| row.get::<_, i64>(0),
+                ).optional()? {
+                    super::reports::publish_stage_fallback(db, input)?;
+                }
             }
         }
         WorkAction::EscalateAttention { attention_id } => {
