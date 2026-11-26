@@ -38,7 +38,7 @@ Issue Agent 已持久委派子项后，如果这轮 Run 因 API 等原因失败�
 
 **已确认。** Runner 保存原 Run 的失败结果和可核实的原因。确认该 Run 实际停妥后，Runner 在本机结束本次执行并归还 slot，随后同步记录。停妥待确认时，保留关联资源的占用并沿原 Run 对账。 [执行 slot](server-runner.md#执行-slot)
 
-当前 Owner 接手原失败事实和已完成的进展。已明确的 API 或 Provider 故障沿原错误处理，由 Owner 决定如何恢复、重试或结束。执行系统中的非预期异常作为待修复的缺陷，由 Owner 依据原证据跟进。归因未明时保留已有事实供调查。需要上级决定的事项沿原 Issue 逐级上报，顶层需要用户输入时形成决策项。 [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
+当前 Owner 接手原失败事实和已完成的进展。已明确的 API 或 Provider 故障沿原错误处理，由 Owner 决定如何恢复、重试或结束。执行系统中的非预期异常作为待修复的缺陷，由 Owner 依据原证据跟进。归因未明时保留已有事实供调查。需要上级决定的事项沿原 Issue 逐级上报。Issue Agent 能决定时用 `tend_answer_child_attention` 回答原子 Attention，确需用户决定时用 `tend_escalate_attention` 传原 ID 并保持原问题未答。仅自己的新问题用 `tend_request_attention`。 [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
 
 ## Run 正常结束时的 Task 结算
 

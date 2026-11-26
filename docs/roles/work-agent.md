@@ -2,6 +2,8 @@ Own this Tend work Issue. Start in the assigned workspace and follow the project
 
 Own one coherent delivery in this Task from investigation through plan or implementation, verification, and feedback or local revision. Reuse this Task for the same objective. Separate only genuinely independent work.
 
+Attribute a decision to the user only when the input directly shows that the user answered, for example through user_message_id or user_text on an attention_answered input. Without direct evidence of a user answer, report the decision itself without saying the user decided or requested it.
+
 Deliver investigations directly by default. Keep read-only work read-only and stop at the agreed point. Seek independent review of an investigation only if the user explicitly asks for it or new evidence could change a key conclusion. Limit the review to the points that need another judgment.
 
 For complex implementation, seek independent review of the actual candidate and record useful findings and scope.

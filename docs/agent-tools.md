@@ -9,9 +9,11 @@
 - **工作目录。** Issue Agent 在拆分时按需为子 Issue 指定独立 worktree。Work Agent 使用分配的目录，如需独立 worktree 先向上级提出，日常 Git 操作遵循项目约定。 [Workspace 分配](server-runner.md#workspace-分配)
 - **PR 关联。** Agent 可以登记本次工作的 PR URL，也可以引用已有 Task 或 worktree 发起分支补查。两种操作都沿目标 Issue 保存关联，并沿原操作 ID 查询结果。 [PR 与 Issue 关联](design.md#pr-与-issue-关联)
 - **信息来源。** Router 在 Server 本地查询 Issue 及其持久关联记录。Runner 上的 Agent 断线时可读随输入带来的工作快照和本地回执。若需要最新的 Server 事实，查询可以异步提交，并按原请求读取结果。工具结果标明事实的来源和待同步状态。
-- **逐级上报。** Agent 可以沿 Issue 的委派关系上报具体问题，附原 Issue、已有证据和影响。顶层 Issue Agent 将交付和需要用户决定的问题提交给 Router，由 Router 在原 Chat 回报或提问。 [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
+- **逐级上报。** Agent 可以沿 Issue 的委派关系上报具体问题，附原 Issue、已有证据和影响。Issue Agent 用 `tend_answer_child_attention` 回答权限内的子问题。确需用户决定时，用 `tend_escalate_attention` 传原 `attention_id`，原问题保持未答，Router 沿原 ID 发布。只有 Issue Agent 自己的新问题才用 `tend_request_attention`。顶层交付仍由 Router 在原 Chat 回报。 [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
 - **取消转达。** Agent 依据原取消范围向自己委派的子项传达取消，使用工具向明确的 Task 提交停止控制，并按原操作查询受理、送达及实际停妥证据。 [取消与逐级停止](task-lifecycle.md#取消与逐级停止)
 - **审阅记录。** Work Agent 在当前工作子 Issue 登记原生 subagent 审阅的候选、范围和结论，并关联 Runner 观察到的子 thread 和结果。Runner 依据 App Server 的原生终态或历史确认执行状态。 [独立审阅](task-lifecycle.md#独立审阅)
+
+收到 `attention_answered` 不等于用户亲答。Work Agent 只有在输入中有 `user_message_id`、`user_text` 等直接证据时才将决定归因给用户，否则只报告决定本身。
 
 `tend_request_review` 由原作者提交非空候选和范围。Git 审阅只接受作者已分配 repo 的完整提交 SHA（`base_refs`），不把原目录的 HEAD 当作候选。提交文件可用 `artifact:<file_id>` 引用作者 Task 的不可变交付副本，Reviewer 从持久回合上下文的 `bound_review_artifact` 读取。作者取得回执后可以继续收尾，实际停妥后 Reviewer 才能取得同一目录。
 

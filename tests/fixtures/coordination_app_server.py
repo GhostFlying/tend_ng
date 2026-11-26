@@ -157,9 +157,17 @@ if "tend_delegate_work" in tools:
     assert "Deliver one readable main report" in instructions
     assert "When implementation is directly authorized, carry it through within scope" in instructions
     assert "A report or attachment receipt is not Issue completion." in instructions
+    assert "use tend_answer_child_attention with its original attention_id and your decision" in instructions
+    assert "use tend_escalate_attention with the original attention_id" in instructions
+    assert "Leave the original question unanswered" in instructions
+    assert "Do not answer for the user or replace the child question with a new one." in instructions
+    assert "Use tend_request_attention only for a new question of your own." in instructions
 elif worker:
     assert "Deliver investigations directly by default." in instructions
     assert "only if the user explicitly asks for it or new evidence could change a key conclusion" in instructions
+    assert "Attribute a decision to the user only when the input directly shows that the user answered" in instructions
+    assert "user_message_id or user_text on an attention_answered input" in instructions
+    assert "report the decision itself without saying the user decided or requested it" in instructions
 respond(start, {"thread": {"id": thread_id}})
 turn = request("turn/start")
 items = turn["params"]["input"]
@@ -363,6 +371,7 @@ elif role == "decision":
     assert decision["attention_id"] == original["receipt"]["operation_id"]
     assert decision["answer"] == "精简版"
     assert ("user_message_id" in decision) == (scenario == "attention")
+    assert ("user_text" in decision) == (scenario == "attention")
     (Path("repos/example") / "guide.txt").write_text("Compact guide selected.\n")
     (root / "decision.json").write_text(json.dumps(decision))
     tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")

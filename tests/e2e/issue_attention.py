@@ -153,6 +153,18 @@ def main():
                 assert initial["run"]["phase"]["waiting_for_attention"]
                 assert initial["task_id"] == task
                 facts = {id: chat_fact(id) for id in (first, second)}
+                assert {
+                    attention_id: (published, answer_input_id, answer)
+                    for attention_id, published, answer_input_id, answer in sql(
+                        "server",
+                        "SELECT a.id, q.id, a.answer_input_id, a.answer FROM attentions a "
+                        "LEFT JOIN chat_messages q ON q.seq = a.question_seq"
+                    )
+                } == {
+                    first: (facts[first]["question_message_id"], None, None),
+                    second: (facts[second]["question_message_id"], None, None),
+                    internal: (None, None, None),
+                }
                 for scope in (prefix, f"/api/v1/issues/{child}"):
                     overview = get(f"{scope}/overview")
                     assert {d["reply"]["attention_id"]: d["message_id"] for d in overview["decisions"]} == {

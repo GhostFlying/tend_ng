@@ -181,6 +181,9 @@ for line in sys.stdin:
             pass
         case "thread/start":
             instructions = params["developerInstructions"]
+            assert "Preserve the user's original goal, named targets, explicit limits, and stopping point" in instructions
+            assert "Do not add operational restrictions the user did not specify." in instructions
+            assert "the actual effect would materially expand the user's goal or authorization" in instructions
             assert "Keep read-only investigations and recommendations pending confirmation read-only." in instructions
             assert "not a fresh user request or authorization to implement" in instructions
             assert "publish the report with its files and the related Attention" in instructions
