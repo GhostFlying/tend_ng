@@ -397,7 +397,27 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         )?;
         let input = serde_json::to_string(&run.assignment)?;
         let context = store.coordination_context(run, reused, artifact.as_deref())?;
-        app.run_turn(
+        let collector = app.work_rollout(&thread_id).and_then(|path| {
+            match crate::usage::Collector::new(path, &thread_id, reused) {
+                Ok(collector) => collector,
+                Err(error) => {
+                    eprintln!("Open native usage evidence for Run {}: {error}", run.id);
+                    None
+                }
+            }
+        });
+        let mut handler = Handler {
+            store,
+            run,
+            cwd: &cwd,
+            artifacts: &runtime.artifacts.root,
+            proposal_approval: &runtime.proposal_approval,
+            branches: &branches,
+            config,
+            collector,
+            usage_turn: None,
+        };
+        let result = app.run_turn(
             TurnInput {
                 thread_id: &thread_id,
                 client_id: &run.id,
@@ -406,16 +426,10 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 effort: agent.reasoning_effort.as_deref(),
                 discussion_scope: None,
             },
-            &mut Handler {
-                store,
-                run,
-                cwd: &cwd,
-                artifacts: &runtime.artifacts.root,
-                proposal_approval: &runtime.proposal_approval,
-                branches: &branches,
-                config,
-            },
-        )
+            &mut handler,
+        );
+        handler.flush_usage(&thread_id);
+        result
     })();
     // A terminal notification alone does not prove the managed process has
     // exited. Leave the active record intact if stop cannot be verified.
@@ -477,11 +491,42 @@ struct Handler<'a> {
     proposal_approval: &'a AtomicBool,
     branches: &'a [protocol::WorkBranch],
     config: &'a Config,
+    collector: Option<crate::usage::Collector>,
+    usage_turn: Option<String>,
+}
+
+impl Handler<'_> {
+    fn flush_usage(&mut self, thread: &str) {
+        let (Some(collector), Some(turn)) = (&mut self.collector, &self.usage_turn) else {
+            return;
+        };
+        let result = (|| -> Result<()> {
+            for (id, last) in collector.matched(thread, turn)? {
+                self.store
+                    .persist_token_usage(&self.run.id, thread, turn, &id, last)?;
+            }
+            Ok(())
+        })();
+        // This is observational and cannot abort the work turn.
+        if let Err(error) = result {
+            eprintln!("Persist token usage for Run {}: {error:#}", self.run.id);
+        }
+    }
 }
 
 impl TurnHandler for Handler<'_> {
     fn started(&mut self, turn_id: &str) -> Result<()> {
-        self.store.mark_started(self.run, turn_id, self.branches)
+        self.store.mark_started(self.run, turn_id, self.branches)?;
+        self.usage_turn = Some(turn_id.to_owned());
+        Ok(())
+    }
+
+    fn usage(&mut self, thread: &str, _turn: &str, usage: &serde_json::Value) -> Result<()> {
+        if let Some(collector) = &mut self.collector {
+            collector.notice(usage);
+            self.flush_usage(thread);
+        }
+        Ok(())
     }
 
     fn checks_controls(&self) -> bool {
@@ -516,23 +561,33 @@ impl TurnHandler for Handler<'_> {
 
     fn controls(&mut self, client: &mut Client, thread: &str, turn: &str) -> Result<()> {
         let assignment = &self.run.assignment.placement.assignment_id;
-        let Some(control) = self.store.next_control(assignment, &self.run.id)? else {
-            return Ok(());
-        };
-        self.store.sending_control(&control.id)?;
-        match &control.action {
-            ControlAction::Stop => {
-                let _ = client.interrupt(thread, turn);
-                bail!("Task cancelled by stop control {}", control.id);
+        if let Some(control) = self.store.next_control(assignment, &self.run.id)? {
+            self.store.sending_control(&control.id)?;
+            match &control.action {
+                ControlAction::Stop => {
+                    let _ = client.interrupt(thread, turn);
+                    bail!("Task cancelled by stop control {}", control.id);
+                }
+                ControlAction::Steer { text } => {
+                    if let Ok(delivered) = client.steer(thread, turn, &control.id, text) {
+                        let state = if delivered {
+                            ControlState::Delivered
+                        } else {
+                            ControlState::Undelivered
+                        };
+                        self.store.finish_control(&control, state)?;
+                    }
+                }
             }
-            ControlAction::Steer { text } => {
-                let state = match client.steer(thread, turn, &control.id, text) {
-                    Ok(true) => ControlState::Delivered,
-                    Ok(false) => ControlState::Undelivered,
-                    Err(_) => return Ok(()),
-                };
-                self.store.finish_control(&control, state)?;
-            }
+        }
+        // Rollout writes can trail their App Server notice. Recheck only
+        // pending observations at the existing active-turn control cadence.
+        if self
+            .collector
+            .as_ref()
+            .is_some_and(crate::usage::Collector::has_unmatched)
+        {
+            self.flush_usage(thread);
         }
         Ok(())
     }

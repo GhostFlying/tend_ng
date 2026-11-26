@@ -618,6 +618,19 @@ fn handle(
     }
     if let Some(issue_id) = path
         .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/token-usage"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok(match store.issue_token_usage(issue_id)? {
+            Some(usage) => (200, serde_json::to_value(usage)?),
+            None => api_error(404, "Issue not found"),
+        });
+    }
+    if let Some(issue_id) = path
+        .strip_prefix("/api/v1/issues/")
         .and_then(|path| path.strip_suffix("/overview"))
         .filter(|id| protocol::valid_id(id))
     {

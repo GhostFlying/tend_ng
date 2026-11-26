@@ -791,3 +791,161 @@ p.issue-objective {
 .proposal-other-reports > article:first-of-type {
   margin-top: 7px;
 }
+
+.token-section > summary {
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 650;
+  width: fit-content;
+}
+
+.token-section > summary small {
+  margin-inline-start: 10px;
+  font-weight: 400;
+}
+
+.token-pane {
+  margin-top: 12px;
+  min-width: 0;
+  padding: clamp(12px, 3vw, 20px);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--sidebar);
+}
+
+.token-controls,
+.token-scope,
+.token-coverage > p {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 10px;
+  align-items: center;
+}
+
+.token-controls {
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.token-scope {
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid var(--border);
+  border-radius: 9px;
+}
+
+.token-scope button,
+.token-action {
+  color: var(--label);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  cursor: pointer;
+  padding: 6px 9px;
+  font-size: 13px;
+}
+
+.token-action,
+.token-scope button[aria-pressed="true"] {
+  border-color: var(--border);
+}
+
+.token-scope button[aria-pressed="true"] {
+  font-weight: 700;
+  background: var(--bg);
+}
+
+.token-state-heading,
+.token-issue-rows h4 {
+  margin: 0;
+  font-size: 14px;
+}
+
+.token-total {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-total > bdi {
+  font-size: clamp(25px, 5.8vw, 40px);
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.token-total > span {
+  color: var(--muted);
+  font-size: 14px;
+}
+
+.token-source,
+.token-coverage p,
+.token-metric-note,
+.token-issue-rows p {
+  margin: 4px 0;
+}
+
+.token-coverage {
+  margin-block: 12px;
+  padding: 8px 10px;
+  border-inline-start: 2px solid var(--border);
+  font-size: 13px;
+}
+
+.token-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100px, 100%), 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.token-metrics > div {
+  min-width: 0;
+  padding: 7px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+}
+
+.token-metrics dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.token-metrics dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.token-issue-rows {
+  border-top: 1px solid var(--border);
+  margin-top: 15px;
+  padding-top: 12px;
+}
+
+.token-issue-rows ul {
+  list-style: none;
+  margin: 8px 0;
+  padding: 0;
+}
+
+.token-issue-rows li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(74px, auto);
+  gap: 4px 10px;
+  border-top: 1px solid var(--border);
+  padding-block: 8px;
+  font-size: 13px;
+}
+
+.token-issue-rows small {
+  display: block;
+  font-size: 12px;
+}
+
+.token-issue-value {
+  text-align: end;
+  max-width: 14ch;
+  font-variant-numeric: tabular-nums;
+}

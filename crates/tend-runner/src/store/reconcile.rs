@@ -10,7 +10,10 @@ impl Store {
              WHERE execution_state IN ('queued', 'active', 'waiting', 'waiting_external') OR acknowledged = 0
              UNION
              SELECT a.task_id FROM run_outbox r
-             JOIN received_assignments a ON a.id = r.assignment_id WHERE r.acknowledged = 0",
+             JOIN received_assignments a ON a.id = r.assignment_id WHERE r.acknowledged = 0
+             UNION
+             SELECT a.task_id FROM local_token_usage u
+             JOIN received_assignments a ON a.id = u.assignment_id WHERE u.acknowledged = 0",
         )?;
         Ok(statement
             .query_map([], |row| row.get(0))?

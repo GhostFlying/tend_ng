@@ -31,6 +31,7 @@ pub struct Client {
     events: Receiver<Result<Value>>,
     notifications: VecDeque<Value>,
     request_id: u64,
+    work_rollout: Option<(String, PathBuf)>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -112,6 +113,9 @@ pub trait TurnHandler {
         Ok(())
     }
     fn native_item(&mut self, _thread: &str, _turn: &str, _item: &Value) -> Result<()> {
+        Ok(())
+    }
+    fn usage(&mut self, _thread: &str, _turn: &str, _usage: &Value) -> Result<()> {
         Ok(())
     }
     fn observed_user_message(&mut self, _client_id: &str) -> Result<()> {
@@ -198,6 +202,7 @@ impl Client {
             events,
             notifications: VecDeque::new(),
             request_id: 0,
+            work_rollout: None,
         };
         client.call(
             "initialize",
@@ -225,10 +230,26 @@ impl Client {
                 "developerInstructions": instructions, "dynamicTools": tools, "model": model
             }),
         )?;
-        Ok(response["thread"]["id"]
+        let id = response["thread"]["id"]
             .as_str()
             .context("thread/start missing thread ID")?
-            .to_owned())
+            .to_owned();
+        self.remember_work_rollout(&response["thread"], &id);
+        Ok(id)
+    }
+
+    fn remember_work_rollout(&mut self, thread: &Value, id: &str) {
+        self.work_rollout = thread["path"]
+            .as_str()
+            .map(PathBuf::from)
+            .map(|path| (id.to_owned(), path));
+    }
+
+    pub fn work_rollout(&self, thread: &str) -> Option<&Path> {
+        self.work_rollout
+            .as_ref()
+            .filter(|(id, _)| id == thread)
+            .map(|(_, path)| path.as_path())
     }
 
     pub fn check_discussion_config(&mut self) -> Result<()> {
@@ -345,6 +366,7 @@ impl Client {
                     .is_none_or(|model| model == expected)
             })
         {
+            self.remember_work_rollout(&response["thread"], thread_id);
             Ok(WorkThreadResume::Ready)
         } else if confirmed_unavailable_only {
             anyhow::bail!("App Server did not confirm the original thread is ready to resume");
@@ -456,12 +478,25 @@ impl Client {
         let mut messages = Vec::new();
         let mut next_control = Instant::now();
         let mut history_due = Instant::now() + Duration::from_secs(10);
+        let mut history_terminal = None;
         loop {
             if let Some(turn) = &turn_id
+                && history_terminal.is_none()
                 && handler.checks_controls()
                 && Instant::now() >= next_control
             {
-                handler.controls(self, thread_id, turn)?;
+                if let Err(error) = handler.controls(self, thread_id, turn) {
+                    // A synchronous control RPC may have already received
+                    // usage before its reply. Preserve those observations
+                    // without waiting for more frames or dispatching tools
+                    // after a control has ended the turn.
+                    for event in self.notifications.drain(..) {
+                        if let Some(usage) = live_usage(&event, thread_id, turn) {
+                            let _ = handler.usage(thread_id, turn, usage);
+                        }
+                    }
+                    return Err(error);
+                }
                 next_control = Instant::now() + Duration::from_millis(250);
             }
             let wait = if turn_id.is_some() {
@@ -477,6 +512,11 @@ impl Client {
                 !wait.is_zero(),
                 "App Server turn/start could not be confirmed"
             );
+            if self.notifications.is_empty()
+                && let Some(turn) = history_terminal.take()
+            {
+                return Ok(turn);
+            }
             let event = match self.notifications.pop_front() {
                 Some(event) => event,
                 None => match self.events.recv_timeout(wait) {
@@ -490,7 +530,9 @@ impl Client {
                             self.find_turn(thread_id, turn_id.as_deref(), client_id)
                             && turn.status != TurnStatus::InProgress
                         {
-                            return Ok(turn);
+                            // The synchronous history RPC can have queued usage
+                            // and other events while waiting for its response.
+                            history_terminal = Some(turn);
                         }
                         continue;
                     }
@@ -563,7 +605,10 @@ impl Client {
                 continue;
             }
             let Some(turn_id) = &turn_id else {
-                if matches!(method, Some("item/completed" | "turn/completed")) {
+                if matches!(
+                    method,
+                    Some("item/completed" | "turn/completed" | "thread/tokenUsage/updated")
+                ) {
                     before_start.push_back(event);
                 }
                 continue;
@@ -580,6 +625,9 @@ impl Client {
                 && params["item"]["type"] == "collabAgentToolCall"
             {
                 handler.native_item(thread_id, turn_id, &params["item"])?;
+            }
+            if let Some(usage) = live_usage(&event, thread_id, turn_id) {
+                handler.usage(thread_id, turn_id, usage)?;
             }
             match method {
                 Some("item/completed")
@@ -624,7 +672,13 @@ impl Client {
                 .recv_timeout(wait)
                 .with_context(|| format!("waiting for App Server {method} response"))??;
             match event["method"].as_str() {
-                Some("item/started" | "item/completed" | "turn/completed" | "item/tool/call") => {
+                Some(
+                    "item/started"
+                    | "item/completed"
+                    | "turn/completed"
+                    | "item/tool/call"
+                    | "thread/tokenUsage/updated",
+                ) => {
                     self.notifications.push_back(event);
                 }
                 Some(_) => {
@@ -652,6 +706,15 @@ impl Client {
         stdin.flush()?;
         Ok(())
     }
+}
+
+fn live_usage<'a>(event: &'a Value, thread: &str, turn: &str) -> Option<&'a Value> {
+    let params = &event["params"];
+    (event["method"] == "thread/tokenUsage/updated"
+        && event.get("id").is_none()
+        && params["threadId"] == thread
+        && params["turnId"] == turn)
+        .then(|| &params["tokenUsage"])
 }
 
 fn verify_discussion_permissions(response: &Value, roots: &BTreeSet<PathBuf>) -> Result<()> {

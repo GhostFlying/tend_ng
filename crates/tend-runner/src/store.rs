@@ -4,6 +4,7 @@ mod handoff;
 mod reclaim;
 mod reconcile;
 pub mod run;
+mod token_usage;
 
 use crate::config::Config;
 use anyhow::{Result, ensure};
@@ -43,6 +44,7 @@ impl Store {
              );",
         )?;
         run::create_tables(&tx)?;
+        token_usage::create_tables(&tx)?;
         tx.execute_batch(
             "CREATE INDEX IF NOT EXISTS records_by_assignment ON run_outbox(assignment_id);",
         )?;
@@ -106,7 +108,9 @@ impl Store {
         } else {
             None
         };
-        if reply.assignments.is_empty()
+
+        if reply.confirmed_token_usage.is_empty()
+            && reply.assignments.is_empty()
             && reply.confirmed_receipts.is_empty()
             && reply.confirmed_runs.is_empty()
             && reply.confirmed_operations.is_empty()
@@ -156,6 +160,12 @@ impl Store {
             tx.execute(
                 "UPDATE run_outbox SET acknowledged = 1 WHERE id = ?1",
                 [event],
+            )?;
+        }
+        for id in reply.confirmed_token_usage {
+            tx.execute(
+                "UPDATE local_token_usage SET acknowledged = 1 WHERE id = ?1 AND acknowledged = 0",
+                [id],
             )?;
         }
         for assignment in reply.assignments {

@@ -63,6 +63,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
                 receipts: vec![],
                 runs: vec![],
                 records: vec![],
+                token_usage: vec![],
             },
             None,
         )?
@@ -170,6 +171,7 @@ fn equal_load_rotates_across_reopen_and_ignores_pinned_assignments() -> Result<(
     announce(&mut store, runner("a", 6, 6), 2)?;
     announce(&mut store, runner("b", 6, 6), 2)?;
     // Reconstruct a v34 fixture with intact runner registrations.
+    crate::store::remove_token_usage_schema(&store.db)?;
     crate::store::pull::restore_legacy_schema(&store.db)?;
     store.db.execute_batch(
         "DROP TABLE runner_auto_assignment_order;

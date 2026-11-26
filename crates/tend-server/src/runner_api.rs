@@ -91,6 +91,7 @@ fn handle(
         || sync.receipts.len() > RUNNER_SYNC_BATCH
         || sync.runs.len() > RUNNER_SYNC_BATCH
         || sync.records.len() > RUNNER_SYNC_BATCH
+        || sync.token_usage.len() > RUNNER_SYNC_BATCH
         || sync.reclaim_receipts.len() > RUNNER_SYNC_BATCH
     {
         return Ok(api_error(400, "invalid Runner profile or receipt batch"));

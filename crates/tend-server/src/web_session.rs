@@ -347,7 +347,14 @@ fn web_route(method: &Method, url: &str) -> bool {
             valid(id) && valid(attention)
         }
         (Method::Get, ["issues", id])
-        | (Method::Get, ["issues", id, "messages" | "overview" | "attention-replies"])
+        | (
+            Method::Get,
+            [
+                "issues",
+                id,
+                "messages" | "overview" | "attention-replies" | "token-usage",
+            ],
+        )
         | (Method::Post, ["issues", id, "messages" | "start" | "state"]) => issue(id),
         (Method::Post, ["issues", id, "attentions", attention, "answer"]) => {
             issue(id) && valid(attention)

@@ -35,13 +35,14 @@ impl Store {
         )?)
     }
 
-    pub fn drain_finished(&self) -> Result<bool> {
+    pub fn drain_finished(&self, expect_token_usage_ack: bool) -> Result<bool> {
         Ok(self.0.query_row(
             "SELECT EXISTS(SELECT 1 FROM local_drain)
                AND NOT EXISTS(SELECT 1 FROM received_assignments WHERE execution_state NOT IN ('handed_off','rejected') OR acknowledged = 0)
                AND NOT EXISTS(SELECT 1 FROM run_outbox WHERE acknowledged = 0)
+               AND (NOT ?1 OR NOT EXISTS(SELECT 1 FROM local_token_usage WHERE acknowledged = 0))
                AND NOT EXISTS(SELECT 1 FROM local_workspace_reclaims WHERE acknowledged = 0)",
-            [], |row| row.get(0),
+            [expect_token_usage_ack], |row| row.get(0),
         )?)
     }
 

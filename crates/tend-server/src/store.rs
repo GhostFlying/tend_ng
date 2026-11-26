@@ -21,8 +21,22 @@ mod runner;
 mod short_numbers;
 mod tend_review;
 mod timing;
+mod token_usage;
 pub(crate) mod web_sessions;
 mod work;
+
+#[cfg(test)]
+pub(crate) fn remove_token_usage_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "DROP TRIGGER token_issue_tree_insert;
+         DROP TABLE token_usage_pending;
+         DROP TABLE token_requests;
+         DROP TABLE token_runs;
+         DROP TABLE token_issue_rollups;
+         DROP TABLE token_issue_tree;",
+    )?;
+    Ok(())
+}
 
 use anyhow::{Context, Result, ensure};
 use codex_app::{Answer, ProcessIdentity};
@@ -32,7 +46,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 37;
+pub(crate) const SCHEMA_VERSION: i64 = 38;
 
 pub struct Store {
     db: Connection,
@@ -249,6 +263,9 @@ impl Store {
         }
         if version < 37 {
             pull::migrate_providers(&tx)?;
+        }
+        if version < 38 {
+            token_usage::migrate(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

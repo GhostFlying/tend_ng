@@ -183,6 +183,8 @@ pub struct RunnerSync {
     pub runs: Vec<RunObservation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub records: Vec<RunnerRecord>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub token_usage: Vec<crate::RunTokenUsage>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -203,6 +205,10 @@ pub struct RunnerSyncReply {
     pub confirmed_runs: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub confirmed_operations: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub confirmed_token_usage: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub token_usage_supported: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub inputs: Vec<IssueDelivery>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

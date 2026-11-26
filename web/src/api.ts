@@ -416,6 +416,43 @@ export async function readIssueOverview(issue: string, signal: AbortSignal) {
   return (await request(path, { signal })).json() as Promise<IssueOverviewData>;
 }
 
+export type TokenField = {
+  tokens: string | null;
+  reported_requests: number;
+};
+
+export type TokenBreakdown = {
+  started_runs: number;
+  observed_runs: number;
+  unobserved_before_collection: number;
+  unobserved_no_usage: number;
+  reported_requests: number;
+  total_tokens: TokenField;
+  input_tokens: TokenField;
+  cached_input_tokens: TokenField;
+  cache_write_input_tokens: TokenField;
+  output_tokens: TokenField;
+  reasoning_output_tokens: TokenField;
+};
+
+export type IssueTokenUsageData = {
+  direct: TokenBreakdown;
+  subtree: TokenBreakdown;
+  nodes: {
+    issue_id: string;
+    number: number;
+    title: string;
+    direct: TokenBreakdown;
+  }[];
+};
+
+export async function readIssueTokenUsage(issue: string, signal: AbortSignal) {
+  const path = `/api/v1/issues/${encodeURIComponent(issue)}/token-usage`;
+  return (
+    await request(path, { signal })
+  ).json() as Promise<IssueTokenUsageData>;
+}
+
 export async function readIssueAttentionHistory(
   issue: string,
   before: number,

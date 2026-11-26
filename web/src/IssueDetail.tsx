@@ -19,6 +19,7 @@ import type {
 } from "./api";
 import { Chat } from "./Chat";
 import { IssueAttention } from "./IssueAttention";
+import { IssueTokenUsage } from "./IssueTokenUsage";
 import { Markdown } from "./Markdown";
 import { DecisionTime, ProposalApproval } from "./ProposalApproval";
 
@@ -439,6 +440,7 @@ function IssueSummary({
         historyBefore={data.decision_history_before}
         onRefresh={onRefresh}
       />
+      <IssueTokenUsage key={data.id} issue={data.id} />
     </>
   );
 }

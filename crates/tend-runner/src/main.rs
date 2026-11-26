@@ -5,6 +5,7 @@ mod inspect;
 mod reconcile;
 mod store;
 mod tools;
+mod usage;
 mod workspace;
 
 use anyhow::{Context, Result, bail, ensure};
@@ -151,6 +152,7 @@ fn main() -> Result<()> {
     let auth = format!("Bearer {token}");
     let server = Arc::new(Server {
         proposal_approval: Arc::new(AtomicBool::new(false)),
+        legacy_token_server: AtomicBool::new(false),
         base: base.trim_end_matches('/').to_owned(),
         auth: auth.clone(),
         http: ureq::AgentBuilder::new()
@@ -171,10 +173,16 @@ fn main() -> Result<()> {
         return transfer.upload(sync(&config, &mut store, &server)?.0);
     }
     if let Some(task) = task {
-        let path = protocol::reconcile_path(&config.runner_id, &task);
-        reconcile::task(&config, &mut store, &server, &task, &path)?;
+        reconcile::task(&config, &mut store, &server, &task)?;
         loop {
-            let (files, _) = server.exchange(&config, &mut store, &path, Vec::new(), Vec::new())?;
+            let (files, _) = server.exchange(
+                &config,
+                &mut store,
+                SyncScope::Task(&task),
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+            )?;
             if files.is_empty() {
                 return Ok(());
             }
@@ -216,13 +224,11 @@ fn main() -> Result<()> {
 
     let mut reconnecting = true;
     loop {
-        let was_drained = store.drain_finished()?;
         match sync(&config, &mut store, &server) {
             Ok((files, drain_acknowledged)) => {
                 if drain_acknowledged
                     && files.is_empty()
-                    && was_drained
-                    && store.drain_finished()?
+                    && store.drain_finished(!server.legacy_token_server.load(Ordering::Relaxed))?
                 {
                     eprintln!("Runner {} drained and acknowledged", config.runner_id);
                     return Ok(());
@@ -260,17 +266,25 @@ fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<(Vec<Stri
     server.exchange(
         config,
         store,
-        &protocol::runner_sync_path(&config.runner_id),
+        SyncScope::Runner,
         store.receipts()?,
         store.records()?,
+        store.token_usage()?,
     )
 }
 
 struct Server {
     proposal_approval: Arc<AtomicBool>,
+    legacy_token_server: AtomicBool,
     base: String,
     auth: String,
     http: ureq::Agent,
+}
+
+#[derive(Clone, Copy)]
+enum SyncScope<'a> {
+    Runner,
+    Task(&'a str),
 }
 
 impl Server {
@@ -278,9 +292,10 @@ impl Server {
         &self,
         config: &Config,
         store: &mut Store,
-        path: &str,
+        scope: SyncScope<'_>,
         receipts: Vec<ClaimReceipt>,
         records: Vec<RunnerRecord>,
+        token_usage: Vec<protocol::RunTokenUsage>,
     ) -> Result<(Vec<String>, bool)> {
         let running = store.running_slots()?;
         let mut profile = config.profile(store.unfinished()?);
@@ -293,13 +308,19 @@ impl Server {
         let request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
             repair_host_artifacts: true,
-            drained: store.drain_finished()?,
+            drained: matches!(scope, SyncScope::Runner)
+                && store.drain_finished(!self.legacy_token_server.load(Ordering::Relaxed))?,
             drain_active_slots: store.drain_active_slots()?,
             reclaim_receipts: store.reclaim_receipts()?,
             profile,
             receipts,
             runs: Vec::new(),
             records,
+            token_usage,
+        };
+        let path = match scope {
+            SyncScope::Runner => protocol::runner_sync_path(&config.runner_id),
+            SyncScope::Task(id) => protocol::reconcile_path(&config.runner_id, id),
         };
         let mut reply: protocol::RunnerSyncReply = self
             .http
@@ -310,14 +331,21 @@ impl Server {
             .into_json()?;
         self.proposal_approval
             .store(reply.proposal_approval, Ordering::Relaxed);
+        let drain_acknowledged = request.drained
+            && reply
+                .drain_acknowledged
+                .unwrap_or(!reply.token_usage_supported);
         let uploads = std::mem::take(&mut reply.uploads);
-        let drain_acknowledged = reply.drain_acknowledged.unwrap_or(true);
         // Full reconciliation has its own connection and can finish after a
         // newer heartbeat. Only the ordered incremental stream installs a cap.
-        if path != protocol::runner_sync_path(&config.runner_id) {
+        if !matches!(scope, SyncScope::Runner) {
             reply.execution_slot_limit = None;
         }
+        let legacy = !reply.token_usage_supported;
         store.apply_sync(config, reply)?;
+        if matches!(scope, SyncScope::Runner) {
+            self.legacy_token_server.store(legacy, Ordering::Relaxed);
+        }
         Ok((uploads, drain_acknowledged))
     }
 }

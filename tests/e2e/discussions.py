@@ -275,6 +275,9 @@ def main():
         sql(db, "CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id)")
         sql(db, "UPDATE discussions SET title='新讨论' WHERE chat_id=?", unnamed)
         sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
+        sql(db, "DROP TRIGGER token_issue_tree_insert")
+        for table in ("token_usage_pending", "token_requests", "token_runs", "token_issue_rollups", "token_issue_tree"):
+            sql(db, f"DROP TABLE {table}")
         sql(db, "DROP INDEX pulls_due")
         sql(db, "ALTER TABLE pulls DROP COLUMN provider")
         sql(db, "ALTER TABLE pulls RENAME TO github_pulls")

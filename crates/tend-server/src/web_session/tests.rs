@@ -59,6 +59,7 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (Method::Get, "/api/v1/runners"),
         (Method::Get, "/api/v1/issues/%2342/messages?before=10"),
         (Method::Get, "/api/v1/issues/42/attention-replies?before=10"),
+        (Method::Get, "/api/v1/issues/42/token-usage"),
         (Method::Post, "/api/v1/issues/42/attentions/question/answer"),
         (Method::Post, "/api/v1/issues/42/start"),
         (Method::Post, "/api/v1/issues/42/state"),
@@ -135,6 +136,7 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     drop(Store::initialize(&path)?);
     let sql = Connection::open(&path)?;
     // Roll back later schemas without recreating the v29 reply table.
+    crate::store::remove_token_usage_schema(&sql)?;
     crate::store::pull::restore_legacy_schema(&sql)?;
     sql.execute_batch(
         "DROP TABLE discussion_handoffs;

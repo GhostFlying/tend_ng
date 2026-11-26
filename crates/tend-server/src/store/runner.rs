@@ -382,6 +382,7 @@ impl Store {
                 && request.receipts.is_empty()
                 && request.runs.is_empty()
                 && request.records.is_empty()
+                && request.token_usage.is_empty()
                 && self.has_repairable_artifacts(task, &request.profile.runner_id)?);
         }
         let records = request.records.iter().map(|record| match record {
@@ -396,7 +397,11 @@ impl Store {
             .map(|r| &r.assignment_id)
             .chain(request.runs.iter().map(|run| &run.assignment_id))
             .chain(records)
-            .all(|id| registered.contains(id)))
+            .all(|id| registered.contains(id))
+            && request
+                .token_usage
+                .iter()
+                .all(|usage| usage.task_id == task && registered.contains(&usage.assignment_id)))
     }
 
     pub fn schedule_assignments(&mut self, after: &mut i64) -> Result<()> {
@@ -523,6 +528,7 @@ impl Store {
             && request.receipts.is_empty()
             && request.runs.is_empty()
             && request.records.is_empty()
+            && request.token_usage.is_empty()
             && !request.drained
             && request.reclaim_receipts.is_empty()
         {
@@ -550,6 +556,8 @@ impl Store {
                 confirmed_receipts: Vec::new(),
                 confirmed_runs: Vec::new(),
                 confirmed_operations: Vec::new(),
+                confirmed_token_usage: Vec::new(),
+                token_usage_supported: true,
                 inputs: coordination::pending_inputs(
                     &self.db,
                     &profile.runner_id,
@@ -635,11 +643,13 @@ impl Store {
             confirmed_receipts.push(receipt.assignment_id);
         }
         let mut confirmed_runs = Vec::new();
+        let mut observations = Vec::new();
         for observation in request.runs {
             if !run::apply(&tx, &profile.runner_id, &observation)? {
                 return Ok(None);
             }
-            confirmed_runs.push(observation.event_id);
+            confirmed_runs.push(observation.event_id.clone());
+            observations.push(observation);
         }
         let mut confirmed_operations = Vec::new();
         for record in request.records {
@@ -648,7 +658,8 @@ impl Store {
                     if !run::apply(&tx, &profile.runner_id, &observation)? {
                         return Ok(None);
                     }
-                    confirmed_runs.push(observation.event_id);
+                    confirmed_runs.push(observation.event_id.clone());
+                    observations.push(observation);
                 }
                 RunnerRecord::Handoff(proof) => {
                     if !super::handoff::apply(&tx, &profile.runner_id, &proof)? {
@@ -674,6 +685,12 @@ impl Store {
                 }
             }
         }
+        let confirmed_token_usage = super::token_usage::apply_batch(
+            &tx,
+            &profile.runner_id,
+            &observations,
+            &request.token_usage,
+        )?;
 
         let mut confirmed_reclaims = Vec::new();
         for receipt in request.reclaim_receipts {
@@ -728,9 +745,15 @@ impl Store {
         if let Some(slots) = drain_slots.filter(|_| release_slots) {
             super::handoff::note_drain_slots(&tx, &profile.runner_id, slots)?;
         }
+        // Only a Runner-wide exchange can settle its retirement. If a Runner
+        // last talked to a legacy Server it may still report drain with usage.
         let drain_acknowledged = if task.is_none() && request.drained {
-            super::handoff::note_drained(&tx, &profile.runner_id)?;
-            Some(super::handoff::drain_acknowledged(&tx, &profile.runner_id)?)
+            if request.token_usage.is_empty() {
+                super::handoff::note_drained(&tx, &profile.runner_id)?;
+                Some(super::handoff::drain_acknowledged(&tx, &profile.runner_id)?)
+            } else {
+                Some(false)
+            }
         } else {
             None
         };
@@ -747,6 +770,8 @@ impl Store {
             confirmed_receipts,
             confirmed_runs,
             confirmed_operations,
+            confirmed_token_usage,
+            token_usage_supported: true,
             inputs,
             controls,
             drain_to,
@@ -862,6 +887,7 @@ mod tests {
                 .collect(),
             runs: vec![],
             records: vec![],
+            token_usage: vec![],
         };
         let kinds = |store: &Store| -> Result<Vec<IssueMessageKind>> {
             Ok(store

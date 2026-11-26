@@ -285,6 +285,7 @@ mod tests {
             {
                 let store = Store::initialize(&path)?;
                 // Restore the legacy provider schema before writing any fixtures.
+                crate::store::remove_token_usage_schema(&store.db)?;
                 restore_legacy_schema(&store.db)?;
                 store.db.pragma_update(None, "user_version", version)?;
                 if version == 34 {
