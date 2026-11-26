@@ -51,3 +51,5 @@
 - 普通 Stop 将已接受的 GitHub 批次释放到原 Task 的记录，但立即禁止该 Task 接续。等原停止证据后，关联原 Chat、尚未消费的 required 投递沿既有路径回退 Router，且后继不会重复领取。待安排则保留在任务树内，不触发 Router 回退。
 
 新增 `python3 -B tests/e2e/issue_stop_races.py <tend-server> <tend-runner>`，覆盖断线第一响应、Stop 跨页及真实 Runner 不启动和回传、原 Run 自然结束先于 ACK、普通 Stop 与待安排的 required 路由差异，以及混合 32 和 36 条暂存事实加即时输入的批次与既有能力门槛。
+
+`4deaddb515a335bfb42ae7d7e3553de1bb500b31` 的同 Task 复审确认上述四个复现通过，但在普通 Stop 后的同一 GitHub 边界发现两个 P2。修订同时覆盖计时和即时释放：已停妥或撤销的原收件关系优先于即时 flush，普通 Stop pending 期间才匹配的 required 不会被 ACK 后的新消息截走。待安排子树仍用保留规则，不回退 Router。另统一检查后继 Task 的外部输入迁移，精确 `waitfor` 不随普通续作或显式重新开工迁移；源事实、原等待和停止证据保留。复跑上述原场景，并加入迟匹配、ACK 重放、独立新消息与撤销精确等待的隔离复现。

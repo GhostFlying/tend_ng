@@ -443,13 +443,16 @@ pub(super) fn release_task_deliveries(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let historical = super::backlog::old_task(db, task)?;
-    let stopping = !force && !historical && super::control::stop_on_current(db, task, "pending")?;
-    let stopped = !force && !historical && super::control::stop_on_current(db, task, "stopped")?;
+    let parked = super::backlog::parked_task_scope(db, task)?;
+    let stopping = !parked && !historical && super::control::stop_on_current(db, task, "pending")?;
+    let stopped = !parked && !historical && super::control::stop_on_current(db, task, "stopped")?;
     for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
         deliveries
     {
         let mode = watch_mode(&mode);
-        let target = if force || stopping {
+        // A flush changes readiness, not the original recipient or its
+        // Stop disposition. Parked work deliberately keeps its facts local.
+        let target = if parked || (historical && force) {
             Some(task.to_owned())
         } else if historical {
             // A late matching fact remains auditable. It cannot readmit its
@@ -459,8 +462,10 @@ pub(super) fn release_task_deliveries(
             } else {
                 coordination::latest_task(db, &issue)?.or_else(|| Some(task.to_owned()))
             }
-        } else if stopped || state == "withdrawn" || task_state == "cancelled" {
+        } else if state == "withdrawn" || (!stopping && (stopped || task_state == "cancelled")) {
             None
+        } else if stopping || force {
+            Some(task.to_owned())
         } else if matches!(task_state.as_str(), "completed" | "failed") {
             if mode == WatchMode::Wait {
                 None
@@ -524,10 +529,7 @@ pub(super) fn release_task_deliveries(
 /// exact stop is known, only still-unconsumed required routes fall back to the
 /// original Chat, with the provider's existing route/fact deduplication key.
 pub(super) fn route_stopped_required(db: &Connection, task: &str) -> Result<()> {
-    if super::backlog::old_task(db, task)? || db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issue_parks p ON p.issue_id = t.issue_id WHERE t.id = ?1)",
-        [task], |r| r.get::<_, bool>(0),
-    )? {
+    if super::backlog::old_task(db, task)? || super::backlog::parked_task_scope(db, task)? {
         return Ok(());
     }
     let pending = {
@@ -565,13 +567,16 @@ pub(super) fn route_stopped_required(db: &Connection, task: &str) -> Result<()> 
     Ok(())
 }
 
-// A rerouted delivery remains in Task history and must not be inherited by
-// an independent follow-up, even if that follow-up was explicitly requested.
-pub(super) const NOT_REROUTED: &str = "NOT EXISTS(
-    SELECT 1 FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
-    JOIN external_route_deliveries rd ON rd.route_id = w.route_id AND rd.fact_id = d.fact_id
-    WHERE d.id = issue_inputs.id
-)";
+// Exact waits and already rerouted required facts stay in the original
+// Task's history. A new Task cannot fulfill another Task's wait or delivery.
+pub(super) const CAN_FOLLOW_TASK: &str =
+    "(coalesce(issue_inputs.payload->>'kind', '') != 'external_fact' OR (
+    coalesce(issue_inputs.payload->>'mode', '') != 'wait' AND NOT EXISTS(
+        SELECT 1 FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
+        JOIN external_route_deliveries rd ON rd.route_id = w.route_id AND rd.fact_id = d.fact_id
+        WHERE d.id = issue_inputs.id
+    )
+))";
 
 impl Store {
     pub fn release_external(&mut self) -> Result<()> {

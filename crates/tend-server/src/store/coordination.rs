@@ -623,11 +623,12 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
     }
     if *outcome != RunOutcome::Cancelled
         && db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
+            &format!("SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
                 AND json_extract(payload, '$.kind') != 'review_finished'
                 AND NOT EXISTS (SELECT 1 FROM proposal_decisions d WHERE d.input_id = issue_inputs.id)
                 AND NOT EXISTS (SELECT 1 FROM issue_attention_replies r WHERE r.input_id = issue_inputs.id)
-                AND (wake_at IS NULL OR wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)))",
+                AND ({})
+                AND (wake_at IS NULL OR wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)))", super::external::CAN_FOLLOW_TASK),
             [&observation.task_id],
             |row| row.get::<_, bool>(0),
         )?
@@ -749,7 +750,7 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
            AND json_extract(payload, '$.kind') != 'review_finished'
            AND NOT EXISTS (SELECT 1 FROM proposal_decisions d WHERE d.input_id = issue_inputs.id)
            AND NOT EXISTS (SELECT 1 FROM issue_attention_replies r WHERE r.input_id = issue_inputs.id)
-           AND ({})", super::external::NOT_REROUTED),
+           AND ({})", super::external::CAN_FOLLOW_TASK),
         params![previous, task],
     )?;
     Ok(Some(task))
@@ -759,9 +760,7 @@ pub(super) fn move_pending(db: &Connection, previous: &str, task: &str) -> Resul
     db.execute(
         &format!("UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
            AND json_extract(payload, '$.kind') NOT IN ('review_requested','review_finished','attention_answered')
-           AND NOT (json_extract(payload, '$.kind') = 'external_fact'
-                    AND coalesce(json_extract(payload, '$.mode'), '') = 'wait')
-           AND ({})", super::external::NOT_REROUTED),
+           AND ({})", super::external::CAN_FOLLOW_TASK),
         params![previous, task],
     )?;
     Ok(())
@@ -871,9 +870,10 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
 
 impl super::Store {
     pub fn release_child_windows(&mut self) -> Result<()> {
+        let due = due_terminal();
         let exists = self
             .db
-            .query_row(&format!("SELECT EXISTS({DUE_TERMINAL})"), [], |row| {
+            .query_row(&format!("SELECT EXISTS({due})"), [], |row| {
                 row.get::<_, bool>(0)
             })?;
         if exists {
@@ -887,30 +887,36 @@ impl super::Store {
     }
 }
 
-const DUE_TERMINAL: &str = "SELECT DISTINCT t.issue_id FROM issue_inputs p
-     JOIN tasks t ON t.id = p.task_id JOIN issues i ON i.id = t.issue_id
-     WHERE p.run_id IS NULL AND p.wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)
+fn due_terminal() -> String {
+    format!("SELECT DISTINCT t.issue_id FROM issue_inputs
+     JOIN tasks t ON t.id = issue_inputs.task_id JOIN issues i ON i.id = t.issue_id
+     WHERE issue_inputs.run_id IS NULL AND issue_inputs.wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)
        AND t.status IN ('completed', 'failed', 'cancelled') AND t.current_assignment IS NOT NULL
-       AND (t.status != 'cancelled' OR p.payload->>'kind' NOT IN ('codebase_review_comment','external_fact'))
+       AND (t.status != 'cancelled' OR issue_inputs.payload->>'kind' NOT IN ('codebase_review_comment','external_fact'))
+       AND ({})
        AND NOT EXISTS (SELECT 1 FROM tend_reviews v WHERE v.review_task_id = t.id)
        AND i.state != 'cancelled'
        AND NOT EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id = t.issue_id)
        AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.task_id = t.id AND c.state = 'pending'
-         AND json_extract(c.action, '$.kind') = 'stop') LIMIT 32";
+         AND json_extract(c.action, '$.kind') = 'stop') LIMIT 32", super::external::CAN_FOLLOW_TASK)
+}
 
 fn release_terminal_windows(db: &Connection) -> Result<()> {
-    let mut statement = db.prepare(DUE_TERMINAL)?;
+    let mut statement = db.prepare(&due_terminal())?;
     let issues = statement
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for issue in issues {
         if let Some(target) = target_due_task(db, &issue)? {
             db.execute(
-                "UPDATE issue_inputs SET task_id = ?2
+                &format!(
+                    "UPDATE issue_inputs SET task_id = ?2
                  WHERE run_id IS NULL AND wake_at IS NOT NULL AND task_id IN (
                     SELECT id FROM tasks WHERE issue_id = ?1 AND id != ?2
                        AND status IN ('completed','failed','cancelled')
-                 )",
+                 ) AND ({})",
+                    super::external::CAN_FOLLOW_TASK
+                ),
                 params![issue, target],
             )?;
         }

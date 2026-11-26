@@ -82,14 +82,18 @@ def add_child_fact(db, name, label):
     db.execute("INSERT INTO issue_input_order(input_id) VALUES(?)", (label,))
 
 
-def add_required(db, name):
+def add_github_fact(db, name, mode="required"):
     condition = {"url": GITHUB, "event": "pull", "state": "open"}
     db.execute("INSERT INTO pulls(url,repository,number) VALUES(?,'fixture/project',1)", (GITHUB,))
     db.execute("INSERT INTO external_facts(id,url,fact) VALUES('fact',?,?)", (GITHUB, json.dumps(condition)))
-    db.execute("INSERT INTO external_routes(id,message_seq,url,condition,mode) VALUES('route',1,?,?,'required')",
-               (GITHUB, json.dumps(condition)))
+    route = None
+    if mode == "required":
+        route = "route"
+        db.execute("INSERT INTO external_routes(id,message_seq,url,condition,mode) VALUES(?,1,?,?,'required')",
+                   (route, GITHUB, json.dumps(condition)))
     db.execute("INSERT INTO external_watches(id,issue_id,task_id,url,condition,mode,state,route_id,origin_issue) "
-               "VALUES('watch','owner',?,?,?,'required','routed','route','owner')", (name, GITHUB, json.dumps(condition)))
+               "VALUES('watch','owner',?,?,?,?,?,?,'owner')",
+               (name, GITHUB, json.dumps(condition), mode, "routed" if route else "matched", route))
     db.execute("INSERT INTO external_deliveries(id,watch_id,fact_id) VALUES('github','watch','fact')")
     db.execute("INSERT INTO external_batches VALUES(?,unixepoch()+300)", (name,))
     db.execute("INSERT INTO issue_input_order(input_id) VALUES('github')")
@@ -160,7 +164,7 @@ def natural_completion_and_required(server_bin):
         with ledger() as db:
             name, assignment = task(db, "owner", "accepted")
             add_child_fact(db, name, "child-before-stop")
-            add_required(db, name)
+            add_github_fact(db, name)
         run = {"event_id": "started", "run_id": "run", "assignment_id": assignment, "task_id": name,
                "thread_id": "thread", "turn_id": "turn", "phase": {"state": "started"}}
         assert sync({"kind": "run", "data": run})["confirmed_runs"] == ["started"]
@@ -196,7 +200,7 @@ def required_on_stop_or_park(server_bin, park):
     with fixture(server_bin) as (_, _, _, api, sync, ledger):
         with ledger() as db:
             name, assignment = task(db, "owner", "waiting")
-            add_required(db, name)
+            add_github_fact(db, name)
         if park:
             [command] = api("issues/owner/backlog", {"operation_id": "park"})["stop_control_ids"]
         else:
@@ -216,7 +220,7 @@ def mixed_pages(server_bin, comments):
         with ledger() as db:
             name, assignment = task(db, "owner", "waiting")
             add_child_fact(db, name, "child-1")
-            add_required(db, name)
+            add_github_fact(db, name)
             db.execute("INSERT INTO pulls(url,repository,number,provider) VALUES(?,'fixture/project',1,'codebase')", (CODEBASE,))
             db.execute("INSERT INTO issue_pulls VALUES('owner',?)", (CODEBASE,))
             db.execute("INSERT INTO codebase_comment_polls(url,due_at) VALUES(?,unixepoch()+600)", (CODEBASE,))
@@ -252,6 +256,68 @@ def mixed_pages(server_bin, comments):
         assert after["confirmed_runs"] == ["start-prefix", "stop-prefix"] and not after.get("inputs"), after
 
 
+def late_required_after_stop(server_bin, park=False, timer=False, natural=False):
+    with fixture(server_bin) as (_, _, _, api, sync, ledger):
+        with ledger() as db:
+            name, assignment = task(db, "owner", "accepted" if natural else "waiting")
+        if natural:
+            run = {"event_id": "started", "run_id": "run", "assignment_id": assignment, "task_id": name,
+                   "thread_id": "thread", "turn_id": "turn", "phase": {"state": "started"}}
+            assert sync({"kind": "run", "data": run})["confirmed_runs"] == ["started"]
+        if park:
+            [command] = api("issues/owner/backlog", {"operation_id": "park"})["stop_control_ids"]
+        else:
+            command = api(f"tasks/{name}/stop", {"operation_id": "stop"})["operation_id"]
+        with ledger() as db:
+            add_github_fact(db, name)
+            assert db.execute("SELECT released_at FROM external_deliveries").fetchall() == [(None,)]
+        if natural:
+            done = {**run, "event_id": "naturally-stopped", "phase": {"state": "stopped", "outcome": "completed"}}
+            assert sync({"kind": "run", "data": done})["confirmed_runs"] == ["naturally-stopped"]
+        assert api(f"controls/{command}")["state"] == "pending"
+        assert sync(ack(command, assignment))["confirmed_operations"] == ["proof"]
+        assert api(f"controls/{command}")["state"] == "stopped"
+        if timer:
+            with ledger() as db:
+                db.execute("UPDATE external_batches SET due_at=1")
+
+            def released():
+                with ledger() as db:
+                    return db.execute("SELECT released_at IS NOT NULL FROM external_deliveries").fetchone()
+
+            wait_for(released, lambda value: value == (1,))
+        command_body = {"operation_id": "independent-message", "text": "C"}
+        receipt = api("issues/owner/messages", command_body)
+        assert api("issues/owner/messages", command_body) == receipt
+        assert sync(ack(command, assignment))["confirmed_operations"] == ["proof"]
+        with ledger() as db:
+            assert db.execute("SELECT released_at IS NOT NULL FROM external_deliveries").fetchall() == [(1,)]
+            actual = db.execute("SELECT route_id,fact_id,origin_issue FROM external_route_deliveries").fetchall()
+            assert actual == ([] if park else [("route", "fact", "owner")]), actual
+            deliveries = db.execute("SELECT task_id,run_id FROM issue_inputs WHERE id='github'").fetchall()
+            assert deliveries == ([(name, None)] if park else []), deliveries
+            followups = db.execute("SELECT count(*) FROM tasks WHERE previous_task_id=?", (name,)).fetchone()
+            assert followups == (0 if park else 1,)
+
+
+def stopped_wait_stays_with_original_task(server_bin):
+    with fixture(server_bin) as (_, _, _, api, sync, ledger):
+        with ledger() as db:
+            name, assignment = task(db, "owner", "waiting")
+            add_github_fact(db, name, mode="wait")
+        assert api(f"tasks/{name}/stop", {"operation_id": "stop"})["state"] == "pending"
+        assert sync(ack("stop", assignment))["confirmed_operations"] == ["proof"]
+        receipt = api("issues/owner/messages", {"operation_id": "independent-message", "text": "C"})
+        with ledger() as db:
+            assert db.execute("SELECT state FROM external_watches").fetchall() == [("withdrawn",)]
+            [successor] = db.execute("SELECT id FROM tasks WHERE previous_task_id=?", (name,)).fetchone()
+            original = db.execute("SELECT task_id,run_id FROM issue_inputs WHERE id='github'").fetchall()
+            assert original == [(name, None)], original
+            assert db.execute("SELECT payload->>'$.message.id' FROM issue_inputs WHERE task_id=?", (successor,)).fetchall() == [
+                (receipt["message_id"],),
+            ]
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("server", "runner"):
@@ -263,7 +329,12 @@ def main():
         required_on_stop_or_park(args.server, park)
     for comments in (29, 33):
         mixed_pages(args.server, comments)
-    print("PASS lost issued reply paired Stop, natural completion and required fallback, mixed atomic prefixes across sync pages")
+    for park in (False, True):
+        for timer in (False, True):
+            late_required_after_stop(args.server, park, timer)
+    late_required_after_stop(args.server, natural=True)
+    stopped_wait_stays_with_original_task(args.server)
+    print("PASS paired Stop, natural completion, mixed atomic prefixes, late required fallback and pinned wait history")
 
 
 if __name__ == "__main__":

@@ -44,6 +44,13 @@ pub(super) fn old_task(db: &Connection, task: &str) -> Result<bool> {
     )?)
 }
 
+pub(super) fn parked_task_scope(db: &Connection, task: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issue_parks p ON p.issue_id = t.issue_id WHERE t.id = ?1)",
+        [task], |row| row.get(0),
+    )?)
+}
+
 pub(super) fn park_late_child(db: &Connection, issue: &str, task: &str) -> Result<()> {
     db.execute("INSERT INTO issue_parks VALUES (?1)", [issue])?;
     db.execute("INSERT INTO parked_tasks VALUES (?1, NULL)", [task])?;
