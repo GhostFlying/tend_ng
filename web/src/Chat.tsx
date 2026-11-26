@@ -1,4 +1,6 @@
 import {
+  lazy,
+  Suspense,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -20,6 +22,11 @@ import {
 } from "./api";
 import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
+import { DiscussionStart } from "./DiscussionStart";
+import { discussionLink } from "./discussionApi";
+const DiscussionMarkdown = lazy(() =>
+  import("./Markdown").then(({ Markdown }) => ({ default: Markdown })),
+);
 
 function OrdinaryChatAttention({
   chat,
@@ -202,6 +209,7 @@ function MessageRow({
   onReply,
   onRefresh,
   historical,
+  canStartDiscussion,
 }: {
   message: Message;
   source?: Message;
@@ -211,6 +219,7 @@ function MessageRow({
   onReply: (message: Message) => void;
   onRefresh: () => void;
   historical: boolean;
+  canStartDiscussion: boolean;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -239,7 +248,10 @@ function MessageRow({
     >
       <div className="message-heading">
         <span className="author">
-          {user ? "你" : (detail?.author ?? "Tend")}
+          {user
+            ? "你"
+            : (detail?.author ??
+              (message.author === "discussion" ? "讨论助手" : "Tend"))}
         </span>
         {descendant && detail && (
           <a
@@ -264,7 +276,13 @@ function MessageRow({
         </a>
       )}
       {!message.attention?.proposal ? (
-        <p>{message.text}</p>
+        message.author === "discussion" ? (
+          <Suspense fallback={<p>{message.text}</p>}>
+            <DiscussionMarkdown text={message.text} />
+          </Suspense>
+        ) : (
+          <p>{message.text}</p>
+        )
       ) : (
         (message.text !== message.attention.proposal.question ||
           message.attention.proposal.decision) && (
@@ -323,6 +341,17 @@ function MessageRow({
           />
         )
       )}
+      {message.discussion_id && (
+        <a className="issue-link" href={discussionLink(message.discussion_id)}>
+          回到原讨论 ↗
+        </a>
+      )}
+      {canStartDiscussion && !message.attention && !message.discussion_id && (
+        <DiscussionStart
+          compact
+          origin={{ kind: "chat", chat_id: "main", message_id: message.id }}
+        />
+      )}
       {pending && <span className="message-state">已收到</span>}
       {message.router_error && (
         <span className="message-state error">{message.router_error}</span>
@@ -351,6 +380,10 @@ function MessageRow({
   );
 }
 
+type Standalone = {
+  renderMention?: (query: string, done: () => void) => ReactNode;
+};
+
 function Composer({
   issue,
   chatId,
@@ -359,6 +392,7 @@ function Composer({
   textarea,
   onCancelReply,
   onSent,
+  standalone,
 }: {
   issue?: string;
   chatId: string;
@@ -367,12 +401,15 @@ function Composer({
   textarea: RefObject<HTMLTextAreaElement | null>;
   onCancelReply: () => void;
   onSent: (reply: string | null) => void;
+  standalone?: Standalone;
 }) {
   const [pending] = useState(() => savedMessage(chatId, issue));
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
   const [sending, setSending] = useState(false);
   const [error, setError] = useState("");
+
+  const mention = standalone && /(?:^|\s)@([^\s@]*)$/.exec(text);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -442,8 +479,20 @@ function Composer({
           )}
           <textarea
             ref={textarea}
-            aria-label={issue ? "发消息给 Issue Owner" : "发消息给 Tend"}
-            placeholder={issue ? "发消息给 Issue Owner…" : "发消息给 Tend…"}
+            aria-label={
+              issue
+                ? "发消息给 Issue Owner"
+                : standalone
+                  ? "在讨论中发消息"
+                  : "发消息给 Tend"
+            }
+            placeholder={
+              issue
+                ? "发消息给 Issue Owner…"
+                : standalone
+                  ? "发消息，或输入 @ 附加资料…"
+                  : "发消息给 Tend…"
+            }
             value={text}
             rows={2}
             readOnly={sending}
@@ -459,6 +508,11 @@ function Composer({
               }
             }}
           />
+          {mention &&
+            standalone?.renderMention?.(mention[1], () => {
+              setText((value) => value.replace(/(^|\s)@[^\s@]*$/, "$1"));
+              textarea.current?.focus();
+            })}
           <div className="compose-actions">
             <span>Enter 发送 · Shift+Enter 换行</span>
             <button
@@ -491,10 +545,12 @@ export function Chat({
   chatId,
   onReachable,
   detail,
+  standalone,
 }: {
   issue?: string;
   chatId: string;
   onReachable: (online: boolean) => void;
+  standalone?: Standalone;
   detail?: {
     overviewLoaded: boolean;
     header: ReactNode;
@@ -752,6 +808,7 @@ export function Chat({
         descendant={descendant}
         onRefresh={() => setRefresh((value) => value + 1)}
         historical={!latestIds.has(message.id)}
+        canStartDiscussion={!standalone && !issue && chatId === "main"}
         onReply={(question) => {
           setReplyId(question.id);
           textarea.current?.focus({ preventScroll: true });
@@ -790,6 +847,13 @@ export function Chat({
         <p className="error" role="alert">
           {error || historyError || anchorError}
         </p>
+      )}
+      {standalone && before !== undefined && !messages.length && (
+        <div className="discussion-blank">
+          <span aria-hidden="true">✳</span>
+          <h3>可以直接开聊</h3>
+          <p>发第一条消息；如果需要背景，可以随时添上参考资料。</p>
+        </div>
       )}
       <ol aria-label="对话记录" className="messages">
         {rows}
@@ -845,6 +909,7 @@ export function Chat({
           replyId={replyId}
           replyText={replyId ? byId.get(replyId)?.text : undefined}
           textarea={textarea}
+          standalone={standalone}
           onCancelReply={() => setReplyId(null)}
           onSent={(sentReply) => {
             follow.current = true;

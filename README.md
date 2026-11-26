@@ -131,3 +131,32 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/e2e/live_codex.py \
 Set `TEND_SQLITE_TIMING=1` on the Server to report lock acquisition, transaction, and commit times for Chat receipts, Attention answers, and Runner writes.
 
 The [Server and Runner contract](docs/server-runner.md) covers reconnects, original Run history, and same-host replacement. See the [phase-one acceptance log](docs/plans/phase-one-closeout.md) for fixture entry points, native Codex checks, and SQLite diagnostics. The [product design](docs/design.md) and [engineering guide](docs/engineering.md) describe the implementation boundaries.
+
+### 独立讨论
+
+Web 的「讨论」与 `tend discussion --help` 使用相同用户 API。要启用讨论答复，在 Server 加 `--discussion-config /path/to/discussion.json`（放在 `--app-server` **之前**）。未配置时仍可创建讨论和整理引用，发言会显示讨论执行未配置，绝不回退到主 Router。配置示例：
+
+```json
+{
+  "host_id": "devbox",
+  "program": "/path/to/standalone/codex",
+  "codex_home": "/path/to/discussion-codex-home",
+  "cwd": "/path/to/empty-discussion-cwd",
+  "repos": {
+    "tend_ng": "/path/to/existing/tend_ng",
+    "lynx": "/path/to/existing/lynx"
+  }
+}
+```
+
+`host_id` 必须与同机 Runner 登记的官方 Host ID 一致。仓库映射取 Server 本机实际 checkout，只有同一 repo ID 已登记才可附加和读取。主 Chat 继续使用自己的原配置。讨论需要 Linux 和支持自定义原生只读权限的 Codex App Server（以 0.172.0 的受限沙箱验证），使用独立 Codex home（不放在 `/tmp`）和空白工作目录。该 home 仅配置讨论服务的模型认证，不复制主 Router 的配置、插件或 MCP。可在讨论配置内用 `model`、`effort` 指定模型，或用 `model_api_keys` 把模型服务所需的 `*_API_KEY` 环境名称映射到独立 Codex home 内的密钥文件；不从 Server 环境继承。资料只读权限由实际 App Server 确认。同机 Task worktree 还需要 Runner 的已有 `inspect` 配置。
+
+```sh
+tend discussion create "整理想法"
+tend discussion attach "$DISCUSSION_ID" repo tend_ng
+tend chat send "$DISCUSSION_ID" "先梳理问题和可选方案"
+tend discussion draft "$DISCUSSION_ID"
+tend discussion draft-read "$DISCUSSION_ID"
+```
+
+CLI 显式发送使用 `tend discussion handoff`，先按帮助审阅目标、约束和授权终点。丢失响应时用相同的操作 ID 和原 JSON 重试。

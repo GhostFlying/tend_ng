@@ -4,6 +4,7 @@ mod board;
 pub(crate) mod control;
 mod coordination;
 pub(crate) mod discovery;
+pub mod discussion;
 mod external;
 pub(crate) mod external_routing;
 mod handoff;
@@ -31,7 +32,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-const SCHEMA_VERSION: i64 = 31;
+pub(crate) const SCHEMA_VERSION: i64 = 32;
 
 pub struct Store {
     db: Connection,
@@ -230,6 +231,9 @@ impl Store {
         }
         if version < 31 {
             tend_review::migrate_rounds(&tx)?;
+        }
+        if version < 32 {
+            discussion::migrate(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(
@@ -263,6 +267,15 @@ impl Store {
         Ok(())
     }
 
+    fn reserved_chat_operation(db: &Connection, id: &str) -> Result<bool> {
+        Ok(db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM discussion_handoffs WHERE operation_id=?1)
+                 OR EXISTS(SELECT 1 FROM discussion_drafts WHERE id=?1)",
+            [id],
+            |r| r.get(0),
+        )?)
+    }
+
     pub fn accept(&mut self, chat_id: &str, request: &SendMessage) -> Result<Accepted> {
         let (tx, timing) = timing::begin(&mut self.db, "chat_accept")?;
         let existing: Option<(String, String, String, Option<String>)> = tx
@@ -274,7 +287,8 @@ impl Store {
             .optional()?;
         if let Some((message_id, original_chat, original_text, original_reply)) = existing {
             return Ok(
-                if original_chat == chat_id
+                if !Self::reserved_chat_operation(&tx, &request.operation_id)?
+                    && original_chat == chat_id
                     && original_text == request.text
                     && original_reply == request.reply_to
                 {
@@ -286,7 +300,7 @@ impl Store {
         }
         if let Some(reply) = &request.reply_to {
             let valid: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE id = ?1 AND chat_id = ?2)",
+                "SELECT EXISTS(SELECT 1 FROM chat_messages m WHERE id = ?1 AND chat_id = ?2 AND NOT EXISTS(SELECT 1 FROM discussion_drafts d WHERE d.message_id=m.id))",
                 params![reply, chat_id],
                 |row| row.get(0),
             )?;
@@ -295,35 +309,27 @@ impl Store {
             }
         }
 
-        let message_id = protocol::new_id();
+        let receipt = insert_chat_input(&tx, chat_id, request)?;
         tx.execute(
-            "INSERT INTO chat_messages (id, chat_id, text, operation_id, reply_to)
-             VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                message_id,
-                chat_id,
-                request.text,
-                request.operation_id,
-                request.reply_to
-            ],
-        )?;
-        tx.execute(
-            "INSERT INTO router_inputs (message_seq, chat_id) VALUES (?1, ?2)",
-            params![tx.last_insert_rowid(), chat_id],
+            "UPDATE discussions SET updated_at=unixepoch() WHERE chat_id=?1",
+            [chat_id],
         )?;
         timing::commit(tx, timing)?;
-        Ok(Accepted::Received(Receipt { message_id }))
+        Ok(Accepted::Received(receipt))
     }
 
     pub fn messages(&self, chat_id: &str, before: i64) -> Result<MessagePage> {
+        let discussion = self.is_discussion(chat_id)?;
         let mut statement = self.db.prepare(
             "SELECT m.seq, m.id, m.text, m.created_at, m.reply_to, i.seq,
-                    i.outcome, i.error, a.id
+                    i.outcome, i.error, a.id, h.chat_id
                FROM chat_messages m
                LEFT JOIN router_inputs i ON i.message_seq = m.seq
                  AND i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL
                LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = 1
+               LEFT JOIN discussion_handoffs h ON h.message_id = m.id
               WHERE m.chat_id = ?1 AND m.seq < ?2
+                AND NOT EXISTS(SELECT 1 FROM discussion_drafts d WHERE d.message_id=m.id)
               ORDER BY m.seq DESC LIMIT ?3",
         )?;
         let rows = statement.query_map(params![chat_id, before, PAGE_SIZE + 1], |row| {
@@ -344,7 +350,13 @@ impl Store {
                 row.get::<_, i64>(0)?,
                 Message {
                     id: row.get(1)?,
-                    author: if user { Author::User } else { Author::Router },
+                    author: if user {
+                        Author::User
+                    } else if discussion {
+                        Author::Discussion
+                    } else {
+                        Author::Router
+                    },
                     text: row.get(2)?,
                     created_at: row.get(3)?,
                     reply_to: row.get(4)?,
@@ -354,6 +366,7 @@ impl Store {
                     issue_numbers: Vec::new(),
                     artifacts: Vec::new(),
                     attention: None,
+                    discussion_id: row.get(9)?,
                 },
             ))
         })?;
@@ -574,6 +587,8 @@ impl Store {
                 SELECT message_seq AS seq, outcome FROM router_inputs
                  WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL
                    AND report_id IS NULL AND attention_id IS NULL AND external_batch IS NULL
+                   AND NOT EXISTS(SELECT 1 FROM discussion_drafts d JOIN chat_messages m ON m.id=d.message_id
+                                  WHERE m.seq=router_inputs.message_seq)
                  ORDER BY message_seq DESC LIMIT 6
              )
              SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome
@@ -647,6 +662,26 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn insert_chat_input(db: &Connection, chat_id: &str, request: &SendMessage) -> Result<Receipt> {
+    let message_id = protocol::new_id();
+    db.execute(
+        "INSERT INTO chat_messages (id, chat_id, text, operation_id, reply_to)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![
+            message_id,
+            chat_id,
+            request.text,
+            request.operation_id,
+            request.reply_to
+        ],
+    )?;
+    db.execute(
+        "INSERT INTO router_inputs (message_seq, chat_id) VALUES (?1, ?2)",
+        params![db.last_insert_rowid(), chat_id],
+    )?;
+    Ok(Receipt { message_id })
 }
 
 fn retry_foreground_write(attempts: i32) -> bool {

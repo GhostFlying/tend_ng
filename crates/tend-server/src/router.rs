@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 
-const MAX_ATTEMPTS: i64 = 2;
+pub(crate) const MAX_ATTEMPTS: i64 = 2;
 const TOOL_REVISION: i64 = 16;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
@@ -151,6 +151,7 @@ pub struct Config {
     pub args: Vec<OsString>,
     pub effort: Option<String>,
     pub model: Option<String>,
+    pub discussion: std::sync::Arc<crate::discussion::Service>,
 }
 
 pub fn spawn(config: Config) {
@@ -173,8 +174,15 @@ fn dispatch(config: Config) -> Result<()> {
                     workers.entry(chat.clone()).or_insert_with(|| {
                         let config = config.clone();
                         thread::spawn(move || {
-                            if let Err(error) = consume(&config, &chat) {
-                                eprintln!("Router chat {chat} is pending: {error:#}");
+                            let result = Store::open(&config.db).and_then(|store| {
+                                if store.is_discussion(&chat)? {
+                                    config.discussion.consume(store, &chat)
+                                } else {
+                                    consume(&config, &chat, store)
+                                }
+                            });
+                            if let Err(error) = result {
+                                eprintln!("Chat {chat} is pending: {error:#}");
                                 thread::sleep(Duration::from_secs(2));
                             }
                         })
@@ -187,8 +195,7 @@ fn dispatch(config: Config) -> Result<()> {
     }
 }
 
-fn consume(config: &Config, chat: &str) -> Result<()> {
-    let mut store = Store::open(&config.db)?;
+fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
     let mut command = Command::new(&config.program);
     command
         .args(&config.args)
@@ -553,7 +560,11 @@ fn tool_error(message: &str) -> ToolOutput {
     }
 }
 
-fn recover(client: &mut Client, store: &Store, attempt: &Attempt) -> Result<Option<Turn>> {
+pub(crate) fn recover(
+    client: &mut Client,
+    store: &Store,
+    attempt: &Attempt,
+) -> Result<Option<Turn>> {
     if let Some(process) = &attempt.process {
         ensure!(
             process.is_stopped()?,
@@ -588,7 +599,7 @@ fn recover(client: &mut Client, store: &Store, attempt: &Attempt) -> Result<Opti
     Ok(None)
 }
 
-fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()> {
+pub(crate) fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()> {
     match turn.status {
         TurnStatus::Completed if input.attention_id.is_some() => store.finish(input.seq, &[], None),
         TurnStatus::Completed => {

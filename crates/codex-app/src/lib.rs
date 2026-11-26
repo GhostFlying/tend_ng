@@ -211,6 +211,69 @@ impl Client {
             .to_owned())
     }
 
+    pub fn check_discussion_config(&mut self) -> Result<()> {
+        let response = self.call("config/read", json!({"includeLayers": false}))?;
+        ensure!(
+            response["config"].is_object(),
+            "App Server did not confirm the service config"
+        );
+        ensure!(
+            response["config"]["mcp_servers"]
+                .as_object()
+                .is_none_or(|servers| servers.is_empty()),
+            "Discussion App Server must not configure MCP servers"
+        );
+        Ok(())
+    }
+
+    pub fn start_discussion_thread(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        tools: &[Value],
+        model: Option<&str>,
+    ) -> Result<String> {
+        let response = self.call(
+            "thread/start",
+            json!({
+                "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
+                "permissions": "tend-discussion", "approvalPolicy": "never",
+                "developerInstructions": instructions, "dynamicTools": tools, "model": model,
+            }),
+        )?;
+        verify_discussion_permissions(&response)?;
+        Ok(response["thread"]["id"]
+            .as_str()
+            .context("thread/start missing thread ID")?
+            .to_owned())
+    }
+
+    pub fn resume_discussion_thread(
+        &mut self,
+        thread_id: &str,
+        cwd: &Path,
+        model: Option<&str>,
+    ) -> Result<bool> {
+        match self.call(
+            "thread/resume",
+            json!({
+                "threadId": thread_id, "excludeTurns": true, "cwd": cwd, "model": model,
+                "permissions": "tend-discussion", "approvalPolicy": "never"
+            }),
+        ) {
+            Ok(response) => {
+                verify_discussion_permissions(&response)?;
+                ensure!(
+                    response["thread"]["id"] == thread_id,
+                    "resumed an unexpected Discussion thread"
+                );
+                Ok(true)
+            }
+            Err(error) if missing_thread(&error, thread_id) => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+
     pub fn process_identity(&self) -> Result<ProcessIdentity> {
         ProcessIdentity::observe(self.child.id())
     }
@@ -573,6 +636,18 @@ impl Client {
         stdin.flush()?;
         Ok(())
     }
+}
+
+fn verify_discussion_permissions(response: &Value) -> Result<()> {
+    ensure!(
+        response["activePermissionProfile"]["id"] == "tend-discussion"
+            && response["activePermissionProfile"]["extends"].is_null()
+            && response["approvalPolicy"] == "never"
+            && response["sandbox"]["type"] == "readOnly"
+            && response["sandbox"]["networkAccess"] == false,
+        "App Server did not confirm the read-only Discussion permission profile"
+    );
+    Ok(())
 }
 
 fn rpc_result(event: &Value, method: &str) -> Result<Value> {

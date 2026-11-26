@@ -457,3 +457,70 @@ fn reclaim_one(root: &Path, key: &str, repos: &[Repo]) -> Result<()> {
     fs::remove_dir(path)?;
     Ok(())
 }
+
+pub fn discussion_mounts(
+    root: &Path,
+    relative: &str,
+    proof: &protocol::WorkspaceStamp,
+    repo_ids: &[String],
+    repos: &[Repo],
+) -> Result<Vec<protocol::DiscussionMount>> {
+    let (namespace, key) = relative
+        .split_once('/')
+        .context("invalid workspace binding")?;
+    ensure!(
+        matches!(namespace, "workspaces" | "tasks") && protocol::valid_id(key),
+        "invalid workspace binding"
+    );
+    let expected = root.canonicalize()?.join(relative);
+    ensure!(
+        expected.canonicalize()? == expected && stamp(&expected)? == *proof,
+        "workspace reclaimed or replaced"
+    );
+    let manifest = expected.join("mounts.json");
+    if !manifest.is_file() {
+        return Ok(Vec::new());
+    }
+    ensure!(
+        manifest.canonicalize()? == manifest,
+        "workspace manifest changed"
+    );
+    let mounts: Vec<Mount> = serde_json::from_slice(&fs::read(manifest)?)?;
+    let mut found = Vec::new();
+    for repo in repos.iter().filter(|repo| repo_ids.contains(&repo.id)) {
+        let relative = PathBuf::from("repos").join(component(&repo.id));
+        if !mounts
+            .iter()
+            .any(|mount| mount.repo_id == repo.id && mount.path == relative)
+        {
+            continue;
+        }
+        let target = expected.join(relative);
+        if target.canonicalize().ok().as_ref() != Some(&target)
+            || verify_registration(repo, &target).is_err()
+            || git(&target, &["rev-parse", "--show-toplevel"])
+                .ok()
+                .as_deref()
+                != target.to_str()
+        {
+            continue;
+        }
+        let git_dir =
+            PathBuf::from(git(&target, &["rev-parse", "--absolute-git-dir"])?).canonicalize()?;
+        let common_dir = PathBuf::from(git(
+            &repo.path,
+            &["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )?)
+        .canonicalize()?;
+        if !git_dir.starts_with(&common_dir) {
+            continue;
+        }
+        found.push(protocol::DiscussionMount {
+            repo_id: repo.id.clone(),
+            stamp: stamp(&target)?,
+            git_dir,
+            common_dir,
+        });
+    }
+    Ok(found)
+}

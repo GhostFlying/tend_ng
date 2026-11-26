@@ -53,6 +53,28 @@ pub fn spawn(store: Store, program: OsString) {
     });
 }
 
+pub fn discussion_pull(program: &OsString, pull: &GitHubPull) -> Result<Value, &'static str> {
+    let output = request(
+        program,
+        &[
+            "api",
+            "--method",
+            "GET",
+            "--hostname",
+            "github.com",
+            &format!("repos/{}/pulls/{}", pull.repository, pull.number),
+        ],
+    )?;
+    if output["number"] != pull.number || !output["title"].is_string() {
+        return Err("invalid_response");
+    }
+    Ok(serde_json::json!({
+        "title": output["title"], "state": output["state"], "merged": output["merged"],
+        "draft": output["draft"], "head_sha": output["head"]["sha"],
+        "body": output["body"].as_str().map(|body| body.chars().take(12000).collect::<String>()),
+    }))
+}
+
 fn observe(
     program: &OsString,
     pull: &GitHubPull,
@@ -363,7 +385,7 @@ fn request(program: &OsString, args: &[&str]) -> Result<Value, &'static str> {
             .as_str()
             .and_then(|value| value.parse::<i64>().ok())
             .or_else(|| output["status"].as_i64());
-        if matches!(code, Some(401 | 404))
+        if matches!(code, Some(401 | 403 | 404))
             || output["message"] == "Resource not accessible by integration"
             || output["message"] == "Resource not accessible by personal access token"
         {

@@ -248,6 +248,9 @@ for line in sys.stdin:
                                        if report["original_request"] == WEB_REQUEST
                                        else "The guide is ready. Download the attached guide.txt."),
                             "drop_before_start": 1}
+            elif text.startswith("从独立讨论转交。"):
+                assert "指定推进的 Issue" in text and "授权终点" in text
+                case = {"answer": "Router 已收到核对后的转交，先确认下一步。"}
             elif text.startswith("Storage measurement "):
                 case = {"answer": "Accepted."}
             elif text.startswith(CROSS_CHAT_LOOKUP):

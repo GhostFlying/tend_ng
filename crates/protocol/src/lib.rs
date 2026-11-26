@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 mod runner;
 pub use runner::*;
+mod discussion;
+pub use discussion::*;
 mod attention;
 pub use attention::*;
 mod control;
@@ -44,6 +46,7 @@ pub struct Receipt {
 pub enum Author {
     User,
     Router,
+    Discussion,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -72,6 +75,8 @@ pub struct Message {
     pub artifacts: Vec<Artifact>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub attention: Option<AttentionStatus>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discussion_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

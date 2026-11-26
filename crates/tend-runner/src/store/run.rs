@@ -628,3 +628,47 @@ fn save_event(
     )?;
     Ok(())
 }
+
+impl Store {
+    pub fn discussion_workspace_binding(
+        &self,
+        issue: &str,
+        task: &str,
+        assignment: &str,
+    ) -> Result<Option<(String, protocol::WorkspaceStamp, Vec<String>)>> {
+        let row = self
+            .0
+            .query_row(
+                "SELECT p.path, coalesce((
+                 SELECT r.workspace_stamp FROM local_runs r
+                  WHERE r.assignment_id = a.id AND r.workspace_stamp IS NOT NULL
+                  ORDER BY r.rowid DESC LIMIT 1
+               ), json_extract(a.contract, '$.handoff.workspace_stamp')),
+               json_extract(a.contract, '$.work.repo_ids')
+               FROM local_workspace_claims p JOIN received_assignments a ON a.id = p.id
+              WHERE p.task_id = ?1 AND json_extract(a.contract, '$.issue_id') = ?2 AND a.id = ?3
+                AND p.path IS NOT NULL AND p.execution_state NOT IN ('rejected','handed_off')
+              ORDER BY a.rowid DESC LIMIT 1",
+                params![task, issue, assignment],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((path, Some(stamp), repos)) = row else {
+            return Ok(None);
+        };
+        Ok(Some((
+            path,
+            serde_json::from_str(&stamp)?,
+            repos
+                .map(|repos| serde_json::from_str(&repos))
+                .transpose()?
+                .unwrap_or_default(),
+        )))
+    }
+}

@@ -6,16 +6,18 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
         return None;
     }
     let path = request.url().split('?').next()?;
-    let (file, mime) = if matches!(path, "/" | "/issues" | "/agents" | "/hosts" | "/more")
-        || path
-            .strip_prefix("/issues/")
-            .map(|route| route.strip_suffix("/overview").unwrap_or(route))
-            .is_some_and(|reference| {
-                protocol::valid_id(reference)
-                    || reference
-                        .strip_prefix("%23")
-                        .is_some_and(|digits| protocol::parse_issue_number(digits).is_some())
-            }) {
+    let (file, mime) = if matches!(
+        path,
+        "/" | "/discussions" | "/issues" | "/agents" | "/hosts" | "/more"
+    ) || path
+        .strip_prefix("/issues/")
+        .map(|route| route.strip_suffix("/overview").unwrap_or(route))
+        .is_some_and(|reference| {
+            protocol::valid_id(reference)
+                || reference
+                    .strip_prefix("%23")
+                    .is_some_and(|digits| protocol::parse_issue_number(digits).is_some())
+        }) {
         (root.join("index.html"), "text/html; charset=utf-8")
     } else {
         let name = path.strip_prefix("/assets/")?;

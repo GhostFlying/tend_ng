@@ -1,4 +1,5 @@
 mod artifacts;
+mod discussion;
 mod github;
 mod inspect;
 mod router;
@@ -22,7 +23,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -33,6 +34,7 @@ fn main() -> Result<()> {
     let mut web_dir = None;
     let mut web_origin = None;
     let mut router_effort = None;
+    let mut discussion_config = None;
     let mut router_model = None;
     let mut program = OsString::from("codex");
     let mut github_cli = OsString::from("gh");
@@ -86,6 +88,12 @@ fn main() -> Result<()> {
                         .map_err(|_| anyhow!("invalid --web-origin"))?,
                 );
             }
+            Some("--discussion-config") => {
+                discussion_config = Some(PathBuf::from(
+                    args.next()
+                        .context("--discussion-config needs a JSON file")?,
+                ));
+            }
             Some("--github-cli") => {
                 github_cli = args.next().context("--github-cli needs a program")?
             }
@@ -117,6 +125,13 @@ fn main() -> Result<()> {
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let synchronization = runner_api::serve(&db)?;
+    let discussion = std::sync::Arc::new(discussion::Service::new(
+        discussion_config.as_deref(),
+        &db,
+        github_cli.clone(),
+        auth.clone(),
+    )?);
+    let discussion_api = discussion.serve_api(&db)?;
     thread::spawn(move || schedule(placement));
     github::spawn(Store::open(&db)?, github_cli.clone());
     github::spawn_discovery(Store::open(&db)?, github_cli);
@@ -129,6 +144,7 @@ fn main() -> Result<()> {
         args: app_args,
         effort: router_effort,
         model: router_model,
+        discussion,
     });
     eprintln!("Tend Server listening on {}", server.server_addr());
 
@@ -158,6 +174,16 @@ fn main() -> Result<()> {
         if let Some(response) = response {
             if let Err(error) = request.respond(response) {
                 eprintln!("Send authentication response: {error}");
+            }
+            continue;
+        }
+        let route = request.url().split('?').next().unwrap_or_default();
+        if route == protocol::DISCUSSIONS_PATH || route.starts_with("/api/v1/discussions/") {
+            if let Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) =
+                discussion_api.try_send(request)
+            {
+                let (_, body) = api_error(503, "Discussion API is busy");
+                let _ = request.respond(json_response(503, &body)?);
             }
             continue;
         }

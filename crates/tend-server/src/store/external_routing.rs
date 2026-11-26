@@ -61,7 +61,8 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(source) = tx
             .query_row(
-                "SELECT seq FROM chat_messages WHERE id = ?1 AND operation_id IS NOT NULL",
+                "SELECT m.seq FROM chat_messages m WHERE m.id = ?1 AND m.operation_id IS NOT NULL
+                 AND NOT EXISTS(SELECT 1 FROM discussions d WHERE d.chat_id=m.chat_id)",
                 [message],
                 |row| row.get::<_, i64>(0),
             )

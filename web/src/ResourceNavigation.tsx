@@ -1,10 +1,12 @@
 import { Notifications } from "./Notifications";
 
-type IconName = "chat" | "board" | "agents" | "hosts" | "more" | "notice";
+type IconName =
+  "chat" | "discussion" | "board" | "agents" | "hosts" | "more" | "notice";
 
 export function NavIcon({ name }: { name: IconName }) {
   const shape = {
     chat: <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5z" />,
+    discussion: <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5zM7 8h6m-6 2.5h4" />,
     board: (
       <>
         <rect x="3.5" y="4.5" width="13" height="11" rx="1.5" />
@@ -60,16 +62,18 @@ export const resourceLinks = [
 export function PhoneNavigation({
   resource,
   board,
+  discussions,
 }: {
   resource: boolean;
   board: boolean;
+  discussions: boolean;
 }) {
   return (
     <nav className="phone-nav" aria-label="手机导航">
       <a
         className="phone-item"
         href="/"
-        aria-current={!resource && !board ? "page" : undefined}
+        aria-current={!resource && !board && !discussions ? "page" : undefined}
       >
         <NavIcon name="chat" />
         对话
@@ -82,6 +86,14 @@ export function PhoneNavigation({
       >
         <NavIcon name="board" />
         Issues
+      </a>
+      <a
+        className="phone-item"
+        href="/discussions"
+        aria-current={discussions ? "page" : undefined}
+      >
+        <NavIcon name="discussion" />
+        讨论
       </a>
       <Notifications mobileIcon={<NavIcon name="notice" />} />
       <a

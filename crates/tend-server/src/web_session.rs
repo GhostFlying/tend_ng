@@ -327,6 +327,12 @@ fn web_route(method: &Method, url: &str) -> bool {
                 .is_some_and(|n| protocol::parse_issue_number(n).is_some())
     };
     match (method, segments.as_slice()) {
+        (Method::Get | Method::Post, ["discussions"]) => true,
+        (Method::Get, ["discussions", "workspaces" | "candidates"]) => true,
+        (Method::Get | Method::Patch, ["discussions", id])
+        | (Method::Get | Method::Post, ["discussions", id, "draft"])
+        | (Method::Post | Method::Delete, ["discussions", id, "references"])
+        | (Method::Post, ["discussions", id, "handoffs"]) => valid(id),
         (
             Method::Get,
             [

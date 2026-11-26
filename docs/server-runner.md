@@ -205,3 +205,9 @@ Issue Chat 消息页用已有的 Run 引用呈现折叠入口。用户点开或�
 - 复用父 Issue 先结案的 fixture，核对结案后 workspace 仍保留，实际目录尚有子 Task 占用时回收请求得到明确结果。待关联 Task 结束且停妥后，用显式请求回收已释放的托管目录。
 
 旧 Tend 的离线执行设计提供了本地执行恢复、持久原件和真实停妥证据的参考。 [旧离线执行设计](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/offline-runner-execution.md#L5-L23)
+
+## 讨论读取已存在的同机 worktree
+
+用户先在 Issue 树选择具体 Task 及 repo。Server 从该 Task 当前已确认的 assignment 读取权威 Runner 和 Host，再沿已配置的 Runner inspection HTTP 通道查询 `/api/v1/inspect/discussion-workspaces/<issue>/<task>/<assignment>`。该查询只承载路径身份和不可用原因，复用已有鉴权，不改变同步协议版本或兼容窗口。不联系异机 Runner；旧 Runner 返回缺路径，Server 标为不支持。
+
+Runner 从该 assignment 的实际 workspace 路径、Run 记录或同机接替 stamp 检查当前目录，并核实其 mount 清单、repo 登记和真实 Git root。目录查找兼容共用目录、隔离 worktree、绑定作者 workspace 和 Task fallback。查询不准入目录、不创建或刷新 worktree、不获取写入权、不 fetch，也不传文件内容。Server 收到响应后再次核对 assignment、Runner、Host、规范路径和设备/inode。只有同 Host 且仍存在的登记挂载进入讨论 App Server 的下一回合只读范围；路径不会作为 Web/CLI 的用户字段返回。文件的后续访问仍受原生文件系统当前状态约束，目录消失或挂载变化会在重新检查时反映，已同步交付与讨论历史保持可读。

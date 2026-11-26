@@ -1,3 +1,4 @@
+import { DiscussionStart } from "./DiscussionStart";
 import { useEffect, useState } from "react";
 import {
   chatLink,
@@ -366,6 +367,10 @@ function IssueSummary({
           <a href={chatLink(data.chat_id, data.source_message_id)}>
             {proposals.length ? "查看原 Chat" : "查看原消息"}
           </a>
+          <DiscussionStart
+            compact
+            origin={{ kind: "issue", issue_id: data.id }}
+          />
           {proposals.length === 0 && (
             <>
               <a href="#issue-discussion">跳到 Issue 对话</a>

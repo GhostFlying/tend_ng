@@ -122,7 +122,7 @@ fn main() -> Result<()> {
             inspection.listen,
             Store::open(&db_path, &config)?,
             runtime.clone(),
-            config.runner_id.clone(),
+            Arc::clone(&config),
             auth,
         )?;
     }

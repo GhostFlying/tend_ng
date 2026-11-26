@@ -20,8 +20,20 @@ const IssueDetail = lazy(() =>
   import("./IssueDetail").then(({ IssueDetail }) => ({ default: IssueDetail })),
 );
 
+const DiscussionSidebar = lazy(() =>
+  import("./Discussions").then(({ DiscussionSidebar }) => ({
+    default: DiscussionSidebar,
+  })),
+);
+const DiscussionPage = lazy(() =>
+  import("./Discussions").then(({ DiscussionPage }) => ({
+    default: DiscussionPage,
+  })),
+);
+
 const path = window.location.pathname;
 const board = path === "/issues";
+const discussions = path === "/discussions";
 const resourceTitle =
   path === "/agents"
     ? "Agents"
@@ -147,13 +159,28 @@ function App() {
             <a
               href="/"
               aria-current={
-                issue || board || resourceTitle ? undefined : "page"
+                issue || board || discussions || resourceTitle
+                  ? undefined
+                  : "page"
               }
               aria-label="对话"
             >
               <NavIcon name="chat" />
               <span>对话</span>
             </a>
+            <a
+              href="/discussions"
+              aria-current={discussions ? "page" : undefined}
+              aria-label="讨论"
+            >
+              <NavIcon name="discussion" />
+              <span>讨论</span>
+            </a>
+            {discussions && (
+              <Suspense fallback={null}>
+                <DiscussionSidebar chat={chatQuery ? chatId : null} />
+              </Suspense>
+            )}
             <a
               href="/issues"
               aria-current={board || issue ? "page" : undefined}
@@ -198,7 +225,10 @@ function App() {
             </nav>
           ) : (
             <h1>
-              {(connected && (resourceTitle || (board && "Issue 看板"))) ||
+              {(connected &&
+                (resourceTitle ||
+                  (board && "Issue 看板") ||
+                  (discussions && "讨论"))) ||
                 "Tend"}
             </h1>
           )}
@@ -238,6 +268,19 @@ function App() {
                 onReachable={setReachable}
               />
             </Suspense>
+          ) : discussions ? (
+            <Suspense
+              fallback={
+                <main className="lane chat" role="status">
+                  正在读取讨论…
+                </main>
+              }
+            >
+              <DiscussionPage
+                chat={chatQuery && chatId !== "main" ? chatId : null}
+                onReachable={setReachable}
+              />
+            </Suspense>
           ) : path === "/agents" ? (
             <Agents onReachable={setReachable} />
           ) : path === "/hosts" ? (
@@ -261,6 +304,7 @@ function App() {
           <PhoneNavigation
             resource={!!resourceTitle}
             board={board || !!issue}
+            discussions={discussions}
           />
         )}
       </div>

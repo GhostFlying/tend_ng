@@ -75,3 +75,13 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 ## 普通报告版本关系
 
 现有 `tend_report_result` 的操作 ID 是普通报告身份。操作者可以用 Server API 或 CLI 补录两个已发布报告之间的版本关系。未来如扩展 `tend_report_result` 允许显式传入前版 ID，应复用 Server 的同 Issue、普通报告、原 Chat 与发布身份、单前驱/后继、无环及原操作幂等规则。只能在两份报告及其精确发布身份均可校验后提交关系，不凭文本、时间或附件猜配，不把版本关系另行投递为消息或等待。本次不新增 Agent 工具参数、不改变 Runner 协议或 Agent 路由。 [普通报告补录](plans/report-version-backfill.md#implemented-contract)
+
+## 独立讨论工具
+
+独立讨论使用 Server 配置的单独本地 App Server。启动和续用确认原生 `tend-discussion` 权限配置、无审批及无网络的只读沙箱。原生 shell 可读系统最小运行环境、空白工作目录及当轮明确附加的本机仓库或挂载。服务模型认证在独立 Codex home 或该服务指定的模型密钥文件内。App Server 不继承 Server 或 Router 凭据，原生 shell 不继承该服务环境。讨论不注入工作、发送、Attention、外部订阅或 Issue/Task 修改工具。受控工具是：
+
+- `tend_read_discussion_history` 分页读本讨论当前输入以前的可见消息，不能传 Chat ID。
+- `tend_read_discussion_reference` 用同一讨论已附加的身份读精确 Issue 的事实、对话、交付索引，或查询已配置的 GitHub provider。工作目录只由原生文件系统读取。
+- `tend_read_discussion_delivery` 核对已附加的确切 Issue 与文件身份，读取同步完成的文本原件。大文件和非文本原件沿原下载入口查看。
+
+GitHub PR 查询沿 Server 的只读凭据。受支持格式的 Codebase 或 GitLab MR 规范化并保留来源链接，目前没有内置 MR 读取 provider，显示不可读原因。已附加 Issue 的作用域不会改变 Router 工具原有的 Chat 检查。 [讨论与转交](chat-routing.md#独立讨论与显式转交)

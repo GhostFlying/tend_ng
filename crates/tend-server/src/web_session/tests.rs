@@ -136,7 +136,11 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     let sql = Connection::open(&path)?;
     // Model a stored v29 database by removing only the v30 table.
     sql.execute_batch(
-        "DROP TABLE web_sessions;
+        "DROP TABLE discussion_handoffs;
+         DROP TABLE discussion_drafts;
+         DROP TABLE discussion_references;
+         DROP TABLE discussions;
+         DROP TABLE web_sessions;
          PRAGMA user_version = 29;",
     )?;
     let reply_schema = |db: &Connection| {
@@ -152,7 +156,7 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     store.prepare_web_sessions(&[0; 32], 0)?;
     let sql = Connection::open(path)?;
     let version = sql.pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?;
-    assert_eq!(version, 31);
+    assert_eq!(version, crate::store::SCHEMA_VERSION);
     assert_eq!(before, reply_schema(&sql)?);
     Ok(())
 }
