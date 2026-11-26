@@ -67,6 +67,12 @@ pub(crate) fn install_tracking(db: &Connection) -> Result<()> {
          WHEN OLD.state IS NOT NEW.state BEGIN
              INSERT INTO board_dirty(id) VALUES (NEW.id) ON CONFLICT(id) DO NOTHING;
          END;
+         CREATE TEMP TRIGGER board_park_insert AFTER INSERT ON main.issue_parks BEGIN
+             INSERT INTO board_dirty(id) VALUES (NEW.issue_id) ON CONFLICT(id) DO NOTHING;
+         END;
+         CREATE TEMP TRIGGER board_park_delete AFTER DELETE ON main.issue_parks BEGIN
+             INSERT INTO board_dirty(id) VALUES (OLD.issue_id) ON CONFLICT(id) DO NOTHING;
+         END;
          CREATE TEMP TRIGGER board_new_task AFTER INSERT ON main.tasks BEGIN
              INSERT INTO board_dirty(id) VALUES (NEW.issue_id) ON CONFLICT(id) DO NOTHING;
          END;

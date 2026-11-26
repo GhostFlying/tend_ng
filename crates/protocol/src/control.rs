@@ -70,3 +70,9 @@ pub struct IssueTransition {
     pub state: String,
     pub reason: String,
 }
+
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct IssueAdmission {
+    // Optional only for the original first-start API.
+    pub operation_id: Option<String>,
+}

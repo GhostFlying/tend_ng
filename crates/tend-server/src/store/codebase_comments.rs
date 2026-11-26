@@ -18,6 +18,7 @@ pub(crate) struct SnapshotStart {
 // current delivery assignment. This predicate uses the Task alias t.
 pub(super) const CAN_RECEIVE: &str = "
     EXISTS(SELECT 1 FROM issues i WHERE i.id=t.issue_id AND i.state!='cancelled')
+    AND NOT EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id=t.issue_id)
     AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.assignment_id=t.current_assignment
         AND c.state='pending' AND c.action->>'kind'='stop')";
 
@@ -250,6 +251,9 @@ fn remember_for_issue(
             "INSERT INTO codebase_comment_sightings(issue_id, url, comment_key, input_id) VALUES (?1,?2,?3,?4)",
             params![issue, url, key, input],
         )?;
+        if let Some(input) = &input {
+            coordination::record_intake(db, input)?;
+        }
         inserted |= input.is_some();
     }
     if !ready {
@@ -473,6 +477,12 @@ fn release_issue(db: &Connection, issue: &str) -> Result<Option<SharedWake>> {
         )?;
         return Ok(None);
     }
+    if super::backlog::parked(db, issue)?
+        && let Some(task) = coordination::latest_task(db, issue)?
+    {
+        flush_for_task(db, &task)?;
+        return Ok(None);
+    }
     let active = db
         .query_row(
             &format!(
@@ -485,7 +495,7 @@ fn release_issue(db: &Connection, issue: &str) -> Result<Option<SharedWake>> {
         .optional()?
         .unwrap_or(false);
     let target = if active {
-        coordination::target_task(db, issue)?
+        coordination::target_due_task(db, issue)?
     } else {
         None
     };
@@ -526,6 +536,29 @@ fn stage(db: &Connection, issue: &str, task: &str, due: i64) -> Result<bool> {
     if !eligible {
         return Ok(false);
     }
+    stage_inputs(db, issue, task, Some(due))?;
+    Ok(true)
+}
+
+pub(super) fn flush_for_task(db: &Connection, task: &str) -> Result<()> {
+    // Only the latest Task can act as the inbox for an Issue. This path
+    // records readiness even while scheduling is fenced or unassigned.
+    let issue = db.query_row(
+        "SELECT b.issue_id FROM codebase_comment_batches b JOIN tasks t ON t.issue_id=b.issue_id
+         WHERE t.id=?1 AND t.rowid=(SELECT max(latest.rowid) FROM tasks latest WHERE latest.issue_id=t.issue_id)",
+        [task], |r| r.get::<_, String>(0),
+    ).optional()?;
+    if let Some(issue) = issue {
+        stage_inputs(db, &issue, task, None)?;
+        db.execute(
+            "DELETE FROM codebase_comment_batches WHERE issue_id=?1",
+            [&issue],
+        )?;
+    }
+    Ok(())
+}
+
+fn stage_inputs(db: &Connection, issue: &str, task: &str, due: Option<i64>) -> Result<()> {
     let mut rows = db.prepare(
         "SELECT s.input_id, f.fact FROM codebase_comment_sightings s JOIN codebase_comment_facts f
            ON f.url=s.url AND f.comment_key=s.comment_key
@@ -563,7 +596,7 @@ fn stage(db: &Connection, issue: &str, task: &str, due: i64) -> Result<bool> {
             [&input.input_id],
         )?;
     }
-    Ok(true)
+    Ok(())
 }
 
 pub(super) fn reattach_stopped(db: &Connection, target: &str) -> Result<()> {
@@ -576,6 +609,7 @@ pub(super) fn reattach_stopped(db: &Connection, target: &str) -> Result<()> {
            JOIN issues i ON i.id=target.issue_id AND i.state != 'cancelled'
            JOIN codebase_comment_sightings s ON s.issue_id=i.id AND s.queued_at IS NOT NULL
            WHERE target.id=?1
+             AND NOT EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id=target.issue_id)
              AND target.rowid=(SELECT max(t.rowid) FROM tasks t WHERE t.issue_id=i.id)
          ) AND task_id IN (
            SELECT id FROM tasks old
@@ -1099,9 +1133,9 @@ mod tests {
             store.db.query_row(
                 "SELECT task_id,wake_at FROM issue_inputs WHERE id=?1",
                 [&original.0],
-                |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<i64>>(1)?))
             )?,
-            ("replacement".to_owned(), original.2),
+            ("replacement".to_owned(), None),
         );
         store
             .db
@@ -1474,11 +1508,9 @@ mod tests {
             coordination::pending_inputs(db, "runner", Some("root-task"), 2, true, true)
         };
         let blocked = old_inputs(&store.db)?;
-        assert!(blocked.iter().any(|i| i.input.input_id == "ordinary"));
         assert!(
-            blocked
-                .iter()
-                .all(|i| !matches!(i.input.cause, IssueInputCause::CodebaseReviewComment { .. }))
+            blocked.is_empty(),
+            "a pending Stop cannot offer a flushed input"
         );
         let [stop] = super::super::control::pending(&store.db, "runner", Some("root-task"))?
             .try_into()
@@ -1525,22 +1557,17 @@ mod tests {
                 None,
             )?
             .unwrap();
-        assert!(
-            accepted.inputs.is_empty(),
-            "acceptance exposed only part of the original batch"
-        );
-        assert!(
-            store
-                .sync_runner(request(json!([]), json!([]))?, None, None)?
-                .unwrap()
-                .inputs
-                .is_empty()
+        let mut accepted_ids = accepted
+            .inputs
+            .into_iter()
+            .map(|i| i.input.input_id)
+            .collect::<Vec<_>>();
+        accepted_ids.sort();
+        assert_eq!(
+            accepted_ids, original,
+            "the explicit reopen flushed the whole accepted prefix"
         );
 
-        store
-            .db
-            .execute("UPDATE codebase_comment_batches SET retry_at=1", [])?;
-        store.release_codebase_comments()?;
         // A later window is not part of the recovered cohort and must not
         // block or become visible with it.
         observe(
@@ -1560,7 +1587,7 @@ mod tests {
         assert_eq!(delivered, original);
         assert_eq!(
             store.db.query_row(
-                "SELECT count(*) FROM issue_inputs WHERE task_id='replacement' AND wake_at=1",
+                "SELECT count(*) FROM issue_inputs WHERE task_id='replacement' AND wake_at IS NULL",
                 [],
                 |r| r.get::<_, i64>(0),
             )?,
@@ -1627,7 +1654,7 @@ mod tests {
             store
                 .db
                 .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))?,
-            39
+            super::super::SCHEMA_VERSION
         );
         assert_eq!(
             store.db.query_row(

@@ -128,10 +128,12 @@ pub(super) fn author_can_request(
             WHERE t.id = ?1 OR t.id = ?2
            UNION SELECT i.id, i.parent_issue_id, i.state FROM issues i JOIN ancestors a ON a.parent = i.id
          )
-         SELECT NOT EXISTS(SELECT 1 FROM ancestors WHERE state = 'cancelled')
+         SELECT NOT EXISTS(SELECT 1 FROM ancestors a LEFT JOIN issue_parks p ON p.issue_id = a.id
+                            WHERE state = 'cancelled' OR p.issue_id IS NOT NULL)
             AND EXISTS(SELECT 1 FROM tasks t JOIN task_runs r ON r.task_id = t.id
                         WHERE r.id = ?3 AND t.current_assignment = ?4
                           AND t.status NOT IN ('completed','failed','cancelled')
+                          AND NOT EXISTS(SELECT 1 FROM parked_tasks p WHERE p.task_id = t.id)
                           AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.task_id = t.id
                              AND c.assignment_id = ?4 AND c.state = 'pending'
                              AND json_extract(c.action, '$.kind') = 'stop'))",
@@ -343,11 +345,14 @@ mod tests {
         db.execute_batch(
             "PRAGMA foreign_keys = ON;
              CREATE TABLE issues(id TEXT PRIMARY KEY);
-             CREATE TABLE tasks(id TEXT PRIMARY KEY);
+             CREATE TABLE tasks(id TEXT PRIMARY KEY, issue_id TEXT);
              CREATE TABLE runner_operations(id TEXT PRIMARY KEY);
              CREATE TABLE issue_inputs(id TEXT PRIMARY KEY, task_id TEXT, payload TEXT, run_id TEXT, wake_at INTEGER);
+             CREATE TABLE external_batches(task_id TEXT PRIMARY KEY);
+             CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY);
+             CREATE TABLE issue_input_order(seq INTEGER PRIMARY KEY, input_id TEXT NOT NULL UNIQUE);
              INSERT INTO issues VALUES ('author-i'), ('review-i');
-             INSERT INTO tasks VALUES ('author-t'), ('review-t');
+             INSERT INTO tasks VALUES ('author-t','author-i'), ('review-t','review-i');
              INSERT INTO runner_operations VALUES ('first'), ('second');",
         )?;
         migrate(&db)?;

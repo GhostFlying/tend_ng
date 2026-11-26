@@ -201,6 +201,9 @@ pub fn apply(
             isolated_workspace,
             work,
         } => {
+            if !super::backlog::old_task(db, &source_task)? {
+                flush_pending(db, &source_task)?;
+            }
             delegate(
                 db,
                 runner,
@@ -223,6 +226,9 @@ pub fn apply(
             work,
             rereview,
         } => {
+            if !super::backlog::old_task(db, &source_task)? {
+                flush_pending(db, &source_task)?;
+            }
             let author: TaskAssignment = serde_json::from_str(&contract)?;
             let workspace = author.workspace_path();
             if !rereview {
@@ -284,6 +290,10 @@ pub fn apply(
             )?;
         }
         WorkAction::CloseIssue { summary } => {
+            if super::backlog::old_task(db, &source_task)? {
+                return Ok(true);
+            }
+            flush_pending(db, &source_task)?;
             let changed = db.execute(
                 "UPDATE issues SET state = 'closed' WHERE id = ?1 AND state = 'open'",
                 [&source_issue],
@@ -413,6 +423,9 @@ pub fn apply(
             }
         }
         WorkAction::SetIssueState { state, reason } => {
+            if super::backlog::old_task(db, &source_task)? {
+                return Ok(true);
+            }
             super::control::transition(
                 db,
                 &source_issue,
@@ -432,6 +445,9 @@ pub fn apply(
                 condition,
                 *mode,
             )?;
+            if *mode == protocol::WatchMode::Wait && super::backlog::old_task(db, &source_task)? {
+                super::external::clear_waits(db, &source_task)?;
+            }
         }
         WorkAction::ConfirmExternal { .. } => {}
         WorkAction::ClearExternalWaits => super::external::clear_waits(db, &source_task)?,
@@ -517,6 +533,10 @@ fn delegate(
         None,
         Some(&agent),
     )?;
+    if super::backlog::parked(db, parent_issue)? || super::backlog::old_task(db, source_task)? {
+        super::backlog::park_late_child(db, issue_id, task_id)?;
+        return Ok(());
+    }
     if requested == "review" && !runner.shared_reviews
         || matching_task_agent(
             runner,
@@ -612,7 +632,7 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
             |row| row.get::<_, bool>(0),
         )?
     {
-        target_task(db, &child_issue_id)?;
+        target_due_task(db, &child_issue_id)?;
     }
     let Some(parent_issue) = parent_issue else {
         return Ok(());
@@ -662,6 +682,14 @@ pub(super) fn latest_task(db: &Connection, issue: &str) -> Result<Option<String>
 }
 
 pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>> {
+    find_target_task(db, issue, true)
+}
+
+pub(super) fn target_due_task(db: &Connection, issue: &str) -> Result<Option<String>> {
+    find_target_task(db, issue, false)
+}
+
+fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Option<String>> {
     let original = db
         .query_row(
             "SELECT t.id, t.status, a.contract FROM tasks t
@@ -682,7 +710,9 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let Some((previous, status, contract)) = original else {
         return Ok(None);
     };
-    if !matches!(status.as_str(), "completed" | "failed" | "cancelled") {
+    if !matches!(status.as_str(), "completed" | "failed" | "cancelled")
+        || super::backlog::parked(db, issue)?
+    {
         return Ok(Some(previous));
     }
     if super::tend_review::binding(db, &previous)?.is_some() {
@@ -693,6 +723,9 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     let Some(contract) = contract else {
         return Ok(None);
     };
+    if barrier {
+        flush_pending(db, &previous)?;
+    }
     let prior: TaskAssignment = serde_json::from_str(&contract)?;
     let task = protocol::new_id();
     db.execute(
@@ -718,6 +751,49 @@ pub(super) fn target_task(db: &Connection, issue: &str) -> Result<Option<String>
     Ok(Some(task))
 }
 
+pub(super) fn move_pending(db: &Connection, previous: &str, task: &str) -> Result<()> {
+    db.execute(
+        "UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
+           AND json_extract(payload, '$.kind') NOT IN ('review_requested','review_finished','attention_answered')
+           AND NOT (json_extract(payload, '$.kind') = 'external_fact'
+                    AND coalesce(json_extract(payload, '$.mode'), '') = 'wait')",
+        params![previous, task],
+    )?;
+    Ok(())
+}
+
+// Releasing a window is a durable readiness change, not a scheduling call.
+pub(super) fn flush_pending(db: &Connection, task: &str) -> Result<()> {
+    super::codebase_comments::flush_for_task(db, task)?;
+    super::external::release_task_deliveries(db, task, true, None)?;
+    flush_child_window(db, task)
+}
+
+fn flush_child_window(db: &Connection, task: &str) -> Result<()> {
+    db.execute("UPDATE issue_inputs SET wake_at = NULL WHERE task_id = ?1 AND run_id IS NULL AND wake_at IS NOT NULL", [task])?;
+    Ok(())
+}
+
+pub(super) fn record_intake(db: &Connection, input: &str) -> Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO issue_input_order(input_id) VALUES (?1)",
+        [input],
+    )?;
+    Ok(())
+}
+
+pub(super) fn enqueue_released_external(
+    db: &Connection,
+    task: &str,
+    input: IssueInput,
+) -> Result<()> {
+    db.execute(
+        "INSERT OR IGNORE INTO issue_inputs (id, task_id, payload) VALUES (?1, ?2, ?3)",
+        params![input.input_id, task, serde_json::to_string(&input)?],
+    )?;
+    Ok(())
+}
+
 pub(super) fn enqueue(db: &Connection, task: &str, input: IssueInput) -> Result<()> {
     let now = db.query_row(&format!("SELECT {NOW_MS}"), [], |row| row.get(0))?;
     enqueue_at(db, task, input, now)
@@ -736,7 +812,18 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
         }
         _ => false,
     };
-    db.execute(
+    if !ordinary {
+        let duplicate = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE id = ?1)",
+            [&input.input_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+        if duplicate {
+            return Ok(());
+        }
+        flush_pending(db, task)?;
+    }
+    if db.execute(
         "INSERT INTO issue_inputs (id, task_id, payload, wake_at)
          VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN coalesce((
              SELECT min(wake_at) FROM issue_inputs
@@ -751,7 +838,10 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
             now,
             now + CHILD_WINDOW_MS
         ],
-    )?;
+    )? > 0
+    {
+        record_intake(db, &input.input_id)?;
+    }
     Ok(())
 }
 
@@ -779,7 +869,10 @@ const DUE_TERMINAL: &str = "SELECT DISTINCT t.issue_id FROM issue_inputs p
        AND t.status IN ('completed', 'failed', 'cancelled') AND t.current_assignment IS NOT NULL
        AND (t.status != 'cancelled' OR p.payload->>'kind' NOT IN ('codebase_review_comment','external_fact'))
        AND NOT EXISTS (SELECT 1 FROM tend_reviews v WHERE v.review_task_id = t.id)
-       AND i.state != 'cancelled' LIMIT 32";
+       AND i.state != 'cancelled'
+       AND NOT EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id = t.issue_id)
+       AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.task_id = t.id AND c.state = 'pending'
+         AND json_extract(c.action, '$.kind') = 'stop') LIMIT 32";
 
 fn release_terminal_windows(db: &Connection) -> Result<()> {
     let mut statement = db.prepare(DUE_TERMINAL)?;
@@ -787,7 +880,7 @@ fn release_terminal_windows(db: &Connection) -> Result<()> {
         .query_map([], |row| row.get::<_, String>(0))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     for issue in issues {
-        if let Some(target) = target_task(db, &issue)? {
+        if let Some(target) = target_due_task(db, &issue)? {
             db.execute(
                 "UPDATE issue_inputs SET task_id = ?2
                  WHERE run_id IS NULL AND wake_at IS NOT NULL AND task_id IN (
@@ -865,11 +958,15 @@ pub(super) fn pending_inputs_at(
     // has already reattached the older inputs.
     let mut statement = db.prepare(&format!(
         "WITH ready AS MATERIALIZED (
-           SELECT i.rowid AS seq, i.task_id, i.wake_at, i.payload, a.id AS assignment_id
+           SELECT i.rowid AS seq, coalesce(o.seq, 0) AS received, i.task_id, i.wake_at, i.payload, a.id AS assignment_id
            FROM issue_inputs i JOIN tasks t ON t.id = i.task_id
+           LEFT JOIN issue_input_order o ON o.input_id = i.id
            JOIN runner_assignments a ON a.id = t.current_assignment
            WHERE i.run_id IS NULL AND a.runner_id = ?1 AND (?3 IS NULL OR t.id = ?3)
              AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
+             AND NOT EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id = t.issue_id)
+             AND NOT EXISTS(SELECT 1 FROM task_controls c WHERE c.task_id = t.id
+                 AND c.assignment_id = a.id AND c.state = 'pending' AND json_extract(c.action, '$.kind') = 'stop')
              AND (?4 >= 2 OR json_extract(i.payload, '$.kind') NOT IN ('review_finished','review_requested'))
              AND (?6 OR json_extract(i.payload, '$.kind') != 'review_requested')
              AND (i.payload->>'kind' != 'codebase_review_comment'
@@ -881,12 +978,12 @@ pub(super) fn pending_inputs_at(
                       )))
              AND (i.wake_at IS NULL OR i.wake_at <= ?5)
          ), page AS MATERIALIZED (
-           SELECT seq, task_id, wake_at FROM ready ORDER BY wake_at IS NOT NULL, seq LIMIT ?2
+           SELECT seq, task_id, wake_at FROM ready ORDER BY received, seq LIMIT ?2
          )
          SELECT payload, assignment_id FROM ready
          WHERE seq IN (SELECT seq FROM page)
             OR (?4 >= 2 AND (task_id, wake_at) IN (SELECT task_id, wake_at FROM page WHERE wake_at IS NOT NULL))
-         ORDER BY wake_at IS NOT NULL, seq",
+         ORDER BY received, seq",
         eligible = super::codebase_comments::CAN_RECEIVE,
     ))?;
     statement
@@ -915,6 +1012,7 @@ pub(super) fn pending_inputs_at(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Store;
     use protocol::{AttentionRequest, IssueMessage, IssueMessageKind};
 
     fn input(id: &str, cause: IssueInputCause) -> IssueInput {
@@ -949,17 +1047,17 @@ mod tests {
 
     #[test]
     fn codebase_comment_batches_require_an_advertising_runner() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+        let store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let db = store.db;
         db.execute_batch(
-            "CREATE TABLE tasks(id TEXT PRIMARY KEY, current_assignment TEXT, status TEXT, issue_id TEXT NOT NULL DEFAULT 'issue');
-             CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT);
-             CREATE TABLE task_controls(assignment_id TEXT, state TEXT, action TEXT);
-             CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY, due_at INTEGER, ordinary_task_id TEXT);
-             INSERT INTO issues VALUES ('issue','open');
-             CREATE TABLE runner_assignments(id TEXT PRIMARY KEY, runner_id TEXT);
-             CREATE TABLE issue_inputs(id TEXT PRIMARY KEY, task_id TEXT, payload TEXT, run_id TEXT, wake_at INTEGER);
-             INSERT INTO runner_assignments VALUES ('assignment', 'runner');
-             INSERT INTO tasks(id,current_assignment,status) VALUES ('owner', 'assignment', 'waiting');",
+            "INSERT INTO chat_messages (id, chat_id, text) VALUES ('source','main','Fixture');
+             INSERT INTO issues (id, source_seq, title, objective) VALUES ('issue',1,'Fixture','');
+             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner','host','{}',0);
+             INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                 VALUES ('owner','issue','fixture','waiting','[]','[]');
+             INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at)
+                 VALUES ('assignment','owner','runner','{}','accepted',0);
+             UPDATE tasks SET current_assignment = 'assignment' WHERE id = 'owner';",
         )?;
         let comment = protocol::CodebaseReviewComment {
             id: "id".into(),
@@ -993,9 +1091,10 @@ mod tests {
                 },
             ))?;
             db.execute(
-                "INSERT INTO issue_inputs VALUES (?1,'owner',?2,NULL,?3)",
+                "INSERT INTO issue_inputs (id, task_id, payload, wake_at) VALUES (?1,'owner',?2,?3)",
                 params![id, payload, due],
             )?;
+            record_intake(&db, &id)?;
         }
         assert_eq!(
             pending_inputs_at(&db, "runner", None, 1, false, true, due)?.len(),
@@ -1016,23 +1115,24 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_window_is_fixed_atomic_and_independent_of_immediate_inputs() -> Result<()> {
-        let db = Connection::open_in_memory()?;
+    fn ordinary_window_is_fixed_atomic_and_cut_by_immediate_inputs() -> Result<()> {
+        let store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let db = store.db;
         db.execute_batch(
-            "CREATE TABLE tasks(id TEXT PRIMARY KEY, current_assignment TEXT, status TEXT, issue_id TEXT NOT NULL DEFAULT 'issue');
-             CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT);
-             CREATE TABLE task_controls(assignment_id TEXT, state TEXT, action TEXT);
-             CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY, due_at INTEGER, ordinary_task_id TEXT);
-             INSERT INTO issues VALUES ('issue','open');
-             CREATE TABLE runner_assignments(id TEXT PRIMARY KEY, runner_id TEXT);
-             CREATE TABLE issue_inputs(id TEXT PRIMARY KEY, task_id TEXT, payload TEXT, run_id TEXT);
-             INSERT INTO runner_assignments VALUES ('assignment', 'runner'), ('other-assignment', 'runner');
-             INSERT INTO tasks(id,current_assignment,status) VALUES ('parent', 'assignment', 'waiting'),
-                                      ('other-parent', 'other-assignment', 'waiting');",
+            "INSERT INTO chat_messages (id, chat_id, text) VALUES ('source', 'main', 'Fixture');
+             INSERT INTO issues (id, source_seq, title, objective) VALUES ('root', 1, 'Fixture', '');
+             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host', '{}', 0);
+             INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                VALUES ('parent', 'root', 'fixture', 'waiting', '[]', '[]'),
+                       ('other-parent', 'root', 'fixture', 'waiting', '[]', '[]');
+             INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at)
+                VALUES ('assignment', 'parent', 'runner', '{}', 'accepted', 0),
+                       ('other-assignment', 'other-parent', 'runner', '{}', 'accepted', 0);
+             UPDATE tasks SET current_assignment = (SELECT id FROM runner_assignments WHERE task_id = tasks.id);",
         )?;
-        migrate_continuity(&db)?;
         let start = 100_000;
         let due = start + CHILD_WINDOW_MS;
+        let later_due = due + CHILD_WINDOW_MS - 1;
         enqueue_at(
             &db,
             "parent",
@@ -1108,7 +1208,7 @@ mod tests {
             &db,
             "parent",
             input("next", IssueInputCause::IssueClosed),
-            due,
+            later_due,
         )?;
         enqueue_at(
             &db,
@@ -1127,6 +1227,7 @@ mod tests {
         assert_eq!(
             fast,
             [
+                "first",
                 "user",
                 "relay",
                 "question",
@@ -1139,18 +1240,30 @@ mod tests {
         assert_eq!(
             db.query_row("SELECT count(*) FROM issue_inputs", [], |row| row
                 .get::<_, usize>(0))?,
-            fast.len() + RUNNER_SYNC_BATCH + 4
+            fast.len() + RUNNER_SYNC_BATCH + 3
         );
-        let batch = keys(due)?;
-        assert_eq!(batch.len(), fast.len() + RUNNER_SYNC_BATCH + 2);
-        assert_eq!(batch[fast.len()], "first");
-        assert!(!batch.iter().any(|id| id == "next" || id == "other"));
-        assert_eq!(keys(due + 1)?, batch);
-        // Simulate one Run receipt for the matured parent window.
-        db.execute("UPDATE issue_inputs SET run_id = 'run' WHERE task_id = 'parent' AND (wake_at IS NULL OR wake_at = ?1)", [due])?;
-        assert!(keys(due + 1)?.is_empty());
-        assert_eq!(keys(due + CHILD_WINDOW_MS - 1)?, ["other"]);
-        assert_eq!(keys(due + CHILD_WINDOW_MS)?, ["other", "next"]);
+        assert_eq!(keys(due)?, fast);
+        assert_eq!(keys(due + 1)?, fast);
+        // Delete the offered prefix to simulate consumption in the next sync.
+        db.execute(
+            "DELETE FROM issue_inputs WHERE task_id = 'parent' AND wake_at IS NULL",
+            [],
+        )?;
+        assert!(keys(later_due - 1)?.is_empty());
+        let batch = keys(later_due)?;
+        assert_eq!(
+            batch.iter().filter(|id| id.starts_with("close-")).count(),
+            RUNNER_SYNC_BATCH + 1,
+            "{batch:?}"
+        );
+        assert_eq!(batch.first().map(String::as_str), Some("close-0"));
+        assert!(!batch.iter().any(|id| id == "next"));
+        db.execute(
+            "DELETE FROM issue_inputs WHERE task_id = 'parent' AND wake_at = ?1",
+            [later_due],
+        )?;
+        assert_eq!(keys(later_due)?, ["other"]);
+        assert_eq!(keys(later_due + CHILD_WINDOW_MS)?, ["other", "next"]);
         Ok(())
     }
 }

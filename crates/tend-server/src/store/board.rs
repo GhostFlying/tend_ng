@@ -39,6 +39,7 @@ const CARD_JOINS: &str = "FROM issues i JOIN chat_messages source ON source.seq 
 #[derive(Default)]
 struct Progress {
     running: u32,
+    parked: bool,
     // Earliest time any task can be ready (zero for untimed readiness).
     ready_at: Option<i64>,
     waiting: bool,
@@ -53,7 +54,7 @@ impl Progress {
             "closed" => BoardStage::Done,
             "cancelled" => BoardStage::Cancelled,
             _ if self.running > 0 => BoardStage::InProgress,
-            _ if task == "backlog" => BoardStage::Backlog,
+            _ if self.parked || task == "backlog" => BoardStage::Backlog,
             _ if self.ready_at.is_some_and(|at| at <= now) => BoardStage::Todo,
             _ if self.waiting || attention => BoardStage::Waiting,
             _ => BoardStage::Todo,
@@ -394,6 +395,7 @@ fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progres
     let mut query = db.prepare_cached(&format!(
         "{TREE}, work AS (
              SELECT tree.root, t.id, t.status, COALESCE(t.workspace_key, i.parent_issue_id) AS workspace,
+                    EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id = i.id) AS parked,
                     COALESCE(json_extract(r.observation, '$.phase.waiting_for_external'), 0) AS external,
                     COALESCE(json_extract(r.observation, '$.phase.waiting_for_attention'), 0) AS reply,
                     COALESCE(json_extract(r.observation, '$.phase.waiting_for_children'), 0) AS children,
@@ -405,6 +407,7 @@ fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progres
          )
          SELECT w.root, SUM(w.status = 'running'),
                 MIN(CASE WHEN w.status IN ('awaiting_assignment','awaiting_receipt','accepted','waiting')
+                    AND NOT w.parked
                     AND NOT EXISTS (
                         SELECT 1 FROM work holder WHERE holder.root = w.root AND holder.id != w.id
                          AND holder.workspace = w.workspace AND holder.status = 'waiting' AND holder.external
@@ -412,8 +415,9 @@ fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progres
                         SELECT COALESCE(wake_at, 0) FROM issue_inputs
                         WHERE task_id = w.id AND run_id IS NULL ORDER BY wake_at LIMIT 1
                     ) END END),
-                MAX(w.status = 'waiting'),
-                MAX(w.external), MAX(w.reply), MAX(w.children)
+                MAX(w.status = 'waiting' AND NOT w.parked),
+                MAX(w.external AND NOT w.parked), MAX(w.reply AND NOT w.parked), MAX(w.children AND NOT w.parked),
+                EXISTS(SELECT 1 FROM issue_parks p WHERE p.issue_id = w.root)
          FROM work w GROUP BY w.root"
     ))?;
     Ok(query
@@ -427,6 +431,7 @@ fn read_progress(db: &Connection, roots: &str) -> Result<HashMap<String, Progres
                     external: row.get(4)?,
                     reply: row.get(5)?,
                     children: row.get(6)?,
+                    parked: row.get(7)?,
                 },
             ))
         })?

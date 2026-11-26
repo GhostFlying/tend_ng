@@ -28,6 +28,8 @@ BOARD_WAITING = "顺带准备另一个仓库的发布记录。"
 cases[BOARD_WAITING] = {"dispatch": True}
 RECORD_ISSUE = "先记下稍后整理发布说明。"
 START_ISSUE = "开始刚才记下的发布说明。"
+PARK_ISSUE = "Park fixture Issue "
+PARK_FOREIGN_ISSUE = "Reject parking foreign fixture Issue "
 REGISTERED_REVIEW = "review Lynx MR !75573"
 cases[RECORD_ISSUE] = {"answer": "已记下，稍后再做。"}
 cases[START_ISSUE] = {"answer": "已经安排原 Issue 开工。"}
@@ -258,6 +260,10 @@ for line in sys.stdin:
                 case = {"answer": "Accepted."}
             elif text.startswith(CROSS_CHAT_LOOKUP):
                 case = {"answer": "The Issue is outside this Chat."}
+            elif text.startswith(PARK_ISSUE):
+                case = {"answer": "Backlog request accepted."}
+            elif text.startswith(PARK_FOREIGN_ISSUE):
+                case = {"answer": "Cannot park a different Chat's Issue."}
             else:
                 case = cases[text]
             with database:
@@ -305,6 +311,16 @@ for line in sys.stdin:
                 assert record["stage"] == "backlog" and "task_id" not in recorded
                 receipt = decision_tool("tend_start_issue", {"issue_id": record["id"]}, thread_id, turn_id, token)
                 assert receipt["issue_id"] == record["id"] and receipt["task_id"]
+                answer = case["answer"]
+            elif text.startswith((PARK_ISSUE, PARK_FOREIGN_ISSUE)):
+                allowed = text.startswith(PARK_ISSUE)
+                issue = text.removeprefix(PARK_ISSUE if allowed else PARK_FOREIGN_ISSUE)
+                args = {"issue_id": issue}
+                token = params["clientUserMessageId"]
+                receipt = decision_tool("tend_backlog_issue", args, thread_id, turn_id, token, success=allowed)
+                if allowed:
+                    assert receipt["state"] == "backlog"
+                    assert receipt == decision_tool("tend_backlog_issue", args, thread_id, turn_id, token)
                 answer = case["answer"]
             elif text == CHECK_ISSUE:
                 token = params["clientUserMessageId"]

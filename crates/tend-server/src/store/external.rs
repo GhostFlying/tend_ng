@@ -134,12 +134,14 @@ fn queue(db: &Connection, watch: &Watch, fact: &str) -> Result<()> {
 }
 
 fn queue_delivery(db: &Connection, watch: &str, task: &str, fact: &str) -> Result<()> {
+    let delivery = protocol::new_id();
     if db.execute(
         "INSERT INTO external_deliveries(id, watch_id, fact_id) VALUES (?1, ?2, ?3) ON CONFLICT DO NOTHING",
-        params![protocol::new_id(), watch, fact],
+        params![delivery, watch, fact],
     )? == 0 {
         return Ok(());
     }
+    coordination::record_intake(db, &delivery)?;
     db.execute(
         "INSERT INTO external_batches(task_id, due_at) VALUES (?1, unixepoch() + 300) ON CONFLICT DO NOTHING",
         [task],
@@ -297,6 +299,225 @@ fn watch_mode(mode: &str) -> WatchMode {
     }
 }
 
+#[cfg(test)]
+mod ordering_tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn explicit_barrier_keeps_external_and_child_acceptance_order() -> Result<()> {
+        let store = Store::initialize(Path::new(":memory:"))?;
+        let db = &store.db;
+        db.execute_batch(
+            "INSERT INTO chat_messages (id, chat_id, text) VALUES ('source', 'main', 'Fixture');
+             INSERT INTO issues (id, source_seq, title, objective) VALUES ('issue', 1, 'Issue', '');
+             INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                VALUES ('task', 'issue', 'fixture', 'waiting', '[]', '[]');
+             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host', '{}', 0);
+             INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at)
+                VALUES ('claim', 'task', 'runner', '{}', 'accepted', 0);
+             UPDATE tasks SET current_assignment = 'claim' WHERE id = 'task';",
+        )?;
+        let url = "https://github.com/example/repo/pull/1";
+        let condition = ExternalCondition {
+            url: url.into(),
+            event: ExternalKind::Pull,
+            state: "open".into(),
+            head_sha: None,
+            check: None,
+            run_id: None,
+        };
+        register(
+            db,
+            "watch",
+            "issue",
+            "task",
+            &condition,
+            WatchMode::Optional,
+        )?;
+        let observed = |head: &str| {
+            save_fact(
+                db,
+                "pr",
+                &ExternalFact {
+                    url: url.into(),
+                    event: ExternalKind::Pull,
+                    state: "open".into(),
+                    head_sha: Some(head.repeat(40)),
+                    check: None,
+                    run_id: None,
+                },
+                None,
+                false,
+            )
+        };
+        let enqueue = |id: &str, cause| {
+            coordination::enqueue(
+                db,
+                "task",
+                IssueInput {
+                    input_id: id.into(),
+                    child_issue_id: "issue".into(),
+                    child_task_id: "task".into(),
+                    summary: id.into(),
+                    cause,
+                },
+            )
+        };
+        observed("a")?;
+        enqueue("child", IssueInputCause::IssueClosed)?;
+        assert!(coordination::pending_inputs(db, "runner", None, 2, true, true)?.is_empty());
+        enqueue(
+            "barrier",
+            IssueInputCause::TaskCancelled {
+                control_id: "stop-note".into(),
+            },
+        )?;
+        observed("b")?;
+        let received = coordination::pending_inputs(db, "runner", None, 2, true, true)?;
+        assert!(
+            matches!(&received[0].input.cause, IssueInputCause::ExternalFact { fact, .. }
+                         if fact.head_sha.as_deref() == Some(&"a".repeat(40)))
+        );
+        assert_eq!(
+            received
+                .iter()
+                .skip(1)
+                .map(|r| r.input.input_id.as_str())
+                .collect::<Vec<_>>(),
+            ["child", "barrier"]
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM external_deliveries WHERE released_at IS NULL",
+                [],
+                |r| r.get::<_, u32>(0)
+            )?,
+            1
+        );
+        Ok(())
+    }
+}
+
+// A barrier releases the exact already-received inputs on their original
+// Task before the controlling operation can decide what should run.
+pub(super) fn release_task_deliveries(
+    db: &Connection,
+    task: &str,
+    force: bool,
+    shared: Option<&super::codebase_comments::SharedWake>,
+) -> Result<()> {
+    if !db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM external_batches WHERE task_id = ?1)",
+        [task],
+        |row| row.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let deliveries = {
+        let mut statement = db.prepare(
+            "SELECT d.id, coalesce(w.route_id, w.id), w.issue_id, w.mode, w.state, f.id, f.fact, f.error,
+                    t.status, w.origin_issue, m.chat_id
+             FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
+             JOIN external_facts f ON f.id = d.fact_id JOIN tasks t ON t.id = w.task_id
+             LEFT JOIN external_routes r ON r.id = w.route_id
+             LEFT JOIN chat_messages m ON m.seq = r.message_seq
+             WHERE w.task_id = ?1 AND d.released_at IS NULL ORDER BY d.rowid",
+        )?;
+        statement
+            .query_map([task], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, String>(8)?,
+                    row.get::<_, Option<String>>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    let historical = super::backlog::old_task(db, task)?;
+    for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
+        deliveries
+    {
+        let mode = watch_mode(&mode);
+        let target = if force {
+            Some(task.to_owned())
+        } else if historical {
+            // A late matching fact remains auditable. It cannot readmit its
+            // old Task or wake Router via the cancelled-Task fallback.
+            if mode == WatchMode::Wait {
+                Some(task.to_owned())
+            } else {
+                coordination::latest_task(db, &issue)?.or_else(|| Some(task.to_owned()))
+            }
+        } else if state == "withdrawn" || task_state == "cancelled" {
+            None
+        } else if matches!(task_state.as_str(), "completed" | "failed") {
+            if mode == WatchMode::Wait {
+                None
+            } else {
+                coordination::target_due_task(db, &issue)?
+            }
+        } else {
+            Some(task.to_owned())
+        };
+        if let Some(target) = target {
+            let fact: ExternalFact = serde_json::from_str(&raw)?;
+            let summary = error.as_ref().map_or_else(
+                || format!("GitHub observed {} on {}", fact.state, fact.url),
+                |error| format!("GitHub observation unavailable for {} ({error})", fact.url),
+            );
+            coordination::enqueue_released_external(
+                db,
+                &target,
+                IssueInput {
+                    input_id: id.clone(),
+                    child_issue_id: origin.unwrap_or(issue),
+                    child_task_id: task.to_owned(),
+                    summary,
+                    cause: IssueInputCause::ExternalFact {
+                        watch_id,
+                        fact_id,
+                        mode,
+                        fact,
+                        error,
+                    },
+                },
+            )?;
+            if let Some(shared) = shared
+                && shared.task == target
+            {
+                db.execute(
+                    "UPDATE issue_inputs SET wake_at=?2 WHERE id=?1 AND run_id IS NULL",
+                    params![id, shared.at],
+                )?;
+            }
+        } else if let Some(chat) = chat {
+            super::external_routing::queue_router(
+                db,
+                &watch_id,
+                &fact_id,
+                &chat,
+                origin.as_deref(),
+                Some(0),
+            )?;
+        }
+        db.execute(
+            "UPDATE external_deliveries SET released_at = unixepoch() WHERE id = ?1",
+            [&id],
+        )?;
+    }
+    db.execute("DELETE FROM external_batches WHERE task_id = ?1", [task])?;
+    Ok(())
+}
+
 impl Store {
     pub fn release_external(&mut self) -> Result<()> {
         let Some(task) = self.db.query_row(
@@ -307,112 +528,23 @@ impl Store {
         let mut tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let deliveries = {
-            let mut statement = tx.prepare(
-                "SELECT d.id, coalesce(w.route_id, w.id), w.issue_id, w.mode, w.state, f.id, f.fact, f.error,
-                        t.status, w.origin_issue, m.chat_id
-                 FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
-                 JOIN external_facts f ON f.id = d.fact_id JOIN tasks t ON t.id = w.task_id
-                 LEFT JOIN external_routes r ON r.id = w.route_id
-                 LEFT JOIN chat_messages m ON m.seq = r.message_seq
-                 WHERE w.task_id = ?1 AND d.released_at IS NULL ORDER BY d.rowid",
-            )?;
-            statement
-                .query_map([&task], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                        row.get::<_, String>(5)?,
-                        row.get::<_, String>(6)?,
-                        row.get::<_, Option<String>>(7)?,
-                        row.get::<_, String>(8)?,
-                        row.get::<_, Option<String>>(9)?,
-                        row.get::<_, Option<String>>(10)?,
-                    ))
-                })?
-                .collect::<rusqlite::Result<Vec<_>>>()?
-        };
-        let shared = {
-            let mut companion = tx.savepoint()?;
-            match super::codebase_comments::release_for_external_batch(&companion, &task) {
-                Ok(shared) => {
-                    companion.commit()?;
-                    shared
+        if tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM external_batches WHERE task_id = ?1 AND due_at <= unixepoch())",
+            [&task], |row| row.get::<_, bool>(0),
+        )? {
+            let shared = {
+                let mut companion = tx.savepoint()?;
+                match super::codebase_comments::release_for_external_batch(&companion, &task) {
+                    Ok(shared) => { companion.commit()?; shared }
+                    Err(error) => {
+                        companion.rollback()?;
+                        eprintln!("Release Codebase companion: {error:#}");
+                        None
+                    }
                 }
-                Err(error) => {
-                    companion.rollback()?;
-                    eprintln!("Release Codebase companion: {error:#}");
-                    None
-                }
-            }
-        };
-        for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
-            deliveries
-        {
-            let mode = watch_mode(&mode);
-            let target = if state == "withdrawn" || task_state == "cancelled" {
-                None
-            } else if matches!(task_state.as_str(), "completed" | "failed") {
-                if mode == WatchMode::Wait {
-                    None
-                } else {
-                    coordination::target_task(&tx, &issue)?
-                }
-            } else {
-                Some(task.clone())
             };
-            if let Some(target) = target {
-                let fact: ExternalFact = serde_json::from_str(&raw)?;
-                let summary = error.as_ref().map_or_else(
-                    || format!("GitHub observed {} on {}", fact.state, fact.url),
-                    |error| format!("GitHub observation unavailable for {} ({error})", fact.url),
-                );
-                coordination::enqueue(
-                    &tx,
-                    &target,
-                    IssueInput {
-                        input_id: id.clone(),
-                        child_issue_id: origin.unwrap_or(issue),
-                        child_task_id: task.clone(),
-                        summary,
-                        cause: IssueInputCause::ExternalFact {
-                            watch_id,
-                            fact_id,
-                            mode,
-                            fact,
-                            error,
-                        },
-                    },
-                )?;
-                if let Some(shared) = &shared
-                    && shared.task == target
-                {
-                    // Pair only this companion cohort. Keep ordinary GitHub
-                    // routes, wake ordering and matching unchanged elsewhere.
-                    tx.execute(
-                        "UPDATE issue_inputs SET wake_at=?2 WHERE id=?1 AND run_id IS NULL",
-                        params![id, shared.at],
-                    )?;
-                }
-            } else if let Some(chat) = chat {
-                super::external_routing::queue_router(
-                    &tx,
-                    &watch_id,
-                    &fact_id,
-                    &chat,
-                    origin.as_deref(),
-                    Some(0),
-                )?;
-            }
-            tx.execute(
-                "UPDATE external_deliveries SET released_at = unixepoch() WHERE id = ?1",
-                [&id],
-            )?;
+            release_task_deliveries(&tx, &task, false, shared.as_ref())?;
         }
-        tx.execute("DELETE FROM external_batches WHERE task_id = ?1", [&task])?;
         super::board::commit(tx)?;
         Ok(())
     }

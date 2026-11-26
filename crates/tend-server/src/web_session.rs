@@ -356,7 +356,7 @@ fn web_route(method: &Method, url: &str) -> bool {
                 "messages" | "overview" | "attention-replies" | "token-usage",
             ],
         )
-        | (Method::Post, ["issues", id, "messages" | "start" | "state"]) => issue(id),
+        | (Method::Post, ["issues", id, "messages" | "start" | "state" | "backlog"]) => issue(id),
         (Method::Post, ["issues", id, "attentions", attention, "answer"]) => {
             issue(id) && valid(attention)
         }

@@ -63,6 +63,7 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (Method::Get, "/api/v1/issues/42/token-usage"),
         (Method::Post, "/api/v1/issues/42/attentions/question/answer"),
         (Method::Post, "/api/v1/issues/42/start"),
+        (Method::Post, "/api/v1/issues/%2342/backlog"),
         (Method::Post, "/api/v1/issues/42/state"),
         (
             Method::Post,
@@ -80,6 +81,7 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (Method::Post, "/api/v1/runners/fixture/retire"),
         (Method::Get, "/api/v1/upgrade-check/2"),
         (Method::Get, "/api/v1/issues/42/start"),
+        (Method::Get, "/api/v1/issues/42/backlog"),
         (Method::Get, "/api/v1/issues/42/reclaim"),
         (Method::Post, "/api/v1/issues/42/reclaim"),
         (Method::Get, "/api/v1/issues/42/attentions/question/answer"),

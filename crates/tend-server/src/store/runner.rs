@@ -144,7 +144,8 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
         return Ok(());
     }
     if db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issues i ON i.id = t.issue_id
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issue_parks p ON p.issue_id = t.issue_id WHERE t.id = ?1)
+         OR EXISTS(SELECT 1 FROM tasks t JOIN issues i ON i.id = t.issue_id
              JOIN workspace_reclaims w ON w.issue_id = coalesce(i.parent_issue_id, i.id) AND w.receipt IS NULL
              WHERE t.id = ?1)",
         [&dispatch.task_id], |row| row.get::<_, bool>(0),
@@ -653,6 +654,12 @@ impl Store {
                 if state == "accepted" {
                     super::issue_chat::record_takeover(&tx, &receipt.assignment_id)?;
                     super::codebase_comments::reattach_stopped(&tx, &task)?;
+                } else if status == "cancelled" {
+                    super::control::settle_proven_stops(
+                        &tx,
+                        &profile.runner_id,
+                        &receipt.assignment_id,
+                    )?;
                 }
             } else if recorded_decision.as_deref() != Some(&decision) {
                 return Ok(None);

@@ -207,7 +207,9 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
             [&proof.task_id],
             |row| row.get::<_, bool>(0),
         )?;
-    if (proof.context.phase != HandoffPhase::Finished || pending_review)
+    let stopping = super::control::settle_proven_stops(db, runner, &proof.assignment_id)?;
+    if !stopping
+        && (proof.context.phase != HandoffPhase::Finished || pending_review)
         && current.as_deref() == Some(&proof.assignment_id)
     {
         let mut context = serde_json::to_value(&proof.context)?;

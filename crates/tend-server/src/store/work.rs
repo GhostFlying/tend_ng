@@ -163,6 +163,7 @@ impl Store {
         Ok(Some(result))
     }
 
+    #[cfg(test)]
     pub fn start_recorded_issue(
         &mut self,
         id: &str,
@@ -171,35 +172,9 @@ impl Store {
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let record = tx
-            .query_row(
-                "SELECT d.operation_id, d.task_id, d.request, i.state
-             FROM router_dispatches d JOIN issues i ON i.id = d.issue_id
-             JOIN chat_messages m ON m.seq = i.source_seq
-             WHERE i.id = ?1 AND d.recorded = 1 AND (?2 IS NULL OR m.chat_id = ?2)",
-                params![id, chat],
-                |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, Option<String>>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((operation, task, raw, state)) = record else {
-            return Ok(None);
-        };
-        if task.is_none() {
-            if state != "open" {
-                return Ok(None);
-            }
-            start_first_task(&tx, id, &operation, &serde_json::from_str(&raw)?)?;
-        }
-        let result = receipt(&tx, &operation)?;
+        let result = start_first_recorded(&tx, id, chat)?;
         super::board::commit(tx)?;
-        Ok(Some(result))
+        Ok(result)
     }
 
     pub fn issue(&self, id: &str) -> Result<Option<IssueDetail>> {
@@ -267,6 +242,40 @@ impl Store {
             .map(|id| receipt(&self.db, &id?))
             .collect()
     }
+}
+
+pub(super) fn start_first_recorded(
+    db: &Connection,
+    id: &str,
+    chat: Option<&str>,
+) -> Result<Option<IssueDetail>> {
+    let record = db
+        .query_row(
+            "SELECT d.operation_id, d.task_id, d.request, i.state
+             FROM router_dispatches d JOIN issues i ON i.id = d.issue_id
+             JOIN chat_messages m ON m.seq = i.source_seq
+             WHERE i.id = ?1 AND d.recorded = 1 AND (?2 IS NULL OR m.chat_id = ?2)",
+            params![id, chat],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((operation, task, raw, state)) = record else {
+        return Ok(None);
+    };
+    if task.is_none() {
+        if state != "open" {
+            return Ok(None);
+        }
+        start_first_task(db, id, &operation, &serde_json::from_str(&raw)?)?;
+    }
+    Ok(Some(receipt(db, &operation)?))
 }
 
 fn start_first_task(

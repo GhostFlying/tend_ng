@@ -18,6 +18,7 @@ def main():
     server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:4])
     cancelling = "--cancel" in sys.argv[4:]
     handoff = "--handoff" in sys.argv[4:]
+    backlog = "--backlog" in sys.argv[4:]
     with tempfile.TemporaryDirectory(prefix="tend-wait-") as directory:
         root = Path(directory)
         addr = free_port()
@@ -30,6 +31,8 @@ def main():
         mode = root / "wait-mode"
         mode.write_text("pending")
         (root / "delegate-now").touch()
+        if backlog:
+            (root / "backlog-fixture").touch()
         env = {**os.environ, "TEND_TOKEN": "wait-fixture", "TEND_URL": f"http://{addr}"}
         server_env = {**env, "GH_TOKEN": "fixture-read-token", "TEND_GITHUB_FIXTURE_DIR": str(root)}
 
@@ -86,6 +89,29 @@ def main():
                 reschedule("matching")
                 assert sql("server", "SELECT count(*) FROM external_deliveries") == [(3,)]
                 assert not (root / "resumed-wait.json").exists()
+                if backlog:
+                    root_issue = root_card["id"]
+                    cli("issue", "backlog", root_issue, "park-waiting-tree")
+                    wait_for(lambda: sql("server", "SELECT count(*) FROM task_controls WHERE state='pending'"),
+                             lambda rows: rows == [(0,)])
+                    assert sql("runner", "SELECT execution_state, retains_workspace FROM received_assignments "
+                               "WHERE task_id IN (?, ?) ORDER BY task_id", task, shared) == [("cancelled", 0)] * 2
+                    assert sql("server", "SELECT count(*) FROM external_batches WHERE task_id = ?", task) == [(0,)]
+                    assert sql("server", "SELECT count(*) FROM external_deliveries WHERE released_at IS NOT NULL") == [(3,)]
+                    assert sql("server", "SELECT count(*) FROM external_watches "
+                               "WHERE task_id = ? AND mode = 'wait' AND state = 'withdrawn'", task) == [(1,)]
+                    assert sql("server", "SELECT count(*) FROM task_runs WHERE task_id = ?", task) == [(1,)]
+                    file_id = json.loads((root / "fixture-delivery.json").read_text())["operation_id"]
+                    assert subprocess.check_output([cli_bin, "artifact", "download", file_id], env=env, timeout=5) == b"A fixture guide.\n"
+                    assert (root / "runner.runs" / "workspaces" / root_issue / "repos" / "example" / "guide.txt").is_file()
+                    assert not (root / "resumed-wait.json").exists() and not (root / "shared-ran").exists()
+                    cli("issue", "message", issue, "Retain this while the tree is parked.", "parked-child-message")
+                    assert sql("server", "SELECT count(*) FROM tasks WHERE issue_id = ?", issue) == [(1,)]
+                    assert all(card["stage"] == "backlog" for card in cli("issue", "list")["issues"]
+                               if card["id"] in (root_issue, issue))
+                    print("PASS parking a subtree stops a wait and a queued sibling, releases the retained directory, "
+                          "and keeps external evidence and late messages without a new Run")
+                    return
                 active_db = "runner"
                 if handoff:
                     next_config = {**config, "runner_id": "next-runner", "standby": True}

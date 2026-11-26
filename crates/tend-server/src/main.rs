@@ -729,17 +729,48 @@ fn handle(
             _ => Ok(api_error(405, "method not allowed")),
         };
     }
-    if let Some(issue_id) = path
+    if let Some((issue_id, action)) = path
         .strip_prefix("/api/v1/issues/")
-        .and_then(|path| path.strip_suffix("/start"))
-        .filter(|id| protocol::valid_id(id))
+        .and_then(|path| path.split_once('/'))
+        .filter(|(id, action)| protocol::valid_id(id) && matches!(*action, "start" | "backlog"))
     {
         if request.method() != &Method::Post {
             return Ok(api_error(405, "method not allowed"));
         }
-        return Ok(match store.start_recorded_issue(issue_id, None)? {
-            Some(issue) => (200, serde_json::to_value(issue)?),
-            None => api_error(409, "No startable recorded Issue with that ID"),
+        let (issue_id, action) = (issue_id.to_owned(), action.to_owned());
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let input = if bytes.is_empty() {
+            protocol::IssueAdmission::default()
+        } else if let Ok(input) = serde_json::from_slice::<protocol::IssueAdmission>(&bytes) {
+            input
+        } else {
+            return Ok(api_error(400, "expected an operation ID"));
+        };
+        if input
+            .operation_id
+            .as_deref()
+            .is_some_and(|id| !protocol::valid_id(id))
+        {
+            return Ok(api_error(400, "invalid operation ID"));
+        }
+        let result = if action == "backlog" {
+            let Some(operation) = &input.operation_id else {
+                return Ok(api_error(400, "a valid operation ID is required"));
+            };
+            store.return_to_backlog(&issue_id, None, operation)?
+        } else {
+            store.start_issue(&issue_id, None, input.operation_id.as_deref())?
+        };
+        use store::control::ResultState;
+        return Ok(match result {
+            ResultState::Found(receipt) => (200, receipt),
+            ResultState::Missing => api_error(404, "Issue not found"),
+            ResultState::Conflict => api_error(
+                409,
+                "Issue admission conflict: verify its state, subtree stop receipts and operation ID",
+            ),
         });
     }
     if let Some(issue_id) = path

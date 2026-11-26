@@ -3,6 +3,7 @@
 import json
 import os
 from pathlib import Path
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -15,6 +16,7 @@ from issue_chat import TESTS, free_port, prepare
 def main():
     server_bin, cli_bin, runner_bin = (Path(value).resolve() for value in sys.argv[1:4])
     self_stop = "--agent-stop" in sys.argv[4:]
+    backlog = "--backlog" in sys.argv[4:]
     with tempfile.TemporaryDirectory(prefix="tend-control-") as directory:
         root = Path(directory)
         addr = free_port()
@@ -26,7 +28,7 @@ def main():
         def cli(*words):
             return json.loads(subprocess.check_output([cli_bin, *words], env=env, timeout=6))
 
-        with server(server_bin, root, env, listen=addr):
+        with server(server_bin, root, env, listen=addr, github_cli="/bin/false" if backlog else None):
             runner = subprocess.Popen([
                 runner_bin, "--config", root / "runner.json", "--db", root / "runner.sqlite",
                 "--app-server", sys.executable, TESTS / "fixtures/control_app_server.py", root,
@@ -62,6 +64,49 @@ def main():
                                      lambda control: control["state"] == "delivered")
                 assert delivered["run_id"] == run
                 assert cli("run", "steer", run, "Use the exact active turn.", "live-steer") == delivered
+
+                if backlog:
+                    number = original["short_number"]
+                    pr = "https://github.com/example/guide/pull/123"
+                    cli("pr", "link", issue, pr, "link-before-backlog")
+                    runner.send_signal(signal.SIGSTOP)
+                    try:
+                        cli("chat", "send", "other", f"Reject parking foreign fixture Issue #{number}")
+                        wait_for(lambda: cli("chat", "read", "other")["messages"],
+                                 lambda messages: messages[-1]["text"] == "Cannot park a different Chat's Issue.")
+                        cli("chat", "send", "main", f"Park fixture Issue #{number}")
+                        wait_for(lambda: cli("chat", "read", "main")["messages"],
+                                 lambda messages: messages[-1]["text"] == "Backlog request accepted.")
+                        parked = cli("issue", "backlog", f"#{number}", "park-live")
+                        assert parked["issue_id"] == issue and parked["state"] == "backlog"
+                        assert cli("issue", "backlog", issue, "park-live") == parked
+                        pending = cli("issue", "list", "--scope=roots")["issues"][0]
+                        assert pending["stage"] == "in_progress" and pending["running"] == 1
+                        start = [cli_bin, "issue", "start", issue, "restart-live"]
+                        not_ready = subprocess.run(start, env=env, capture_output=True, text=True, timeout=6)
+                        assert not_ready.returncode and "HTTP 409" in not_ready.stderr, not_ready.stderr
+                        assert not (root / "interrupted").exists()
+                        cli("issue", "message", issue, "Queue the unsent correction.", "parked-message")
+                    finally:
+                        runner.send_signal(signal.SIGCONT)
+                    card = wait_for(lambda: cli("issue", "list", "--scope=roots")["issues"][0],
+                                    lambda view: view["stage"] == "backlog")
+                    assert card["issue_state"] == "open" and card["running"] == 0
+                    assert card["short_number"] == number and [link["url"] for link in card["pulls"]] == [pr]
+                    assert (root / "interrupted").exists() and not (root / "queued-message.json").exists()
+                    start_receipt = cli("issue", "start", f"#{number}", "restart-live")
+                    assert start_receipt["issue_id"] == issue and start_receipt["task_id"] != task
+                    wait_for(lambda: (root / "queued-message.json").exists(), bool)
+                    resumed = wait_for(lambda: cli("issue", "read", issue), lambda view: view["status"] == "completed")
+                    assert resumed["task_id"] == start_receipt["task_id"] and resumed["run"]["run_id"] != run
+                    assert cli("issue", "backlog", issue, "park-live") == parked
+                    assert cli("issue", "start", issue, "restart-live") == start_receipt
+                    assert cli("issue", "read", issue)["task_id"] == resumed["task_id"]
+                    with sqlite3.connect(root / "server.sqlite") as db:
+                        assert db.execute("SELECT id FROM task_runs WHERE task_id = ?", [task]).fetchall() == [(run,)]
+                        assert db.execute("SELECT count(*) FROM issue_parks").fetchone() == (0,)
+                    print("PASS scoped Router and CLI backlog, offline active stop, original Issue/PR/Run, and restart")
+                    return
 
                 stop = cli("task", "stop", task, "stop-original")
                 assert stop["state"] == "pending"

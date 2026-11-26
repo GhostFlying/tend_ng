@@ -274,6 +274,9 @@ elif role == "child":
                       "record-review", "record-review")
         (root / "review.json").write_text(json.dumps(review))
     elif scenario == "external-wait":
+        if (root / "backlog-fixture").exists():
+            file = tool("tend_submit_artifact", {"path": "repos/example/guide.txt"}, "before-backlog", "before-backlog")
+            (root / "fixture-delivery.json").write_text(json.dumps(file))
         url = "https://github.com/example/guide/pull/82"
         condition = {"url": url, "event": "ci", "check": "build-linux", "state": "terminal",
                      "head_sha": "a" * 40, "run_id": "7"}

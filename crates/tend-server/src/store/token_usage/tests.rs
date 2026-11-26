@@ -231,9 +231,6 @@ fn migration_counts_only_accepted_starts_and_late_use_repairs_the_original_run()
     let fixture = Fixture::new()?;
     let path = fixture.file();
     let store = Store::initialize(&path)?;
-    crate::store::remove_token_usage_schema(&store.db)?;
-    crate::store::codebase_comments::drop_schema(&store.db)?;
-    store.db.pragma_update(None, "user_version", 37)?;
     base(&store.db)?;
     issue(&store.db, "root", None)?;
     issue(&store.db, "child", Some("root"))?;
@@ -256,6 +253,9 @@ fn migration_counts_only_accepted_starts_and_late_use_repairs_the_original_run()
     let mut failed = native_run("fail", "not-started");
     failed.phase = stop.phase;
     assert!(crate::store::run::apply(&store.db, "runner", &failed)?);
+    crate::store::remove_token_usage_schema(&store.db)?;
+    crate::store::codebase_comments::drop_schema(&store.db)?;
+    store.db.pragma_update(None, "user_version", 37)?;
     drop(store);
 
     let mut store = Store::initialize(&path)?;

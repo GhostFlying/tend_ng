@@ -101,10 +101,27 @@ def check_loopback(root, address):
     check(403, call(address, "POST", CHAT, auth, "{}"))
     check(403, call(address, "POST", CHAT, {**auth, **headers, "Origin": "http://other.invalid"}, "{}"))
     check(400, call(address, "POST", CHAT, {**auth, **headers}, "{}"))
-    for route in ("/api/v1/issues/42/start", "/api/v1/issues/42/state"):
+    for route in ("/api/v1/issues/42/start", "/api/v1/issues/42/state", "/api/v1/issues/42/backlog"):
         check(403, call(address, "POST", route, auth, "{}"))
         check(401, call(address, "GET", route, auth))
         check(401, call(address, "HEAD", route, auth))
+    with closing(sqlite3.connect(root / "server.sqlite")) as ledger, ledger:
+        ledger.executescript("""
+            INSERT INTO chat_messages (id, chat_id, text) VALUES ('park-source', 'main', 'Synthetic Issue');
+            INSERT INTO issues (id, source_seq, title, objective)
+                SELECT 'park-fixture', seq, 'Synthetic Issue', '' FROM chat_messages WHERE id='park-source';
+            INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                VALUES ('park-task', 'park-fixture', 'issue-router', 'awaiting_assignment', '[]', '[]');
+        """)
+    backlog = "/api/v1/issues/park-fixture/backlog"
+    payload = '{"operation_id":"park-from-web"}'
+    check(403, call(address, "POST", backlog, {**auth, **headers, "Origin": "http://other.invalid"}, payload))
+    receipt = call(address, "POST", backlog, {**auth, **headers}, payload)
+    check(200, receipt)
+    assert json.loads(receipt[2])["state"] == "backlog"
+    overview = call(address, "GET", "/api/v1/issues/park-fixture/overview", auth)
+    check(200, overview)
+    assert json.loads(overview[2])["stage"] == "backlog"
     reply = "/api/v1/issues/fixture-issue/attentions/fixture-attention/answer"
     history = "/api/v1/issues/fixture-issue/attention-replies"
     check(403, call(address, "POST", reply, auth, "{}"))

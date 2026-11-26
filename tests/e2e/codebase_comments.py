@@ -160,20 +160,29 @@ def exercise(args, root):
             assert all(started + 300_000 <= at <= started + 303_000 for at in due.values()), due
             assert comment_turns() == []
 
-            # Unrelated immediate inputs need not wait for the Codebase batch.
+            # A same-Issue immediate input cuts the old child window and
+            # preserves its order. The parent is a separate recipient.
             cli("issue", "message", child, "Immediate fixture user input")
             (root / "finish-comment-link").touch()
             wait_for(runner_turns, lambda turns: any(
                 item["kind"] == "issue_message" and item["message"]["text"] == "Immediate fixture user input"
                 for turn in turns for item in turn["inputs"]))
-            assert batches() == due and not comment_turns()
+            [flushed] = comment_turns()
+            assert flushed["issue"] == child
+            assert [item["kind"] for item in flushed["inputs"]] == [KIND, "issue_message"]
+            first_delivery = flushed["inputs"][0]
+            assert first_delivery["comment"]["id"] == "inline"
+            assert batches() == {parent: due[parent]}
+            wait_for(lambda: sql("SELECT run_id IS NOT NULL FROM issue_inputs WHERE id=?",
+                                 first_delivery["input_id"]), lambda rows: rows == [(1,)])
             wait_for(lambda: sql("SELECT count(*) FROM tasks WHERE status='running'"), lambda rows: rows == [(0,)])
 
         # The Runner is offline from here to the next Server startup.
         write(73, snapshot(old, edited, reply, review=True))
         force_observe()
         wait_for(pending, lambda rows: len(rows) == 6)
-        assert batches() == due
+        next_due = batches()
+        assert next_due[parent] == due[parent] and next_due[child] > due[child]
         last_success = observed()[0]
         for defect, error in [("denied", "not_accessible"), ("missing", "incomplete_comment_snapshot"),
                               ("partial", "incomplete_comment_snapshot"), ("http-partial", "incomplete_comment_snapshot"), ("oversize", "invalid_response"),
@@ -182,7 +191,7 @@ def exercise(args, root):
             force_observe()
             wait_for(observed, lambda row: row[1] == error and row[2] > 0)
             assert observed()[0] == last_success
-            assert len(pending()) == 6 and batches() == due
+            assert len(pending()) == 6 and batches() == next_due
         mode(73, "normal")
 
         # A failed association preflight must still persist the link and its
@@ -211,12 +220,12 @@ def exercise(args, root):
             force_observe(number)
         wait_for(pending, lambda rows: len(rows) == 9)
         assert watch(child, 74)["state"] == "active"
-        assert batches() == due
+        assert batches() == next_due
         assert observed()[1] is None
         for issue in (parent, child):
             links = cli("pr", "list", issue)
             assert any(link["url"] == MR + "73" and link["facts"]["state"] == "merged" for link in links), links
-        assert not comment_turns()
+        assert comment_turns() == [flushed]
 
         # Advance only the isolated ledger, after verifying the real 300s
         # deadline. Release and persist the original batches while offline.
@@ -224,18 +233,21 @@ def exercise(args, root):
         wait_for(lambda: sql("SELECT count(*) FROM issue_inputs WHERE payload->>'kind'=?", KIND),
                  lambda rows: rows == [(9,)])
         assert not batches()
-        assert sql("SELECT count(*) FROM issue_inputs WHERE payload->>'kind'=? AND run_id IS NOT NULL", KIND) == [(0,)]
+        assert sql("SELECT count(*) FROM issue_inputs WHERE payload->>'kind'=? AND run_id IS NOT NULL", KIND) == [(1,)]
 
     with start_server(), start_runner():
-        turns = wait_for(comment_turns, lambda rows: len(rows) >= 2)
+        all_turns = wait_for(comment_turns, lambda rows: len(rows) >= 3)
+        assert all_turns[0] == flushed
+        turns = all_turns[1:]
         assert len(turns) == 2 and {turn["issue"] for turn in turns} == {parent, child}, turns
-        seen = set()
+        seen = {first_delivery["input_id"]}
         for turn in turns:
             issue = turn["issue"]
             inputs = [row for row in turn["inputs"] if row["kind"] == KIND]
             ids = {row["comment"]["id"] for row in inputs}
             expected = {"inline", "reply", "note-1", "post-restart"}
             if issue == child:
+                expected.remove("inline")
                 expected.add("ambiguous")
             assert ids == expected and len(inputs) == len(expected), inputs
             for row in inputs:
@@ -251,14 +263,14 @@ def exercise(args, root):
                     assert fact["diff"]["raw_patch"] == "+example" and fact["url"] == MR + "73"
 
         wait_for(lambda: sql("SELECT count(DISTINCT run_id),count(run_id) FROM issue_inputs "
-                             "WHERE payload->>'kind'=?", KIND), lambda rows: rows == [(2, 9)])
+                             "WHERE payload->>'kind'=?", KIND), lambda rows: rows == [(3, 9)])
         for issue in (child, parent):
             assert cli("issue", "read", issue)["issue_id"] == issue
             assert sql("SELECT state FROM issues WHERE id=?", issue) == [("open",)]
             assert watch(issue)["pending"] == 0
         force_observe()
         wait_for(observed, lambda row: row[2] > 0)
-        assert len(comment_turns()) == 2 and not batches()
+        assert len(comment_turns()) == 3 and not batches()
         assert len(pending()) == 9
         assert not sql("SELECT * FROM pragma_foreign_key_check")
 

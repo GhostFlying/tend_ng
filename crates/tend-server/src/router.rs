@@ -13,7 +13,7 @@ use std::{
 };
 
 pub(crate) const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 17;
+const TOOL_REVISION: i64 = 18;
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
     "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
@@ -34,7 +34,8 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "When the user explicitly asks this Issue to deliver a plan, report, or attachment and then wait in place for confirmation or review, treat it as a stage delivery. ",
     "In the persistent dispatch objective, describe the stage delivery and waiting for the user's decision as part of the work. Do not make receipt of the delivery the completion condition. ",
     "When the user wants to record work for later, use tend_record_issue to save it without scheduling execution. ",
-    "When the user asks to start that scope, use tend_start_issue with its Issue ID or displayed short number. ",
+    "When the user asks to start recorded or parked work, use tend_start_issue with its Issue ID or displayed short number. ",
+    "When the user asks to move a started open Issue back to backlog, use tend_backlog_issue. This requests stops for its subtree, preserves history, and does not prove an active Run has stopped. ",
     "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
     "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
     "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
@@ -222,7 +223,13 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
         ),
         json!({
             "type": "function", "name": "tend_start_issue",
-            "description": "Start a recorded Issue from this Chat using its saved scope. Supply the Issue UUID or displayed short number (#N or N).",
+            "description": "Start a recorded or parked Issue from this Chat using its saved scope. Supply the Issue UUID or displayed short number (#N or N).",
+            "inputSchema": {"type":"object","properties":{"issue_id":{"type":"string"}},
+                           "required":["issue_id"],"additionalProperties":false}
+        }),
+        json!({
+            "type": "function", "name": "tend_backlog_issue",
+            "description": "Return a started open Issue in this Chat to backlog, stopping work on its subtree without cancelling the Issue or deleting history. Supply the Issue UUID or displayed short number (#N or N).",
             "inputSchema": {"type":"object","properties":{"issue_id":{"type":"string"}},
                            "required":["issue_id"],"additionalProperties":false}
         }),
@@ -389,7 +396,7 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" | "tend_record_issue" => self.dispatch(&call),
-            "tend_list_issues" | "tend_read_issue" | "tend_start_issue" => {
+            "tend_list_issues" | "tend_read_issue" | "tend_start_issue" | "tend_backlog_issue" => {
                 let Some(chat) = self.store.router_chat(self.attempt_id, &call)? else {
                     return Ok(tool_error("Cannot verify the current Chat"));
                 };
@@ -408,11 +415,27 @@ impl TurnHandler for DispatchHandler<'_> {
                         "That Issue is not in this Chat"
                     }));
                 };
-                if call.tool == "tend_start_issue" {
-                    return tool_receipt(
-                        self.store.start_recorded_issue(&id, Some(&chat))?,
-                        "No startable recorded Issue with that ID belongs to this Chat",
-                    );
+                if matches!(
+                    call.tool.as_str(),
+                    "tend_start_issue" | "tend_backlog_issue"
+                ) {
+                    let operation = format!("{}:{}", self.attempt_id, call.call_id);
+                    let result = if call.tool == "tend_start_issue" {
+                        self.store.start_issue(&id, Some(&chat), Some(&operation))?
+                    } else {
+                        self.store.return_to_backlog(&id, Some(&chat), &operation)?
+                    };
+                    use crate::store::control::ResultState;
+                    return Ok(match result {
+                        ResultState::Found(body) => ToolOutput {
+                            success: true,
+                            body,
+                        },
+                        ResultState::Missing => tool_error("That Issue is not in this Chat"),
+                        ResultState::Conflict => tool_error(
+                            "Issue admission conflicts with its current state or pending stops",
+                        ),
+                    });
                 }
                 match self.store.issue(&id)? {
                     Some(issue) if issue.chat_id() == chat => Ok(ToolOutput {

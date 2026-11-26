@@ -1,5 +1,6 @@
 mod artifacts;
 pub(crate) mod attention;
+mod backlog;
 mod board;
 mod codebase_comments;
 pub(crate) mod control;
@@ -48,7 +49,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 39;
+pub(crate) const SCHEMA_VERSION: i64 = 40;
 
 pub struct Store {
     db: Connection,
@@ -236,6 +237,9 @@ impl Store {
         if version < 27 {
             report_revisions::migrate(&tx)?;
         }
+        if version < 40 {
+            backlog::migrate(&tx)?;
+        }
         if version < 28 {
             board::migrate(&tx)?;
         }
@@ -271,6 +275,8 @@ impl Store {
         }
         if version < 39 {
             codebase_comments::migrate(&tx)?;
+        }
+        if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

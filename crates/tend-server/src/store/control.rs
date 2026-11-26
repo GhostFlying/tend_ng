@@ -81,6 +81,9 @@ pub fn submit(
     let Some((mut assignment, task_status, assignment_status)) = actual else {
         return Ok(ResultState::Missing);
     };
+    if matches!(action, ControlAction::Stop) {
+        super::coordination::flush_pending(db, task)?;
+    }
     let control = match action {
         ControlAction::Stop
             if matches!(task_status.as_str(), "completed" | "failed" | "cancelled") =>
@@ -113,6 +116,7 @@ pub fn submit(
                 |row| row.get::<_, bool>(0),
             )?;
             if live && task_status == "running" {
+                super::coordination::flush_pending(db, task)?;
                 ControlState::Pending
             } else {
                 ControlState::Undelivered
@@ -200,6 +204,36 @@ pub fn acknowledge(db: &Connection, runner: &str, ack: &ControlAck) -> Result<bo
     Ok(true)
 }
 
+/// The original Runner proved the assignment was never accepted or was
+/// handed off without a live Run. There is no local Stop receipt to wait for.
+pub(super) fn settle_proven_stops(db: &Connection, runner: &str, assignment: &str) -> Result<bool> {
+    let ids = {
+        let mut statement = db.prepare(
+            "SELECT id FROM task_controls WHERE assignment_id = ?1 AND state = 'pending'
+               AND json_extract(action, '$.kind') = 'stop' ORDER BY rowid",
+        )?;
+        statement
+            .query_map([assignment], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for id in &ids {
+        anyhow::ensure!(
+            acknowledge(
+                db,
+                runner,
+                &ControlAck {
+                    event_id: String::new(),
+                    id: id.clone(),
+                    assignment_id: assignment.to_owned(),
+                    state: ControlState::Stopped,
+                }
+            )?,
+            "stop no longer matches its proven assignment"
+        );
+    }
+    Ok(!ids.is_empty())
+}
+
 fn report_unstarted_stop(db: &Connection, task: &str, control: &str) -> Result<()> {
     super::tend_review::finish(
         db,
@@ -270,6 +304,16 @@ pub fn transition(
         "INSERT INTO issue_transitions VALUES (?1, ?2, ?3, ?4)",
         params![request.operation_id, issue, request.state, request.reason],
     )?;
+    if let Some(task) = db
+        .query_row(
+            "SELECT id FROM tasks WHERE issue_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            [issue],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+    {
+        super::coordination::flush_pending(db, &task)?;
+    }
     Ok(ResultState::Found(()))
 }
 
