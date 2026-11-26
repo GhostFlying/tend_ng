@@ -10,12 +10,12 @@ use std::{
     time::{Duration, Instant},
 };
 
-const TIMEOUT: Duration = Duration::from_secs(10);
+pub(super) const TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_OUTPUT: u64 = 1024 * 1024;
 const PAGE_SIZE: usize = 2;
 const MAX_PAGES: usize = 10;
 
-type Query<T> = Result<T, &'static str>;
+pub(super) type Query<T> = Result<T, &'static str>;
 
 pub fn observe(program: &OsStr, pull: &PullRef) -> Query<PullFacts> {
     let number = pull.number.to_string();
@@ -313,7 +313,24 @@ fn nonempty(value: &Value) -> Option<&str> {
 }
 
 fn request(program: &OsStr, args: &[&str]) -> Query<Value> {
-    let deadline = Instant::now() + TIMEOUT;
+    request_until(program, args, Instant::now() + TIMEOUT)
+}
+
+pub(super) fn request_until(program: &OsStr, args: &[&str], deadline: Instant) -> Query<Value> {
+    let mut payload = read_json(program, args, deadline)?;
+    if payload["status"] == "success" && payload["data"].is_object() {
+        Ok(payload["data"].take())
+    } else if payload["status"] == "error" || payload.get("event").is_some() {
+        Err("codebase_query_failed")
+    } else {
+        Err("invalid_response")
+    }
+}
+
+pub(super) fn read_json(program: &OsStr, args: &[&str], deadline: Instant) -> Query<Value> {
+    if Instant::now() >= deadline {
+        return Err("codebase_query_timeout");
+    }
     let mut child = Command::new(program)
         .args(["--json", "codebase"])
         .args(args)
@@ -354,26 +371,19 @@ fn request(program: &OsStr, args: &[&str]) -> Query<Value> {
     let output = receive(stdout)?;
     let diagnostics = receive(stderr)?;
     let payload = serde_json::from_slice::<Value>(&output).ok();
-    if payload.as_ref().is_some_and(access_error)
-        || (!status.success()
-            && serde_json::from_slice::<Value>(&diagnostics)
-                .as_ref()
-                .is_ok_and(access_error))
+    if payload.as_ref().is_some_and(|value| {
+        access_error(value) || matches!(value["Status"].as_i64(), Some(401 | 403 | 404))
+    }) || (!status.success()
+        && serde_json::from_slice::<Value>(&diagnostics)
+            .as_ref()
+            .is_ok_and(access_error))
     {
         return Err("not_accessible");
     }
     if !status.success() {
         return Err("codebase_query_failed");
     }
-    match payload {
-        Some(mut value) if value["status"] == "success" && value["data"].is_object() => {
-            Ok(value["data"].take())
-        }
-        Some(value) if value["status"] == "error" || value.get("event").is_some() => {
-            Err("codebase_query_failed")
-        }
-        _ => Err("invalid_response"),
-    }
+    payload.ok_or("invalid_response")
 }
 
 fn read_pipe(pipe: impl Read + Send + 'static) -> Receiver<io::Result<Vec<u8>>> {

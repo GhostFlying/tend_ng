@@ -218,13 +218,35 @@ impl Store {
         .transpose()
     }
 
-    pub fn finish_discovery(&mut self, request: &Pending, results: &[BranchResult]) -> Result<()> {
+    pub fn finish_discovery(
+        &mut self,
+        request: &Pending,
+        results: &[BranchResult],
+        codebase_cli: &std::ffi::OsStr,
+    ) -> Result<()> {
+        let mut baselines = std::collections::BTreeMap::new();
+        for pull in results
+            .iter()
+            .filter_map(|result| result.url.as_deref().and_then(PullRef::parse))
+        {
+            if self.codebase_prelink_needed(&request.issue, &pull)? {
+                if let std::collections::btree_map::Entry::Vacant(entry) =
+                    baselines.entry(pull.url())
+                {
+                    entry.insert(self.prelink_codebase_snapshot(
+                        codebase_cli,
+                        &pull,
+                        crate::codebase_comments::link_deadline(),
+                    )?);
+                }
+            }
+        }
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for result in results {
             if let Some(pull) = result.url.as_deref().and_then(PullRef::parse) {
-                super::pull::bind(&tx, &request.issue, &pull)?;
+                super::pull::bind(&tx, &request.issue, &pull, baselines.get(&pull.url()))?;
             }
         }
         tx.execute(

@@ -118,7 +118,10 @@ Agent 通过显式留言工具把正文写入 Issue Chat。执行过程在同一
 Codebase MR 关联和分支补查由 Server 通过本机部署的 `bytedcli` 只读查询。
 默认从 PATH 解析，测试或部署可使用 `--codebase-cli <program>` 指定。分支补查要求实际源仓库和
 分支唯一匹配。结果不能确认时不建立关联。保留链接及上次成功观测，另行保存当前错误。缺少可信的 CI
-汇总时显示未知。外部订阅、必送和等待仍只支持 GitHub。
+汇总时显示未知。外部订阅、等待和可显式登记的必送条件仍只支持 GitHub。
+Codebase 唯一新增的 required 事实是 MR 评审评论，按每个直接关联的 Issue 分别基线、去重和投递。
+评论结束与否不取决于 MR 是否已合并或关闭。正文及定位是外部证据，不扩大收件 Agent 的授权。
+`tend pr watches` 可查询基线、待投数和重试原因。 [Codebase MR 评审评论必送](plans/codebase-review-comments.md)
 
 看板读取已保存的关联和状态。符合订阅、等待或必送规则的事实按已有 Issue 关联和收件登记进入待投递队列。默认路径用于尚未指定收件人的投递。CI 条件可以限定候选提交、检查名和实际运行或 attempt。
 
@@ -126,6 +129,7 @@ Codebase MR 关联和分支补查由 Server 通过本机部署的 `bytedcli` 只
 | --- | --- |
 | 命中有效的 `waitfor` | 经当前负责原 Task 接续的 Runner 直接交给登记等待的 Agent，每一层都适用。 |
 | 命中有明确收件人的订阅 | 沿原订阅投递给登记的 Agent。Router 由 Server 本地投递，其他角色经各自的 Runner 投递。 |
+| Codebase MR 新评审评论 | 经当前责任 Task 的 Runner 分别交给每个直接关联的 Issue，不转投顶层 Issue。 |
 | 默认投递，已有 Issue 归属 | 经该 Issue 树所属 Runner 交给顶层 Issue Agent，保留关联的具体 Issue。 |
 | 默认投递，Issue 归属未定 | 进入 Server 本地的 Router 队列，由它判断如何关联和跟进。 |
 

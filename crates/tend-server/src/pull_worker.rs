@@ -1,6 +1,10 @@
-use crate::{codebase, github, store::Store};
+use crate::{codebase, codebase_comments, github, store::Store};
 use protocol::{BranchResult, PullProvider};
-use std::{ffi::OsString, thread, time::Duration};
+use std::{
+    ffi::OsString,
+    thread,
+    time::{Duration, Instant},
+};
 
 pub fn spawn(mut store: Store, provider: PullProvider, program: OsString) {
     // A provider that is unavailable or slow must not delay the other's observations.
@@ -24,6 +28,32 @@ pub fn spawn(mut store: Store, provider: PullProvider, program: OsString) {
                 Ok(true) => continue,
                 Ok(false) => {}
                 Err(error) => eprintln!("{} pull observation: {error:#}", provider.as_str()),
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+    });
+}
+
+pub fn spawn_comments(mut store: Store, program: OsString) {
+    thread::spawn(move || {
+        loop {
+            let result = (|| {
+                let Some(pull) = store.due_codebase_comments()? else {
+                    return Ok(false);
+                };
+                let started = store.codebase_poll_started(&pull)?;
+                let observation = codebase_comments::snapshot(
+                    &program,
+                    &pull,
+                    Instant::now() + codebase::TIMEOUT,
+                );
+                store.observe_codebase_comments(&pull, &observation, started)?;
+                Ok::<_, anyhow::Error>(true)
+            })();
+            match result {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(error) => eprintln!("Codebase comment observation: {error:#}"),
             }
             thread::sleep(Duration::from_secs(1));
         }
@@ -65,7 +95,7 @@ pub fn spawn_discovery(
                         }
                     })
                     .collect();
-                store.finish_discovery(&request, &results)?;
+                store.finish_discovery(&request, &results, &codebase_cli)?;
                 Ok::<_, anyhow::Error>(true)
             })();
             match outcome {

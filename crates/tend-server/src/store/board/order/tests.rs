@@ -100,6 +100,7 @@ fn reentry_moves_the_card_but_messages_attention_and_pr_ci_do_not() -> Result<()
             url: pull.url(),
         },
         &pull,
+        None,
     )?;
     let sha = "a".repeat(40);
     store.observe_pull(

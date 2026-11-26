@@ -232,6 +232,7 @@ fn migration_counts_only_accepted_starts_and_late_use_repairs_the_original_run()
     let path = fixture.file();
     let store = Store::initialize(&path)?;
     crate::store::remove_token_usage_schema(&store.db)?;
+    crate::store::codebase_comments::drop_schema(&store.db)?;
     store.db.pragma_update(None, "user_version", 37)?;
     base(&store.db)?;
     issue(&store.db, "root", None)?;

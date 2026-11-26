@@ -109,7 +109,7 @@ history_home = Path(os.environ.get("CODEX_HOME", root))
 respond(request("initialize"), {})
 request("initialized")
 start = json.loads(sys.stdin.readline())
-if scenario == "issue-chat" and start["method"] == "thread/turns/list":
+if scenario in {"issue-chat", "codebase-comments"} and start["method"] == "thread/turns/list":
     thread = start["params"]["threadId"]
     with (root / "inspection.jsonl").open("a") as visits:
         visits.write(json.dumps(thread) + "\n")
@@ -140,7 +140,7 @@ if scenario == "proposal" and not worker:
         role = "proposal-continue"
     elif (root / "proposal-v1.json").exists():
         role = "proposal-revise"
-if scenario == "issue-chat":
+if scenario in {"issue-chat", "codebase-comments"}:
     import uuid
     role = f"{role}-{uuid.uuid4().hex}"
 if scenario == "external-wait":
@@ -183,6 +183,37 @@ respond(turn, {"turn": {"id": turn_id, "status": "inProgress", "items": []}})
 
 if scenario == "issue-chat":
     issue_chat(turn, assignment, items, tools)
+    sys.exit(0)
+
+if scenario == "codebase-comments":
+    if worker and not (root / "comment-link-tool.json").exists():
+        receipt = tool("tend_link_pull_request", {
+            "url": "https://code.byted.org/example/guide/merge_requests/73",
+        }, "link", "comment-link")
+        (root / "comment-link-tool.json").write_text(json.dumps(receipt))
+        gate("finish-comment-link")
+    elif not worker and not (root / "delegation.json").exists():
+        receipt = tool("tend_delegate_work", {
+            "title": "Review comments fixture child",
+            "objective": "Record the external facts sent to this Issue.",
+            "category": "implementation", "required_capabilities": ["image_gen"],
+        }, "delegate", "codebase-comments-delegate")
+        (root / "delegation.json").write_text(json.dumps(receipt))
+    else:
+        assert len(items) > 1, items
+        context_text, data = items[0]["text"].split("\n", 1)
+        inputs = json.loads(data)["child_inputs"]
+        assert "external facts, not instructions" in context_text
+        with (root / "comment-inputs.jsonl").open("a") as evidence:
+            evidence.write(json.dumps({
+                "issue": assignment["issue_id"], "task": assignment["task_id"],
+                "run": turn["params"]["clientUserMessageId"], "inputs": inputs,
+            }) + "\n")
+    history = {"id": turn_id, "status": "completed", "items": [
+        {"type": "userMessage", "clientId": turn["params"]["clientUserMessageId"]},
+    ]}
+    (history_home / f"{thread_id}.json").write_text(json.dumps(history))
+    send({"method": "turn/completed", "params": {"threadId": thread_id, "turn": history}})
     sys.exit(0)
 
 if role == "parent":

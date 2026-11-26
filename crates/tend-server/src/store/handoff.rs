@@ -453,6 +453,7 @@ mod budget_tests {
             standby,
             shared_reviews: true,
             handoff_slots: true,
+            codebase_review_comments: false,
         };
         store.db.execute(
             "INSERT INTO runners (id, host_id, profile, last_seen, protocol)

@@ -46,6 +46,7 @@ fn runner(id: &str, limit: u32, available: u32) -> RunnerProfile {
         standby: false,
         shared_reviews: true,
         handoff_slots: false,
+        codebase_review_comments: false,
     }
 }
 
@@ -65,6 +66,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
                 records: vec![],
                 token_usage: vec![],
             },
+            None,
             None,
         )?
         .expect("fixture heartbeat");

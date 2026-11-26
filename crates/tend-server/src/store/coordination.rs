@@ -65,7 +65,12 @@ pub(super) fn migrate_continuity(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation) -> Result<bool> {
+pub fn apply(
+    db: &Connection,
+    runner: &RunnerProfile,
+    operation: &WorkOperation,
+    comment_baselines: &super::codebase_comments::Prelinks,
+) -> Result<bool> {
     let runner_id = runner.runner_id.as_str();
     let serialized = serde_json::to_string(operation)?;
     let prior = db
@@ -76,7 +81,15 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
         )
         .optional()?;
     if let Some((origin, content)) = prior {
-        return Ok(origin == runner_id && serialized == content);
+        let matches = origin == runner_id && serialized == content;
+        if matches
+            && let WorkAction::LinkPull { url } = &operation.action
+            && let Some(url) = protocol::PullRef::parse(url).map(|pull| pull.url())
+            && let Some(prelink) = comment_baselines.get(&url)
+        {
+            super::codebase_comments::record_existing_prelink(db, &url, prelink)?;
+        }
+        return Ok(matches);
     }
 
     let source = db
@@ -436,7 +449,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             let Some(pull) = protocol::PullRef::parse(url) else {
                 return Ok(false);
             };
-            super::pull::bind(db, &source_issue, &pull)?;
+            super::pull::bind(db, &source_issue, &pull, comment_baselines.get(&pull.url()))?;
         }
         WorkAction::PostIssueMessage { text, reply_to } => {
             super::issue_chat::agent_message(
@@ -764,6 +777,7 @@ const DUE_TERMINAL: &str = "SELECT DISTINCT t.issue_id FROM issue_inputs p
      JOIN tasks t ON t.id = p.task_id JOIN issues i ON i.id = t.issue_id
      WHERE p.run_id IS NULL AND p.wake_at <= CAST(unixepoch('subsec') * 1000 AS INTEGER)
        AND t.status IN ('completed', 'failed', 'cancelled') AND t.current_assignment IS NOT NULL
+       AND (t.status != 'cancelled' OR p.payload->>'kind' NOT IN ('codebase_review_comment','external_fact'))
        AND NOT EXISTS (SELECT 1 FROM tend_reviews v WHERE v.review_task_id = t.id)
        AND i.state != 'cancelled' LIMIT 32";
 
@@ -793,20 +807,63 @@ pub fn pending_inputs(
     task: Option<&str>,
     protocol: u32,
     shared_reviews: bool,
+    codebase_review_comments: bool,
 ) -> Result<Vec<IssueDelivery>> {
-    let now = db.query_row(&format!("SELECT {NOW_MS}"), [], |row| row.get(0))?;
-    pending_inputs_at(db, runner, task, protocol, shared_reviews, now)
+    let now = input_cutoff(db)?;
+    pending_inputs_at(
+        db,
+        runner,
+        task,
+        protocol,
+        shared_reviews,
+        codebase_review_comments,
+        now,
+    )
 }
 
-fn pending_inputs_at(
+pub(super) fn input_cutoff(db: &Connection) -> Result<i64> {
+    Ok(db.query_row(&format!("SELECT {NOW_MS}"), [], |row| row.get(0))?)
+}
+
+pub(super) fn needs_serialized_wake(
+    db: &Connection,
+    runner: &str,
+    task: Option<&str>,
+    cutoff: i64,
+) -> Result<bool> {
+    // A wake window on a Codebase-linked Issue can get a companion in an
+    // observation transaction that started just before the deadline. Unlike
+    // the WAL fast path, the serialized path cannot overtake that writer.
+    Ok(db.query_row(
+        "SELECT EXISTS (
+             SELECT 1 FROM runner_assignments a JOIN tasks t ON t.current_assignment=a.id
+             JOIN issue_inputs p ON p.task_id=t.id
+             WHERE a.runner_id=?1 AND (?2 IS NULL OR t.id=?2)
+               AND a.state IN ('issued','accepted')
+               AND t.status IN ('awaiting_receipt','accepted','waiting','running')
+               AND p.run_id IS NULL AND p.wake_at <= ?3
+               AND p.payload->>'kind' NOT IN ('codebase_review_comment','external_fact')
+               AND EXISTS(SELECT 1 FROM codebase_comment_links WHERE issue_id=t.issue_id)
+         )",
+        params![runner, task, cutoff],
+        |row| row.get(0),
+    )?)
+}
+
+pub(super) fn pending_inputs_at(
     db: &Connection,
     runner: &str,
     task: Option<&str>,
     protocol: u32,
     shared_reviews: bool,
+    codebase_review_comments: bool,
     now: i64,
 ) -> Result<Vec<IssueDelivery>> {
-    let mut statement = db.prepare(
+    // An ordinary Codebase cohort can become partly staged when its Issue
+    // is cancelled. Withhold those members until the release transaction
+    // stages the rest and removes the outstanding batch, even if a successor
+    // has already reattached the older inputs.
+    let mut statement = db.prepare(&format!(
         "WITH ready AS MATERIALIZED (
            SELECT i.rowid AS seq, i.task_id, i.wake_at, i.payload, a.id AS assignment_id
            FROM issue_inputs i JOIN tasks t ON t.id = i.task_id
@@ -815,6 +872,13 @@ fn pending_inputs_at(
              AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
              AND (?4 >= 2 OR json_extract(i.payload, '$.kind') NOT IN ('review_finished','review_requested'))
              AND (?6 OR json_extract(i.payload, '$.kind') != 'review_requested')
+             AND (i.payload->>'kind' != 'codebase_review_comment'
+                  OR (?7 AND ?4 >= 2 AND ({eligible})
+                      AND NOT EXISTS (
+                          SELECT 1 FROM codebase_comment_batches b
+                          WHERE b.issue_id=t.issue_id AND b.due_at=i.wake_at
+                            AND b.ordinary_task_id IS NULL
+                      )))
              AND (i.wake_at IS NULL OR i.wake_at <= ?5)
          ), page AS MATERIALIZED (
            SELECT seq, task_id, wake_at FROM ready ORDER BY wake_at IS NOT NULL, seq LIMIT ?2
@@ -823,7 +887,8 @@ fn pending_inputs_at(
          WHERE seq IN (SELECT seq FROM page)
             OR (?4 >= 2 AND (task_id, wake_at) IN (SELECT task_id, wake_at FROM page WHERE wake_at IS NOT NULL))
          ORDER BY wake_at IS NOT NULL, seq",
-    )?;
+        eligible = super::codebase_comments::CAN_RECEIVE,
+    ))?;
     statement
         .query_map(
             params![
@@ -832,7 +897,8 @@ fn pending_inputs_at(
                 task,
                 protocol,
                 now,
-                shared_reviews
+                shared_reviews,
+                codebase_review_comments,
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )?
@@ -882,14 +948,86 @@ mod tests {
     }
 
     #[test]
+    fn codebase_comment_batches_require_an_advertising_runner() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE tasks(id TEXT PRIMARY KEY, current_assignment TEXT, status TEXT, issue_id TEXT NOT NULL DEFAULT 'issue');
+             CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT);
+             CREATE TABLE task_controls(assignment_id TEXT, state TEXT, action TEXT);
+             CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY, due_at INTEGER, ordinary_task_id TEXT);
+             INSERT INTO issues VALUES ('issue','open');
+             CREATE TABLE runner_assignments(id TEXT PRIMARY KEY, runner_id TEXT);
+             CREATE TABLE issue_inputs(id TEXT PRIMARY KEY, task_id TEXT, payload TEXT, run_id TEXT, wake_at INTEGER);
+             INSERT INTO runner_assignments VALUES ('assignment', 'runner');
+             INSERT INTO tasks(id,current_assignment,status) VALUES ('owner', 'assignment', 'waiting');",
+        )?;
+        let comment = protocol::CodebaseReviewComment {
+            id: "id".into(),
+            source: protocol::CodebaseCommentSource::ThreadComment,
+            repository: "example/guide".into(),
+            number: 1,
+            url: "https://code.byted.org/example/guide/merge_requests/1".into(),
+            created_at: String::new(),
+            body: "test".into(),
+            thread_id: None,
+            username: None,
+            display_name: None,
+            positions: Vec::new(),
+            diff: None,
+            outdating_diff: None,
+        };
+        let due = 1234;
+        enqueue_at(
+            &db,
+            "owner",
+            input("user", message(IssueMessageKind::User)),
+            1,
+        )?;
+        for row in 0..(RUNNER_SYNC_BATCH + 2) {
+            let id = format!("comment-{row}");
+            let payload = serde_json::to_string(&input(
+                &id,
+                IssueInputCause::CodebaseReviewComment {
+                    mode: protocol::WatchMode::Required,
+                    comment: comment.clone(),
+                },
+            ))?;
+            db.execute(
+                "INSERT INTO issue_inputs VALUES (?1,'owner',?2,NULL,?3)",
+                params![id, payload, due],
+            )?;
+        }
+        assert_eq!(
+            pending_inputs_at(&db, "runner", None, 1, false, true, due)?.len(),
+            1
+        );
+        assert_eq!(
+            pending_inputs_at(&db, "runner", None, 2, true, false, due)?.len(),
+            1
+        );
+        assert_eq!(
+            pending_inputs_at(&db, "runner", None, 2, true, true, due - 1)?.len(),
+            1
+        );
+        let ready = pending_inputs_at(&db, "runner", None, 2, true, true, due)?;
+        assert_eq!(ready.len(), RUNNER_SYNC_BATCH + 3);
+        assert_eq!(ready[0].input.input_id, "user");
+        Ok(())
+    }
+
+    #[test]
     fn ordinary_window_is_fixed_atomic_and_independent_of_immediate_inputs() -> Result<()> {
         let db = Connection::open_in_memory()?;
         db.execute_batch(
-            "CREATE TABLE tasks(id TEXT PRIMARY KEY, current_assignment TEXT, status TEXT);
+            "CREATE TABLE tasks(id TEXT PRIMARY KEY, current_assignment TEXT, status TEXT, issue_id TEXT NOT NULL DEFAULT 'issue');
+             CREATE TABLE issues(id TEXT PRIMARY KEY, state TEXT);
+             CREATE TABLE task_controls(assignment_id TEXT, state TEXT, action TEXT);
+             CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY, due_at INTEGER, ordinary_task_id TEXT);
+             INSERT INTO issues VALUES ('issue','open');
              CREATE TABLE runner_assignments(id TEXT PRIMARY KEY, runner_id TEXT);
              CREATE TABLE issue_inputs(id TEXT PRIMARY KEY, task_id TEXT, payload TEXT, run_id TEXT);
              INSERT INTO runner_assignments VALUES ('assignment', 'runner'), ('other-assignment', 'runner');
-             INSERT INTO tasks VALUES ('parent', 'assignment', 'waiting'),
+             INSERT INTO tasks(id,current_assignment,status) VALUES ('parent', 'assignment', 'waiting'),
                                       ('other-parent', 'other-assignment', 'waiting');",
         )?;
         migrate_continuity(&db)?;
@@ -980,7 +1118,7 @@ mod tests {
         )?;
 
         let keys = |now| -> Result<Vec<String>> {
-            Ok(pending_inputs_at(&db, "runner", None, 2, true, now)?
+            Ok(pending_inputs_at(&db, "runner", None, 2, true, false, now)?
                 .into_iter()
                 .map(|delivery| delivery.input.input_id)
                 .collect())

@@ -141,6 +141,7 @@ impl Config {
             standby: self.standby,
             shared_reviews: true,
             handoff_slots: true,
+            codebase_review_comments: true,
         }
     }
 

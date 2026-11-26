@@ -36,6 +36,43 @@ def mr(number, branch, source="201"):
     }
 
 
+if args[0] == "api":
+    # Deliberately closed: never permit an arbitrary action or write command.
+    action = args[1]
+    assert action in {"ListThreads", "ListTimelineEvents"}, args
+    threads = action == "ListThreads"
+    scope = "Commentable" if threads else "Trackable"
+    assert args[2:6] == ["-i", "-f", f"{scope}Type=merge_request", "-f"], args
+    number = int(args[6].removeprefix(f"{scope}Id=801"))
+    assert number in (73, 74, 76, 204, 206), args
+    assert args[6:9] == [f"{scope}Id=801{number}", "-f", "RepoId=201"], args
+    assert args[9:] == ([] if threads else ["-F", "For1024=true"]), args
+    mode_file = root / f"comment-mode-{number}"
+    mode = mode_file.read_text() if mode_file.exists() else "normal"
+    log("api", action, number, mode)
+    if mode == "denied":
+        print(json.dumps({"Status": 403, "Headers": {}, "Body": {"ResponseMetadata": {
+            "Error": {"Code": "Unauthorized", "Message": "private raw diagnostic"},
+        }}}))
+        sys.exit(1)
+    if mode == "timeout":
+        time.sleep(30)
+        raise AssertionError("observation deadline did not terminate the process")
+    facts = root / f"comments-{number}.json"
+    key = "Threads" if threads else "Events"
+    result = {key: json.loads(facts.read_text()).get(key, []) if facts.exists() else []}
+    if mode == "missing" and not threads:
+        result = {}
+    elif mode == "partial" and threads:
+        result["NextPageToken"] = "not-the-last-page"
+    elif mode == "oversize" and threads:
+        result["UnneededBlob"] = "x" * (1024 * 1024)
+    partial_http = mode == "http-partial" and threads
+    print(json.dumps({"Status": 206 if partial_http else 200,
+                      "Headers": {"Content-Range": "items 0-0/2"} if partial_http else {},
+                      "Body": {"ResponseMetadata": {}, "Result": result}}))
+    sys.exit(0)
+
 if args[:2] == ["mr", "list"]:
     assert len(args) in (10, 12) and args[2:5] == ["-R", repo["path"], "-H"]
     assert args[6:10] == ["--state", "all", "--page-size", "2"]

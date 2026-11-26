@@ -53,6 +53,7 @@ pub fn migrate_providers(db: &Connection) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) fn restore_legacy_schema(db: &Connection) -> Result<()> {
+    super::codebase_comments::drop_schema(db)?;
     db.execute_batch(
         "DROP INDEX pulls_due;
          ALTER TABLE pulls DROP COLUMN provider;
@@ -76,13 +77,27 @@ pub(super) fn ensure_observed(db: &Connection, pull: &PullRef) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn bind(db: &Connection, issue: &str, pull: &PullRef) -> Result<PullLinkReceipt> {
+pub(super) fn bind(
+    db: &Connection,
+    issue: &str,
+    pull: &PullRef,
+    prelink: Option<&super::codebase_comments::PrelinkSnapshot>,
+) -> Result<PullLinkReceipt> {
     ensure_observed(db, pull)?;
     let url = pull.url();
-    db.execute(
+    let inserted = db.execute(
         "INSERT INTO issue_pulls VALUES (?1, ?2) ON CONFLICT DO NOTHING",
         params![issue, url],
     )?;
+    if pull.provider == PullProvider::Codebase {
+        if inserted != 0 {
+            super::codebase_comments::bind(db, issue, &url, prelink)?;
+        } else if let Some(prelink) = prelink {
+            // The link may have committed in another request while we were
+            // querying. Its own baseline stays intact, as does this observation.
+            super::codebase_comments::record_existing_prelink(db, &url, prelink)?;
+        }
+    }
     Ok(PullLinkReceipt {
         issue_id: issue.to_owned(),
         url,
@@ -90,7 +105,40 @@ pub(super) fn bind(db: &Connection, issue: &str, pull: &PullRef) -> Result<PullL
 }
 
 impl Store {
-    pub fn link_pull(&mut self, issue: &str, request: &LinkPull, pull: &PullRef) -> Result<Linked> {
+    pub fn codebase_prelink_needed(&self, issue: &str, pull: &PullRef) -> Result<bool> {
+        if pull.provider != PullProvider::Codebase {
+            return Ok(false);
+        }
+        Ok(self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issues WHERE id=?1)
+             AND NOT EXISTS(SELECT 1 FROM issue_pulls WHERE issue_id=?1 AND url=?2)",
+            params![issue, pull.url()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub fn link_pull(
+        &mut self,
+        issue: &str,
+        request: &LinkPull,
+        pull: &PullRef,
+        codebase_cli: Option<&std::ffi::OsStr>,
+    ) -> Result<Linked> {
+        let prelink = if let Some(program) = codebase_cli
+            && self.codebase_prelink_needed(issue, pull)?
+            && !self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM pull_link_requests WHERE operation_id=?1)",
+                [&request.operation_id],
+                |row| row.get::<_, bool>(0),
+            )? {
+            Some(self.prelink_codebase_snapshot(
+                program,
+                pull,
+                crate::codebase_comments::link_deadline(),
+            )?)
+        } else {
+            None
+        };
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -103,6 +151,10 @@ impl Store {
             .optional()?
         {
             return Ok(if saved_issue == issue && saved_url == pull.url() {
+                if let Some(prelink) = prelink.as_ref() {
+                    super::codebase_comments::record_existing_prelink(&tx, &saved_url, prelink)?;
+                    tx.commit()?;
+                }
                 Linked::Saved(PullLinkReceipt {
                     issue_id: saved_issue,
                     url: saved_url,
@@ -114,7 +166,7 @@ impl Store {
         if !issue_exists(&tx, issue)? {
             return Ok(Linked::Missing);
         }
-        let receipt = bind(&tx, issue, pull)?;
+        let receipt = bind(&tx, issue, pull, prelink.as_ref())?;
         tx.execute(
             "INSERT INTO pull_link_requests VALUES (?1, ?2, ?3)",
             params![request.operation_id, receipt.issue_id, receipt.url],
@@ -395,7 +447,7 @@ mod tests {
             assert!(matches!(
                 store.link_pull("issue", &LinkPull {
                     operation_id: "legacy-link".into(), url: format!("{url}/#legacy")
-                }, &pull)?,
+                }, &pull, None)?,
                 Linked::Saved(receipt) if receipt.url == url
             ));
             let saved = store.discoveries("issue", Some("legacy-find"))?.unwrap();

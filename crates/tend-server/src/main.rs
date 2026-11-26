@@ -1,5 +1,6 @@
 mod artifacts;
 mod codebase;
+mod codebase_comments;
 mod discussion;
 mod github;
 mod inspect;
@@ -141,7 +142,8 @@ fn main() -> Result<()> {
     let artifact_root = db.with_extension("artifacts");
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
-    let synchronization = runner_api::serve(&db)?;
+    let synchronization = runner_api::serve(&db, codebase_cli.clone())?;
+    let pull_links = serve_pull_links(&db, codebase_cli.clone())?;
     let discussion = std::sync::Arc::new(discussion::Service::new(
         discussion_config.as_deref(),
         &db,
@@ -160,6 +162,7 @@ fn main() -> Result<()> {
         protocol::PullProvider::Codebase,
         codebase_cli.clone(),
     );
+    pull_worker::spawn_comments(Store::open(&db)?, codebase_cli.clone());
     pull_worker::spawn_discovery(
         Store::open(&db)?,
         protocol::PullProvider::GitHub,
@@ -219,6 +222,22 @@ fn main() -> Result<()> {
             continue;
         }
         let route = request.url().split('?').next().unwrap_or_default();
+        if request.method() == &Method::Post
+            && let Some(issue) = route
+                .strip_prefix("/api/v1/issues/")
+                .and_then(|p| p.strip_suffix("/pulls"))
+            && (protocol::valid_id(issue) || pull_issue_number(issue).is_some())
+        {
+            let issue = issue.to_owned();
+            if let Err(
+                TrySendError::Full((request, _)) | TrySendError::Disconnected((request, _)),
+            ) = pull_links.try_send((request, issue))
+            {
+                let (_, body) = api_error(503, "Pull association API is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
+        }
         if route == protocol::DISCUSSIONS_PATH || route.starts_with("/api/v1/discussions/") {
             if let Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) =
                 discussion_api.try_send(request)
@@ -282,6 +301,9 @@ fn schedule(mut store: Store) {
     loop {
         if let Err(error) = store.release_external() {
             eprintln!("Release external facts: {error:#}");
+        }
+        if let Err(error) = store.release_codebase_comments() {
+            eprintln!("Release Codebase review comments: {error:#}");
         }
         if let Err(error) = store.release_external_routes() {
             eprintln!("Release routed external facts: {error:#}");
@@ -704,7 +726,6 @@ fn handle(
                 Some(pulls) => (200, serde_json::to_value(pulls)?),
                 None => api_error(404, "Issue not found"),
             }),
-            Method::Post => link_pull(store, &issue_id.to_owned(), request),
             _ => Ok(api_error(405, "method not allowed")),
         };
     }
@@ -938,7 +959,62 @@ fn find_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u
     })
 }
 
-fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u16, Value)> {
+fn pull_issue_number(issue: &str) -> Option<String> {
+    let decoded = issue.strip_prefix("%23").map(|digits| format!("#{digits}"));
+    let number = decoded.as_deref().unwrap_or(issue);
+    protocol::parse_issue_number(number).map(|_| number.to_owned())
+}
+
+fn serve_pull_links(
+    db: &Path,
+    program: OsString,
+) -> Result<std::sync::mpsc::SyncSender<(Request, String)>> {
+    use std::sync::{Arc, Mutex, mpsc};
+    let (send, receive) = mpsc::sync_channel::<(Request, String)>(8);
+    let receive = Arc::new(Mutex::new(receive));
+    for _ in 0..2 {
+        let mut store = Store::open(db)?;
+        let receive = Arc::clone(&receive);
+        let program = program.clone();
+        thread::spawn(move || {
+            loop {
+                let job = receive
+                    .lock()
+                    .expect("Pull association request queue")
+                    .recv();
+                let Ok((mut request, issue)) = job else {
+                    return;
+                };
+                let (status, body) = link_pull(&mut store, &issue, &mut request, &program)
+                    .unwrap_or_else(|error| {
+                        eprintln!("Link pull request: {error:#}");
+                        api_error(500, "Server could not process pull association")
+                    });
+                if let Ok(response) = json_response(status, &body) {
+                    let _ = request.respond(response);
+                }
+            }
+        });
+    }
+    Ok(send)
+}
+
+fn link_pull(
+    store: &mut Store,
+    issue: &str,
+    request: &mut Request,
+    codebase_cli: &std::ffi::OsStr,
+) -> Result<(u16, Value)> {
+    let resolved;
+    let issue = if let Some(number) = pull_issue_number(issue) {
+        let Some(id) = store.resolve_issue(&number)? else {
+            return Ok(api_error(404, "Issue not found"));
+        };
+        resolved = id.into_owned();
+        &resolved
+    } else {
+        issue
+    };
     let Some(bytes) = request_bytes(request)? else {
         return Ok(api_error(413, "pull request association request too large"));
     };
@@ -954,13 +1030,15 @@ fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u
             "valid GitHub PR or Codebase MR URL required",
         ));
     };
-    Ok(match store.link_pull(issue, &link, &pull)? {
-        store::pull::Linked::Saved(receipt) => (200, serde_json::to_value(receipt)?),
-        store::pull::Linked::Conflict => {
-            api_error(409, "operation ID is already used for another association")
-        }
-        store::pull::Linked::Missing => api_error(404, "Issue not found"),
-    })
+    Ok(
+        match store.link_pull(issue, &link, &pull, Some(codebase_cli))? {
+            store::pull::Linked::Saved(receipt) => (200, serde_json::to_value(receipt)?),
+            store::pull::Linked::Conflict => {
+                api_error(409, "operation ID is already used for another association")
+            }
+            store::pull::Linked::Missing => api_error(404, "Issue not found"),
+        },
+    )
 }
 
 fn require_external(

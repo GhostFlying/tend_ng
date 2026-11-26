@@ -3,6 +3,7 @@ use anyhow::Result;
 use protocol::{RUNNER_PROTOCOL, RUNNER_SYNC_BATCH, RunnerSync, valid_id};
 use serde_json::Value;
 use std::{
+    ffi::{OsStr, OsString},
     ops::RangeInclusive,
     path::Path,
     sync::{
@@ -39,7 +40,7 @@ impl Endpoint {
     }
 }
 
-pub fn serve(db: &Path) -> Result<SyncSender<(Request, Endpoint)>> {
+pub fn serve(db: &Path, codebase_cli: OsString) -> Result<SyncSender<(Request, Endpoint)>> {
     let (sender, receiver) = mpsc::sync_channel::<(Request, Endpoint)>(8);
     let receiver = Arc::new(Mutex::new(receiver));
     let root = db.with_extension("artifacts");
@@ -47,17 +48,19 @@ pub fn serve(db: &Path) -> Result<SyncSender<(Request, Endpoint)>> {
         let mut store = Store::open(db)?;
         let receiver = Arc::clone(&receiver);
         let root = root.clone();
+        let codebase_cli = codebase_cli.clone();
         thread::spawn(move || {
             loop {
                 let job = receiver.lock().expect("Runner sync request queue").recv();
                 let Ok((mut request, endpoint)) = job else {
                     return;
                 };
-                let (status, body) = handle(&mut store, &mut request, endpoint, &root)
-                    .unwrap_or_else(|error| {
-                        eprintln!("Runner sync request: {error:#}");
-                        api_error(500, "Server could not process Runner sync")
-                    });
+                let (status, body) =
+                    handle(&mut store, &mut request, endpoint, &root, &codebase_cli)
+                        .unwrap_or_else(|error| {
+                            eprintln!("Runner sync request: {error:#}");
+                            api_error(500, "Server could not process Runner sync")
+                        });
                 if let Ok(response) = json_response(status, &body) {
                     let _ = request.respond(response);
                 }
@@ -72,6 +75,7 @@ fn handle(
     request: &mut Request,
     endpoint: Endpoint,
     artifact_root: &Path,
+    codebase_cli: &OsStr,
 ) -> Result<(u16, Value)> {
     let runner_id = &endpoint.runner;
     if request.method() != &Method::Post {
@@ -105,11 +109,13 @@ fn handle(
         }
         store.reconcile_artifacts(artifact_root, task, runner_id, sync.repair_host_artifacts)?;
     }
-    Ok(match store.sync_runner(sync, endpoint.task.as_deref())? {
-        Some(reply) => (200, serde_json::to_value(reply)?),
-        None => api_error(
-            409,
-            "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
-        ),
-    })
+    Ok(
+        match store.sync_runner(sync, endpoint.task.as_deref(), Some(codebase_cli))? {
+            Some(reply) => (200, serde_json::to_value(reply)?),
+            None => api_error(
+                409,
+                "Runner identity, assignment receipt, or Run observation conflicts with saved facts",
+            ),
+        },
+    )
 }

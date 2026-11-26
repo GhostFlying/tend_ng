@@ -474,6 +474,7 @@ impl Store {
         &mut self,
         request: RunnerSync,
         task: Option<&str>,
+        codebase_cli: Option<&std::ffi::OsStr>,
     ) -> Result<Option<RunnerSyncReply>> {
         let profile = &request.profile;
         let profile_json = serde_json::to_string(profile)?;
@@ -522,6 +523,7 @@ impl Store {
         } else {
             false
         };
+        let cutoff = coordination::input_cutoff(&self.db)?;
         if !refresh
             && !reserved
             && !release_slots
@@ -531,6 +533,13 @@ impl Store {
             && request.token_usage.is_empty()
             && !request.drained
             && request.reclaim_receipts.is_empty()
+            && (!profile.codebase_review_comments
+                || !coordination::needs_serialized_wake(
+                    &self.db,
+                    &profile.runner_id,
+                    task,
+                    cutoff,
+                )?)
         {
             return Ok(Some(RunnerSyncReply {
                 execution_slot_limit: super::handoff::execution_slot_limit(&self.db, profile)?,
@@ -558,12 +567,14 @@ impl Store {
                 confirmed_operations: Vec::new(),
                 confirmed_token_usage: Vec::new(),
                 token_usage_supported: true,
-                inputs: coordination::pending_inputs(
+                inputs: coordination::pending_inputs_at(
                     &self.db,
                     &profile.runner_id,
                     task,
                     request.protocol,
                     profile.shared_reviews,
+                    profile.codebase_review_comments,
+                    cutoff,
                 )?,
                 controls: super::control::pending(&self.db, &profile.runner_id, task)?,
                 drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
@@ -576,6 +587,11 @@ impl Store {
             }));
         }
 
+        let comment_baselines = if let Some(program) = codebase_cli {
+            self.preflight_comment_baselines(&request, program)?
+        } else {
+            std::collections::BTreeMap::new()
+        };
         let operation = if task.is_some() {
             "runner_full"
         } else {
@@ -636,6 +652,7 @@ impl Store {
                 )? == 1, "delivered assignment changed before receipt");
                 if state == "accepted" {
                     super::issue_chat::record_takeover(&tx, &receipt.assignment_id)?;
+                    super::codebase_comments::reattach_stopped(&tx, &task)?;
                 }
             } else if recorded_decision.as_deref() != Some(&decision) {
                 return Ok(None);
@@ -678,7 +695,7 @@ impl Store {
                     });
                 }
                 RunnerRecord::Operation(operation) => {
-                    if !coordination::apply(&tx, profile, &operation)? {
+                    if !coordination::apply(&tx, profile, &operation, &comment_baselines)? {
                         return Ok(None);
                     }
                     confirmed_operations.push(operation.operation_id);
@@ -733,6 +750,7 @@ impl Store {
             task,
             request.protocol,
             profile.shared_reviews,
+            profile.codebase_review_comments,
         )?;
         let uploads = super::artifacts::pending(
             &tx,
@@ -875,6 +893,7 @@ mod tests {
                 standby: false,
                 shared_reviews: false,
                 handoff_slots: false,
+                codebase_review_comments: false,
             },
             drained: false,
             reclaim_receipts: vec![],
@@ -901,7 +920,7 @@ mod tests {
         assert_eq!(kinds(&store)?, [IssueMessageKind::Dispatch]);
         assert!(
             store
-                .sync_runner(request(&["assignment"]), Some("task"))?
+                .sync_runner(request(&["assignment"]), Some("task"), None)?
                 .is_none()
         );
         store
@@ -912,7 +931,7 @@ mod tests {
         // A later invalid receipt aborts the batch, including the first acceptance and event.
         assert!(
             store
-                .sync_runner(request(&["assignment", "unknown"]), Some("task"))?
+                .sync_runner(request(&["assignment", "unknown"]), Some("task"), None)?
                 .is_none()
         );
         assert_eq!(kinds(&store)?, [IssueMessageKind::Dispatch]);
@@ -922,7 +941,9 @@ mod tests {
             |row| row.get(0),
         )?;
         assert_eq!(state, "issued");
-        let claim = store.sync_runner(request(&["assignment"]), None)?.unwrap();
+        let claim = store
+            .sync_runner(request(&["assignment"]), None, None)?
+            .unwrap();
         assert_eq!(claim.confirmed_receipts, ["assignment"]);
         assert_eq!(
             kinds(&store)?,
@@ -932,7 +953,7 @@ mod tests {
         assert_eq!(page.messages[1].author, "frozen-agent");
         assert!(page.messages[1].created_at.is_some());
         let replay = store
-            .sync_runner(request(&["assignment", "assignment"]), Some("task"))?
+            .sync_runner(request(&["assignment", "assignment"]), Some("task"), None)?
             .unwrap();
         assert_eq!(replay.confirmed_receipts, ["assignment", "assignment"]);
         assert_eq!(

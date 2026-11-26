@@ -304,7 +304,7 @@ impl Store {
             [],
             |row| row.get::<_, String>(0),
         ).optional()? else { return Ok(()) };
-        let tx = self
+        let mut tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let deliveries = {
@@ -334,6 +334,20 @@ impl Store {
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let shared = {
+            let mut companion = tx.savepoint()?;
+            match super::codebase_comments::release_for_external_batch(&companion, &task) {
+                Ok(shared) => {
+                    companion.commit()?;
+                    shared
+                }
+                Err(error) => {
+                    companion.rollback()?;
+                    eprintln!("Release Codebase companion: {error:#}");
+                    None
+                }
+            }
         };
         for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
             deliveries
@@ -373,6 +387,16 @@ impl Store {
                         },
                     },
                 )?;
+                if let Some(shared) = &shared
+                    && shared.task == target
+                {
+                    // Pair only this companion cohort. Keep ordinary GitHub
+                    // routes, wake ordering and matching unchanged elsewhere.
+                    tx.execute(
+                        "UPDATE issue_inputs SET wake_at=?2 WHERE id=?1 AND run_id IS NULL",
+                        params![id, shared.at],
+                    )?;
+                }
             } else if let Some(chat) = chat {
                 super::external_routing::queue_router(
                     &tx,
@@ -397,7 +421,7 @@ impl Store {
         let mut statement = self.db.prepare(
             "SELECT id, task_id, mode, state, condition FROM external_watches WHERE issue_id = ?1 ORDER BY rowid DESC LIMIT 50",
         )?;
-        statement
+        let mut watches = statement
             .query_map([issue], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -412,6 +436,8 @@ impl Store {
                 Ok(json!({"id":id,"task_id":task,"mode":mode,"state":state,
                 "condition":serde_json::from_str::<Value>(&condition)?}))
             })
-            .collect()
+            .collect::<Result<Vec<_>>>()?;
+        watches.extend(super::codebase_comments::status(&self.db, issue)?);
+        Ok(watches)
     }
 }

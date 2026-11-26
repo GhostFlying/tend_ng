@@ -50,6 +50,12 @@ def exercise(args, root, automatic):
     (root / "delegate-now").touch()
     mode = root / "codebase-discovery-mode"
     mode.write_text("missing")
+    for number in (204, 206):
+        (root / f"comments-{number}.json").write_text(json.dumps({
+            "Threads": [{"Id": "history-thread", "Comments": [{"Id": "history-before-discovery",
+                       "CreatedAt": "2026-11-26T03:00:00Z", "Content": "Predates branch discovery"}]}],
+            "Events": [],
+        }))
     env = {**os.environ, "TEND_TOKEN": "codebase-fixture-token", "TEND_URL": f"http://{address}"}
     server_env = {
         **env, "TEND_CODEBASE_FIXTURE_DIR": str(root), "TEND_GITHUB_FIXTURE_DIR": str(root),
@@ -167,6 +173,15 @@ def exercise(args, root, automatic):
             assert job["results"][0]["url"] == linked_url
             calls = [json.loads(line) for line in (root / "codebase-reads").read_text().splitlines()]
             assert calls.count(["list", lookup_mode, branch, 1]) == 1
+            if linked_url:
+                with sqlite3.connect(root / "server.sqlite") as db:
+                    old_comment = db.execute(
+                        "SELECT l.baseline_at, s.input_id FROM codebase_comment_links l "
+                        "JOIN codebase_comment_sightings s USING(issue_id,url) "
+                        "WHERE l.issue_id=? AND l.url=? AND s.comment_key='thread_comment:history-before-discovery'",
+                        (child, linked_url),
+                    ).fetchall()
+                assert len(old_comment) == 1 and old_comment[0][0] and old_comment[0][1] is None, old_comment
             if automatic != "unique":
                 expected_links = {MR + "73", linked_url} if linked_url else {MR + "73"}
                 assert {link["url"] for link in cli("pr", "list", child)} == expected_links

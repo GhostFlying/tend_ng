@@ -85,6 +85,8 @@ pub struct RunnerProfile {
     pub shared_reviews: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub handoff_slots: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub codebase_review_comments: bool,
 }
 
 impl RunnerProfile {
@@ -350,6 +352,10 @@ pub enum IssueInputCause {
         mode: crate::WatchMode,
         fact: crate::ExternalFact,
         error: Option<String>,
+    },
+    CodebaseReviewComment {
+        mode: crate::WatchMode,
+        comment: crate::CodebaseReviewComment,
     },
     IssueClosed,
     IssueMessage {

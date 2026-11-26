@@ -1,6 +1,7 @@
 mod artifacts;
 pub(crate) mod attention;
 mod board;
+mod codebase_comments;
 pub(crate) mod control;
 mod coordination;
 pub(crate) mod discovery;
@@ -47,7 +48,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 38;
+pub(crate) const SCHEMA_VERSION: i64 = 39;
 
 pub struct Store {
     db: Connection,
@@ -267,6 +268,9 @@ impl Store {
         }
         if version < 38 {
             token_usage::migrate(&tx)?;
+        }
+        if version < 39 {
+            codebase_comments::migrate(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(
