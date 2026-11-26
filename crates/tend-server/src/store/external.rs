@@ -443,11 +443,13 @@ pub(super) fn release_task_deliveries(
             .collect::<rusqlite::Result<Vec<_>>>()?
     };
     let historical = super::backlog::old_task(db, task)?;
+    let stopping = !force && !historical && super::control::stop_on_current(db, task, "pending")?;
+    let stopped = !force && !historical && super::control::stop_on_current(db, task, "stopped")?;
     for (id, watch_id, issue, mode, state, fact_id, raw, error, task_state, origin, chat) in
         deliveries
     {
         let mode = watch_mode(&mode);
-        let target = if force {
+        let target = if force || stopping {
             Some(task.to_owned())
         } else if historical {
             // A late matching fact remains auditable. It cannot readmit its
@@ -457,7 +459,7 @@ pub(super) fn release_task_deliveries(
             } else {
                 coordination::latest_task(db, &issue)?.or_else(|| Some(task.to_owned()))
             }
-        } else if state == "withdrawn" || task_state == "cancelled" {
+        } else if stopped || state == "withdrawn" || task_state == "cancelled" {
             None
         } else if matches!(task_state.as_str(), "completed" | "failed") {
             if mode == WatchMode::Wait {
@@ -517,6 +519,59 @@ pub(super) fn release_task_deliveries(
     db.execute("DELETE FROM external_batches WHERE task_id = ?1", [task])?;
     Ok(())
 }
+
+/// An ordinary Stop retains the flushed input on its original Task. Once the
+/// exact stop is known, only still-unconsumed required routes fall back to the
+/// original Chat, with the provider's existing route/fact deduplication key.
+pub(super) fn route_stopped_required(db: &Connection, task: &str) -> Result<()> {
+    if super::backlog::old_task(db, task)? || db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN issue_parks p ON p.issue_id = t.issue_id WHERE t.id = ?1)",
+        [task], |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let pending = {
+        let mut statement = db.prepare(
+            "SELECT w.route_id, d.fact_id, m.chat_id, w.origin_issue
+             FROM external_watches w JOIN external_deliveries d ON d.watch_id = w.id
+             JOIN issue_inputs p ON p.id = d.id AND p.task_id = w.task_id AND p.run_id IS NULL
+             JOIN external_routes r ON r.id = w.route_id JOIN chat_messages m ON m.seq = r.message_seq
+             WHERE w.task_id = ?1 AND w.mode = 'required'
+               AND NOT EXISTS(SELECT 1 FROM external_route_deliveries rd
+                 WHERE rd.route_id = w.route_id AND rd.fact_id = d.fact_id)
+             ORDER BY d.rowid",
+        )?;
+        statement
+            .query_map([task], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    for (route, fact, chat, origin) in pending {
+        super::external_routing::queue_router(
+            db,
+            &route,
+            &fact,
+            &chat,
+            origin.as_deref(),
+            Some(0),
+        )?;
+    }
+    Ok(())
+}
+
+// A rerouted delivery remains in Task history and must not be inherited by
+// an independent follow-up, even if that follow-up was explicitly requested.
+pub(super) const NOT_REROUTED: &str = "NOT EXISTS(
+    SELECT 1 FROM external_deliveries d JOIN external_watches w ON w.id = d.watch_id
+    JOIN external_route_deliveries rd ON rd.route_id = w.route_id AND rd.fact_id = d.fact_id
+    WHERE d.id = issue_inputs.id
+)";
 
 impl Store {
     pub fn release_external(&mut self) -> Result<()> {

@@ -712,6 +712,7 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
     };
     if !matches!(status.as_str(), "completed" | "failed" | "cancelled")
         || super::backlog::parked(db, issue)?
+        || super::control::stop_on_current(db, &previous, "pending")?
     {
         return Ok(Some(previous));
     }
@@ -724,7 +725,9 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
         return Ok(None);
     };
     if barrier {
-        flush_pending(db, &previous)?;
+        // The immediate input will group the prefix after it moves to the
+        // new recipient, including the input that caused the continuation.
+        release_pending(db, &previous)?;
     }
     let prior: TaskAssignment = serde_json::from_str(&contract)?;
     let task = protocol::new_id();
@@ -742,10 +745,11 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
         ],
     )?;
     db.execute(
-        "UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
+        &format!("UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
            AND json_extract(payload, '$.kind') != 'review_finished'
            AND NOT EXISTS (SELECT 1 FROM proposal_decisions d WHERE d.input_id = issue_inputs.id)
-           AND NOT EXISTS (SELECT 1 FROM issue_attention_replies r WHERE r.input_id = issue_inputs.id)",
+           AND NOT EXISTS (SELECT 1 FROM issue_attention_replies r WHERE r.input_id = issue_inputs.id)
+           AND ({})", super::external::NOT_REROUTED),
         params![previous, task],
     )?;
     Ok(Some(task))
@@ -753,17 +757,29 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
 
 pub(super) fn move_pending(db: &Connection, previous: &str, task: &str) -> Result<()> {
     db.execute(
-        "UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
+        &format!("UPDATE issue_inputs SET task_id = ?2 WHERE task_id = ?1 AND run_id IS NULL
            AND json_extract(payload, '$.kind') NOT IN ('review_requested','review_finished','attention_answered')
            AND NOT (json_extract(payload, '$.kind') = 'external_fact'
-                    AND coalesce(json_extract(payload, '$.mode'), '') = 'wait')",
+                    AND coalesce(json_extract(payload, '$.mode'), '') = 'wait')
+           AND ({})", super::external::NOT_REROUTED),
         params![previous, task],
     )?;
     Ok(())
 }
 
 // Releasing a window is a durable readiness change, not a scheduling call.
-pub(super) fn flush_pending(db: &Connection, task: &str) -> Result<()> {
+pub(super) fn flush_pending(db: &Connection, task: &str) -> Result<Option<String>> {
+    release_pending(db, task)?;
+    let group = protocol::new_id();
+    let changed = db.execute(
+        "INSERT OR IGNORE INTO issue_input_flushes(input_id, flush_id)
+         SELECT id, ?2 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL",
+        params![task, group],
+    )?;
+    Ok((changed > 0).then_some(group))
+}
+
+fn release_pending(db: &Connection, task: &str) -> Result<()> {
     super::codebase_comments::flush_for_task(db, task)?;
     super::external::release_task_deliveries(db, task, true, None)?;
     flush_child_window(db, task)
@@ -812,7 +828,7 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
         }
         _ => false,
     };
-    if !ordinary {
+    let group = if !ordinary {
         let duplicate = db.query_row(
             "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE id = ?1)",
             [&input.input_id],
@@ -821,8 +837,10 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
         if duplicate {
             return Ok(());
         }
-        flush_pending(db, task)?;
-    }
+        flush_pending(db, task)?
+    } else {
+        None
+    };
     if db.execute(
         "INSERT INTO issue_inputs (id, task_id, payload, wake_at)
          VALUES (?1, ?2, ?3, CASE WHEN ?4 THEN coalesce((
@@ -841,6 +859,12 @@ fn enqueue_at(db: &Connection, task: &str, input: IssueInput, now: i64) -> Resul
     )? > 0
     {
         record_intake(db, &input.input_id)?;
+        if let Some(group) = group {
+            db.execute(
+                "INSERT INTO issue_input_flushes VALUES (?1, ?2)",
+                params![input.input_id, group],
+            )?;
+        }
     }
     Ok(())
 }
@@ -958,9 +982,10 @@ pub(super) fn pending_inputs_at(
     // has already reattached the older inputs.
     let mut statement = db.prepare(&format!(
         "WITH ready AS MATERIALIZED (
-           SELECT i.rowid AS seq, coalesce(o.seq, 0) AS received, i.task_id, i.wake_at, i.payload, a.id AS assignment_id
+           SELECT i.rowid AS seq, coalesce(o.seq, 0) AS received, i.task_id, i.wake_at, f.flush_id, i.payload, a.id AS assignment_id
            FROM issue_inputs i JOIN tasks t ON t.id = i.task_id
            LEFT JOIN issue_input_order o ON o.input_id = i.id
+           LEFT JOIN issue_input_flushes f ON f.input_id = i.id
            JOIN runner_assignments a ON a.id = t.current_assignment
            WHERE i.run_id IS NULL AND a.runner_id = ?1 AND (?3 IS NULL OR t.id = ?3)
              AND t.status IN ('awaiting_receipt', 'accepted', 'waiting', 'running')
@@ -978,11 +1003,12 @@ pub(super) fn pending_inputs_at(
                       )))
              AND (i.wake_at IS NULL OR i.wake_at <= ?5)
          ), page AS MATERIALIZED (
-           SELECT seq, task_id, wake_at FROM ready ORDER BY received, seq LIMIT ?2
+           SELECT seq, task_id, wake_at, flush_id FROM ready ORDER BY received, seq LIMIT ?2
          )
          SELECT payload, assignment_id FROM ready
          WHERE seq IN (SELECT seq FROM page)
             OR (?4 >= 2 AND (task_id, wake_at) IN (SELECT task_id, wake_at FROM page WHERE wake_at IS NOT NULL))
+            OR (?4 >= 2 AND (task_id, flush_id) IN (SELECT task_id, flush_id FROM page WHERE flush_id IS NOT NULL))
          ORDER BY received, seq",
         eligible = super::codebase_comments::CAN_RECEIVE,
     ))?;

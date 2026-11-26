@@ -19,6 +19,10 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
          );
          CREATE TABLE IF NOT EXISTS issue_input_order (
              seq INTEGER PRIMARY KEY, input_id TEXT NOT NULL UNIQUE
+         );
+         CREATE TABLE IF NOT EXISTS issue_input_flushes (
+             input_id TEXT PRIMARY KEY REFERENCES issue_inputs(id) ON DELETE CASCADE,
+             flush_id TEXT NOT NULL
          );",
     )?;
     Ok(())

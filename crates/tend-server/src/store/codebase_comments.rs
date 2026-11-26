@@ -1512,7 +1512,7 @@ mod tests {
             blocked.is_empty(),
             "a pending Stop cannot offer a flushed input"
         );
-        let [stop] = super::super::control::pending(&store.db, "runner", Some("root-task"))?
+        let [stop] = super::super::control::pending(&store.db, "runner", Some("root-task"), &[])?
             .try_into()
             .unwrap();
         assert_eq!(stop.assignment_id, old_assignment);

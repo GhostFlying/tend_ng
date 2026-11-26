@@ -40,3 +40,14 @@
 原始主干 `e2a5f2623abd556cf9a54f6afd8ef074f206f8c0` 已通过 Rust 格式检查、workspace 构建和测试（51 通过、1 个既有忽略），以及隔离 `tests/e2e/control.py` 和 `tests/e2e/external_wait.py --cancel`。这些是现有停止行为的基线，不是退回待安排的验收结果。
 
 本地候选验收使用 `cargo fmt --all --check`、`cargo build --workspace --locked`、`cargo test --workspace --locked`，以及 `tests/e2e/issue_input_order.py`、`control.py --backlog`、`external_wait.py --backlog`。控制、原等待/取消/同机交接、晚到子项、审阅取消后重开、Codebase 评论与 Web 会话/Runner 协议用已有隔离 fixture 回归。没有连接业务数据库或部署环境。
+
+## 独立审阅后的修订
+
+`02556dfd3a7f32b4cb412659f242fcc36b18779c` 的审阅结论为 `changes_required`，保留该轮结论。修订并在同一 Review Task 复审以下四点。
+
+- 已投递结果未知的 assignment 保持原身份。同步在同一证据快照中为每个重发且有 Stop 的 assignment 带上自己的 Stop，即使控制普通分页已满，Runner 原子落盘后不会开旧回合。
+- 原 assignment 的 Stop 未结算时，原 Run 即使先自然结束，也不能被自己的已释放输入或迟到事实读回来创建后继。Stop 结算保留原实际 Run 终态与输入。
+- 即时释放前缀保留独立的批次身份，不沿用旧的计时窗。支持整批的 Runner 一次获得该前缀及同次即时输入，之后的普通输入另起窗。旧 Runner 继续过滤不支持的事实种类。
+- 普通 Stop 将已接受的 GitHub 批次释放到原 Task 的记录，但立即禁止该 Task 接续。等原停止证据后，关联原 Chat、尚未消费的 required 投递沿既有路径回退 Router，且后继不会重复领取。待安排则保留在任务树内，不触发 Router 回退。
+
+新增 `python3 -B tests/e2e/issue_stop_races.py <tend-server> <tend-runner>`，覆盖断线第一响应、Stop 跨页及真实 Runner 不启动和回传、原 Run 自然结束先于 ACK、普通 Stop 与待安排的 required 路由差异，以及混合 32 和 36 条暂存事实加即时输入的批次与既有能力门槛。

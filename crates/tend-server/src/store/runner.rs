@@ -542,34 +542,40 @@ impl Store {
                     cutoff,
                 )?)
         {
+            // An issued contract and its pending Stop must be read from the
+            // same snapshot. A retransmission can be the Runner's first copy.
+            let snapshot = self.db.unchecked_transaction()?;
+            let assignments = if task.is_none() {
+                assignments_to_send(
+                    &snapshot,
+                    &profile.runner_id,
+                    false,
+                    request.protocol,
+                    profile.shared_reviews,
+                )?
+            } else {
+                Vec::new()
+            };
+            let controls =
+                super::control::pending(&snapshot, &profile.runner_id, task, &assignments)?;
             return Ok(Some(RunnerSyncReply {
-                execution_slot_limit: super::handoff::execution_slot_limit(&self.db, profile)?,
+                execution_slot_limit: super::handoff::execution_slot_limit(&snapshot, profile)?,
                 drain_acknowledged: None,
                 proposal_approval: true,
                 workspace_reclaims: if task.is_none() {
-                    super::reclaim::pending(&self.db, &profile.runner_id)?
+                    super::reclaim::pending(&snapshot, &profile.runner_id)?
                 } else {
                     Vec::new()
                 },
                 confirmed_reclaims: Vec::new(),
-                assignments: if task.is_none() {
-                    assignments_to_send(
-                        &self.db,
-                        &profile.runner_id,
-                        false,
-                        request.protocol,
-                        profile.shared_reviews,
-                    )?
-                } else {
-                    Vec::new()
-                },
+                assignments,
                 confirmed_receipts: Vec::new(),
                 confirmed_runs: Vec::new(),
                 confirmed_operations: Vec::new(),
                 confirmed_token_usage: Vec::new(),
                 token_usage_supported: true,
                 inputs: coordination::pending_inputs_at(
-                    &self.db,
+                    &snapshot,
                     &profile.runner_id,
                     task,
                     request.protocol,
@@ -577,10 +583,10 @@ impl Store {
                     profile.codebase_review_comments,
                     cutoff,
                 )?,
-                controls: super::control::pending(&self.db, &profile.runner_id, task)?,
-                drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
+                controls,
+                drain_to: super::handoff::drain_target(&snapshot, &profile.runner_id)?,
                 uploads: super::artifacts::pending(
-                    &self.db,
+                    &snapshot,
                     &profile.runner_id,
                     request.repair_host_artifacts,
                     task,
@@ -765,7 +771,7 @@ impl Store {
             request.repair_host_artifacts,
             task,
         )?;
-        let controls = super::control::pending(&tx, &profile.runner_id, task)?;
+        let controls = super::control::pending(&tx, &profile.runner_id, task, &assignments)?;
         let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;
         if let Some(slots) = drain_slots.filter(|_| release_slots) {
             super::handoff::note_drain_slots(&tx, &profile.runner_id, slots)?;

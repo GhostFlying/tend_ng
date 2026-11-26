@@ -2,7 +2,7 @@ use super::{Accepted, Store};
 use anyhow::Result;
 use protocol::{
     ControlAck, ControlAction, ControlState, ControlView, IssueTransition, RunnerControl,
-    SendMessage,
+    SendMessage, TaskAssignment,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -127,6 +127,9 @@ pub fn submit(
         "INSERT INTO task_controls VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         params![operation, task, assignment, run, raw, control.as_str()],
     )?;
+    if matches!(action, ControlAction::Stop) && control == ControlState::Stopped {
+        super::external::route_stopped_required(db, task)?;
+    }
     Ok(ResultState::Found(ControlView {
         operation_id: operation.to_owned(),
         task_id: task.to_owned(),
@@ -135,22 +138,43 @@ pub fn submit(
     }))
 }
 
-pub fn pending(db: &Connection, runner: &str, task: Option<&str>) -> Result<Vec<RunnerControl>> {
-    let mut q = db.prepare(
-        "SELECT c.id, c.task_id, c.assignment_id, c.run_id, c.action
-         FROM task_controls c JOIN runner_assignments a ON a.id = c.assignment_id
-         WHERE a.runner_id = ?1 AND c.state = 'pending' AND (?2 IS NULL OR c.task_id = ?2)
-         ORDER BY c.rowid LIMIT ?3",
+pub fn pending(
+    db: &Connection,
+    runner: &str,
+    task: Option<&str>,
+    assignments: &[TaskAssignment],
+) -> Result<Vec<RunnerControl>> {
+    let included = serde_json::to_string(
+        &assignments
+            .iter()
+            .map(|a| &a.placement.assignment_id)
+            .collect::<Vec<_>>(),
     )?;
-    q.query_map(params![runner, task, protocol::RUNNER_SYNC_BATCH], |row| {
-        Ok((
-            row.get(0)?,
-            row.get(1)?,
-            row.get(2)?,
-            row.get(3)?,
-            row.get::<_, String>(4)?,
-        ))
-    })?
+    let mut q = db.prepare(
+        "WITH page AS MATERIALIZED (
+            SELECT c.rowid FROM task_controls c JOIN runner_assignments a ON a.id = c.assignment_id
+            WHERE a.runner_id = ?1 AND c.state = 'pending' AND (?2 IS NULL OR c.task_id = ?2)
+            ORDER BY c.rowid LIMIT ?3
+         ), paired AS (
+            SELECT min(c.rowid) AS rowid FROM json_each(?4) a JOIN task_controls c ON c.assignment_id = a.value
+            WHERE c.state = 'pending' AND c.action->>'kind' = 'stop' GROUP BY c.assignment_id
+         )
+         SELECT c.id, c.task_id, c.assignment_id, c.run_id, c.action FROM task_controls c
+         WHERE c.rowid IN (SELECT rowid FROM page UNION SELECT rowid FROM paired)
+         ORDER BY c.rowid",
+    )?;
+    q.query_map(
+        params![runner, task, protocol::RUNNER_SYNC_BATCH, included],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get::<_, String>(4)?,
+            ))
+        },
+    )?
     .map(|row| {
         let (id, task_id, assignment_id, run_id, action) = row?;
         Ok(RunnerControl {
@@ -162,6 +186,14 @@ pub fn pending(db: &Connection, runner: &str, task: Option<&str>) -> Result<Vec<
         })
     })
     .collect()
+}
+
+pub(super) fn stop_on_current(db: &Connection, task: &str, state: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tasks t JOIN task_controls c ON c.assignment_id = t.current_assignment
+           WHERE t.id = ?1 AND c.task_id = t.id AND c.state = ?2 AND c.action->>'kind' = 'stop')",
+        params![task, state], |r| r.get(0),
+    )?)
 }
 
 pub fn acknowledge(db: &Connection, runner: &str, ack: &ControlAck) -> Result<bool> {
@@ -190,6 +222,12 @@ pub fn acknowledge(db: &Connection, runner: &str, ack: &ControlAck) -> Result<bo
                 report_unstarted_stop(db, &task, &ack.id)?;
             }
             super::external::clear_waits(db, &task)?;
+            if db.query_row(
+                "SELECT current_assignment IS ?2 OR (current_assignment IS NULL AND status = 'cancelled')
+                   FROM tasks WHERE id = ?1", params![task, ack.assignment_id], |r| r.get::<_, bool>(0),
+            )? {
+                super::external::route_stopped_required(db, &task)?;
+            }
         }
         (
             ControlAction::Steer { .. },

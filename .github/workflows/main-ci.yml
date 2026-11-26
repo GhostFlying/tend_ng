@@ -51,6 +51,7 @@ jobs:
       - name: Check Issue backlog, stop evidence and ordered input
         run: |
           python3 -B tests/e2e/issue_input_order.py target/release/tend-server
+          python3 -B tests/e2e/issue_stop_races.py target/release/tend-server target/release/tend-runner
           python3 -B tests/e2e/control.py target/release/tend-server target/release/tend target/release/tend-runner --backlog
           python3 -B tests/e2e/external_wait.py target/release/tend-server target/release/tend target/release/tend-runner --backlog
       - uses: actions/upload-artifact@v7

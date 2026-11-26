@@ -351,6 +351,7 @@ mod tests {
              CREATE TABLE external_batches(task_id TEXT PRIMARY KEY);
              CREATE TABLE codebase_comment_batches(issue_id TEXT PRIMARY KEY);
              CREATE TABLE issue_input_order(seq INTEGER PRIMARY KEY, input_id TEXT NOT NULL UNIQUE);
+             CREATE TABLE issue_input_flushes(input_id TEXT PRIMARY KEY, flush_id TEXT NOT NULL);
              INSERT INTO issues VALUES ('author-i'), ('review-i');
              INSERT INTO tasks VALUES ('author-t','author-i'), ('review-t','review-i');
              INSERT INTO runner_operations VALUES ('first'), ('second');",
