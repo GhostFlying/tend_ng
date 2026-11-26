@@ -31,6 +31,16 @@ assert args["owner"] == "example" and args["repo"] == "guide"
 assert "statusCheckRollup" in args["query"]
 
 if "sha" in args:
+    direct_sha = root / "direct-main-sha"
+    if direct_sha.is_file():
+        assert args["sha"] == direct_sha.read_text().strip(), args["sha"]
+        state = "SUCCESS" if (root / "direct-ci-success").is_file() else "PENDING"
+        with (root / "direct-ci-reads").open("a") as log:
+            log.write(state + "\n")
+        print(json.dumps({"data": {"repository": {"object": {
+            "oid": args["sha"], "statusCheckRollup": {"state": state},
+        }}}}))
+        sys.exit(0)
     assert args["sha"] == "b" * 40
     print(json.dumps({"data": {"repository": {"object": {
         "oid": args["sha"], "statusCheckRollup": {"state": "SUCCESS",

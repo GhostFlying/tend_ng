@@ -184,6 +184,10 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             continue;
         }
         let profile = &available.profile;
+        if dispatch.parent_issue_id.is_none() && !profile.supports_root_category(&dispatch.category)
+        {
+            continue;
+        }
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
         }
@@ -215,7 +219,7 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             "SELECT EXISTS(
                SELECT 1 FROM tasks candidate JOIN issues c ON c.id = candidate.issue_id
                JOIN handoff_roots h ON h.root_id = coalesce(c.parent_issue_id, c.id)
-               JOIN issues i ON i.parent_issue_id = c.parent_issue_id
+               JOIN issues i ON coalesce(i.parent_issue_id, i.id) = coalesce(c.parent_issue_id, c.id)
                JOIN tasks holder ON holder.issue_id = i.id AND holder.id != candidate.id
                LEFT JOIN runner_assignments a ON a.id = holder.current_assignment
                WHERE candidate.id = ?1
@@ -339,7 +343,11 @@ impl Store {
         Ok(ids)
     }
 
-    pub fn agent_candidates(&self, query: &AgentQuery) -> Result<Vec<AgentCandidate>> {
+    pub fn agent_candidates(
+        &self,
+        query: &AgentQuery,
+        root_only: bool,
+    ) -> Result<Vec<AgentCandidate>> {
         let available: std::collections::HashSet<_> = available_runners(&self.db, false)?
             .into_iter()
             .map(|runner| runner.profile.runner_id)
@@ -352,6 +360,9 @@ impl Store {
         let mut candidates = Vec::new();
         for row in statement.query_map([], |row| row.get::<_, String>(0))? {
             let profile: RunnerProfile = serde_json::from_str(&row?)?;
+            if root_only && !profile.supports_root_category(&query.category) {
+                continue;
+            }
             candidates.extend(
                 matching_agents(
                     &profile,
@@ -449,9 +460,11 @@ impl Store {
                 continue;
             };
             if runners.iter().any(|runner| {
-                pinned
-                    .as_ref()
-                    .is_none_or(|id| *id == runner.profile.runner_id)
+                (dispatch.parent_issue_id.is_some()
+                    || runner.profile.supports_root_category(&dispatch.category))
+                    && pinned
+                        .as_ref()
+                        .is_none_or(|id| *id == runner.profile.runner_id)
                     && protocol::matching_task_agent(
                         &runner.profile,
                         &dispatch.category,
@@ -559,6 +572,7 @@ impl Store {
                     false,
                     request.protocol,
                     profile.shared_reviews,
+                    profile.direct_issue_owners,
                 )?
             } else {
                 Vec::new()
@@ -775,6 +789,7 @@ impl Store {
                 true,
                 request.protocol,
                 profile.shared_reviews,
+                profile.direct_issue_owners,
             )?
         } else {
             Vec::new()
@@ -874,17 +889,28 @@ fn assignments_to_send(
     include_reserved: bool,
     version: u32,
     shared_reviews: bool,
+    direct_issue_owners: bool,
 ) -> Result<Vec<TaskAssignment>> {
     let mut statement = db.prepare(
         "SELECT contract FROM runner_assignments WHERE runner_id = ?1 AND
          (state = 'issued' OR (?2 AND state = 'reserved' AND expires_at > unixepoch()))
          AND (?4 >= 2 OR json_extract(contract, '$.placement.agent.category') != 'review')
          AND (?5 OR json_extract(contract, '$.review.author_workspace') IS NULL)
+         AND (?6 OR json_extract(contract, '$.parent_issue_id') IS NOT NULL
+                 OR json_extract(contract, '$.workspace_key') IS NULL
+                 OR json_extract(contract, '$.placement.agent.category') = 'issue-router')
          ORDER BY rowid LIMIT ?3",
     )?;
     statement
         .query_map(
-            params![runner, include_reserved, PAGE_SIZE, version, shared_reviews],
+            params![
+                runner,
+                include_reserved,
+                PAGE_SIZE,
+                version,
+                shared_reviews,
+                direct_issue_owners
+            ],
             |row| row.get::<_, String>(0),
         )?
         .map(|contract| Ok(serde_json::from_str(&contract?)?))
@@ -942,6 +968,7 @@ mod tests {
                 shared_reviews: false,
                 handoff_slots: false,
                 codebase_review_comments: false,
+                direct_issue_owners: false,
             },
             drained: false,
             reclaim_receipts: vec![],
@@ -1042,10 +1069,12 @@ mod tests {
             )?;
         }
         let ids = |protocol, shared| -> Result<Vec<String>> {
-            Ok(assignments_to_send(&db, "runner", true, protocol, shared)?
-                .into_iter()
-                .map(|task| task.task_id)
-                .collect())
+            Ok(
+                assignments_to_send(&db, "runner", true, protocol, shared, false)?
+                    .into_iter()
+                    .map(|task| task.task_id)
+                    .collect(),
+            )
         };
         assert_eq!(ids(1, false)?, ["work"]);
         assert_eq!(ids(2, false)?, ["work", "legacy"]);

@@ -14,9 +14,9 @@ Tend NG 按可信单用户部署设计，信任用户、Agent 和已鉴权组件
 
 ## 1. 产品与交互
 
-工作主链是 **Chat → Router Agent → 顶层 Issue 的 Issue Agent → 工作子 Issue 的 Work Agent**。Router 是用户的个人助理，代理主 Chat 中与用户的所有对话，负责排序、分发和组织回报。它根据原消息、明确的 Issue 引用和对话上下文定位工作，必要时新建顶层 Issue，再把实际委派和原消息关联起来。用户主动进入 Issue Chat 发言时，可以直接和对应 Owner 对话。
+工作主链从 **Chat → Router Agent → 顶层 Issue Owner**。一人可交付时，具名 Work Agent 直接领取原顶层 Issue/Task。多个独立交付需协调时，Issue Agent 通过工作子 Issue 委派。Router 是用户的个人助理，代理主 Chat 中与用户的所有对话，负责排序、分发和组织回报。它根据原消息、明确的 Issue 引用和对话上下文定位工作，必要时新建顶层 Issue，再把实际委派和原消息关联起来。用户主动进入 Issue Chat 发言时，可以直接和对应 Owner 对话。
 
-工作子 Issue 将交付引用和待决问题沿委派关系送达上级。各级 Agent 先处理自己能决定的事项，再将需要上一级决定的问题逐级上报。各顶层 Issue Agent 将各自的结果和需用户决定的事项提交给 Router。Router 在原 Chat 分别转述或组织汇总，按优先级及时限提出需要用户答复的事项，再沿原问题转回答复。 [结果怎样回来](chat-routing.md#结果怎样回来) · [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
+工作子 Issue 将交付引用和待决问题沿委派关系送达上级。各级 Agent 先处理自己能决定的事项，再将需要上一级决定的问题逐级上报。各顶层 Owner 将各自的结果和需用户决定的事项提交给 Router。Router 在原 Chat 分别转述或组织汇总，按优先级及时限提出需要用户答复的事项，再沿原问题转回答复。 [结果怎样回来](chat-routing.md#结果怎样回来) · [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
 
 CLI 覆盖全部公开用户能力。Web 提供其中一部分，两者直接调用同一套 API，共用业务规则。Web 参考旧 Tend 的导航和布局，Chat 是日常工作台，看板是按需浏览的只读工作视图。看板的 Issue 卡片直接显示关联 PR 的可打开链接及已知状态。首期 Web 写入口集中在 Chat 和 Issue 的轻量讨论区，用文本和链接呈现进展、结果和待处理事项。
 
@@ -40,7 +40,7 @@ Web 以共享访问令牌换取可独立撤销的浏览器会话，刷新与同�
 | --- | --- |
 | **Router Agent（Router）** | 由 Server 托管并直接绑定主 Chat 的助手，可显式配置显示名。接收主 Chat 的用户输入、Issue 上报和归属未定的事实，负责判断、路由、跨 Issue 协调和回复用户。 [Router 托管与恢复](chat-routing.md#router-托管与恢复) |
 | **Issue Agent** | 顶层 Issue 的协调 Owner，使用专属的 `issue-router`。按用户的原目标、授权和停点委派与验收子 Issue，跟进并汇总交付，决定顶层 Issue 何时结案。 |
-| **Work Agent** | 工作子 Issue 的 Owner，负责技术计划、调查、实际执行、验证、产物和子 Issue 结案。按具体工作要求选择具名配置。 |
+| **Work Agent** | 在工作子 Issue 担任 Owner，也可直接拥有顶层 Issue，负责调查、实施、验证、交付与结案。按具体工作要求选择具名配置。 |
 | **Review Agent** | 通过 `review` 分配的具名 Agent，担任审阅子 Issue 的 Owner 并交付独立审阅结果。 |
 
 Issue Owner 表示当前 Issue 的负责人。Server 为顶层 Issue 和各子 Issue 分配各自的具名 Agent，Runner 持久领取后责任生效。Issue Agent 和 Work Agent 各自拥有派发、执行和 session 身份。持续推进期间沿用当前 Owner，必要时按原角色交接。

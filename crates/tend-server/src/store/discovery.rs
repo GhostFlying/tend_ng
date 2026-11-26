@@ -88,7 +88,7 @@ pub fn queue_automatic(db: &Connection, observation: &RunObservation) -> Result<
     let issue: Option<String> = db
         .query_row(
             "SELECT i.id FROM tasks t JOIN issues i ON i.id = t.issue_id
-         WHERE t.id = ?1 AND i.parent_issue_id IS NOT NULL",
+         WHERE t.id = ?1 AND (i.parent_issue_id IS NOT NULL OR t.workspace_key IS NOT NULL)",
             [&observation.task_id],
             |row| row.get(0),
         )

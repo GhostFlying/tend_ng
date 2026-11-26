@@ -295,9 +295,8 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     };
     let branches = workspace::branches(run, &cwd);
     let (instructions, tools) = tools::catalogue(
-        &agent.category,
-        runtime.proposal_approval.load(Ordering::Relaxed)
-            && run.assignment.parent_issue_id.is_none(),
+        &run.assignment,
+        runtime.proposal_approval.load(Ordering::Relaxed),
     );
     let native_context =
         native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;
@@ -595,7 +594,7 @@ impl TurnHandler for Handler<'_> {
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
         if call.tool == "tend_agent_candidates"
             && call.namespace.is_none()
-            && self.run.assignment.placement.agent.category == "issue-router"
+            && self.run.assignment.owns_root()
         {
             let query = serde_json::from_value::<protocol::AgentQuery>(call.arguments.clone());
             if let Ok(query) = query

@@ -20,7 +20,7 @@
 
 - 为责任 Agent 提供所需的工具、事实和权限。角色 Skill 和预置 prompt 指引计划、拆分、验证、审阅、重试和收尾，Agent 根据任务及仓库要求作决定。程序保障身份、授权、独占、执行事实、持久投递和副作用对账，按实际问题增补必要的限制。 [Empower Agent](docs/design.md#empower-agent)
 - 按可信单用户部署。故障处理和测试覆盖正常运维中可发生的断线、进程重启、响应丢失等场景。Issue 及其持久关联是工作事实来源，session 可从原输入、Issue 事实和原操作回执恢复。 [工作记录](docs/design.md#工作记录) · [Session 接续](docs/agent-tools.md#session-接续)
-- 主 Chat 由 Server 本机的 Router 代理。Issue Agent 通过子 Issue 委派，Owner 在 Runner 持久领取后生效，显式决定自己的 Issue 何时结案。交付与需用户决策的事项沿责任链回到 Router，再回到原 Chat。CLI 覆盖全部公开能力，与 Web 共用 API。 [产品与交互](docs/design.md#1-产品与交互) · [Agent 角色](docs/design.md#agent-角色)
+- 主 Chat 由 Server 本机的 Router 代理。单人可交付的顶层 Issue 由 Work Agent 直接领取，多个独立交付需协调时由 Issue Agent 委派。Owner 在 Runner 持久领取后生效，显式决定自己的 Issue 何时结案。交付与需用户决策的事项沿责任链回到 Router，再回到原 Chat。CLI 覆盖全部公开能力，与 Web 共用 API。 [产品与交互](docs/design.md#1-产品与交互) · [Agent 角色](docs/design.md#agent-角色)
 - 首次待安排 Issue 保存意图，尚未创建执行 Task。已开始的开放 Issue 也可原地退回待安排，保留历史且仅显式开工恢复调度。看板以顶层 Issue 树的事实分列，有实际 Run 时显示进行中，有可安排工作或可处理输入时显示待推进，整棵树只等已登记的条件或回复时显示等待中。已完成与已取消沿业务终态展示。人工检查通过原 Chat 的 Attention 处理，卡片显示待你决定。 [看板阶段](docs/plans/issue-board-phases.md)
 - Server 和 Runner 各自运行和持久化。已领取任务可以离线推进，按原 Task、Run 和操作身份全量对账或增量同步。工具写操作先在执行实例持久受理。业务状态、操作结果与待投递记录在所属实例的同一短事务提交，响应丢失时沿原身份查证。 [同步 API](docs/server-runner.md#一期同步-api) · [写入与故障边界](docs/storage.md#写入与故障边界)
 - 按实际停妥证据归还 slot。原 Task 在 `waitfor` 期间继续独占 workspace。绑定审阅只在作者 Run 实际停妥后复用原目录，审阅 Run 停妥后作者才续跑。每一层的 `waitfor` 命中后，经负责原 Task 接续的 Runner 直接送给登记等待的 Agent。同 Host 接替时，前驱负责旧 Run 停妥，后继取得接续权后可在原 workspace 启动下一次 Run。同 Host 保留原件和原 Codex home；前驱私有数据的清理以 Server 最终同步确认、实际退出和已验证的共享原件与历史读取绑定为前提。 [等待与续跑](docs/task-lifecycle.md#命中事件与续跑) · [同机 Run 交接](docs/server-runner.md#同机接替时的-run-交接)
@@ -36,6 +36,7 @@
 
 ## 提交与交付
 
+- 保留用户约定的交付终点。要求合入时，满足仓库现有合入门禁、做定向验证并核对远端 main SHA 即可交付。仅当用户明确要求 CI 绿、出包或部署时延伸到该终点。观察由一位责任人负责，沿责任链共享精确 SHA 与结果，等待已有子项输入时结束回合。
 - 当前阶段直接提交到 `main`，并直接推送到 `origin/main`。此约定适用于 Tend NG 仓库。Work Agent 按所操作仓库自己的约定提交。
 - 提交使用仓库现有的用户 Git 身份，未设置仓库身份时沿用用户的全局配置。
 - 提交标题和正文均使用英文。标题以 `feat: `、`fix: ` 或 `opt: ` 开头，整行小写。正文仅详细说明变更范围、背景、原因及影响。测试执行情况单独记录在交付说明。

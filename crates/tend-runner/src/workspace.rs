@@ -183,7 +183,7 @@ pub fn verify_review(root: &Path, run: &LocalRun, repos: &[Repo]) -> Result<Path
 }
 
 pub fn branches(run: &LocalRun, cwd: &Path) -> Vec<protocol::WorkBranch> {
-    if run.assignment.parent_issue_id.is_none() || run.assignment.review.is_some() {
+    if workspace_key(run).is_none() || run.assignment.review.is_some() {
         return Vec::new();
     }
     run.repos

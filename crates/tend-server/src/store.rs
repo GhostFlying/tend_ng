@@ -27,6 +27,7 @@ mod timing;
 mod token_usage;
 pub(crate) mod web_sessions;
 mod work;
+pub(crate) use work::DispatchRequest;
 
 #[cfg(test)]
 pub(crate) fn remove_token_usage_schema(db: &Connection) -> Result<()> {
@@ -496,10 +497,23 @@ impl Store {
         })
     }
 
+    // Report operations can be synced before the bytes of the same Owner's
+    // files. Publication still waits for the originals and never blocks Chat.
+    const READY_ROUTER_INPUT: &'static str = "NOT EXISTS (
+        SELECT 1 FROM report_artifacts link JOIN artifacts a ON a.id = link.artifact_id
+        WHERE link.report_id = i.report_id AND a.published = 0
+    ) AND NOT EXISTS (
+        SELECT 1 FROM proposal_versions v
+        JOIN report_artifacts link ON link.report_id = v.report_id
+        JOIN artifacts a ON a.id = link.artifact_id
+        WHERE v.attention_id = i.attention_id AND a.published = 0
+    )";
+
     pub fn pending_chats(&self) -> Result<Vec<String>> {
-        let mut statement = self
-            .db
-            .prepare("SELECT DISTINCT chat_id FROM router_inputs WHERE outcome IS NULL")?;
+        let mut statement = self.db.prepare(&format!(
+            "SELECT DISTINCT chat_id FROM router_inputs i WHERE outcome IS NULL AND {}",
+            Self::READY_ROUTER_INPUT,
+        ))?;
         Ok(statement
             .query_map([], |row| row.get(0))?
             .collect::<rusqlite::Result<Vec<_>>>()?)
@@ -509,7 +523,8 @@ impl Store {
         let row = self
             .db
             .query_row(
-                "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
+                &format!(
+                    "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
                         a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id,
                         i.attention_id, m.reply_to, i.external_batch
                  FROM router_inputs i
@@ -517,9 +532,11 @@ impl Store {
                  LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
                      SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
                  )
-                 WHERE i.chat_id = ?1 AND i.outcome IS NULL
+                 WHERE i.chat_id = ?1 AND i.outcome IS NULL AND {}
                  ORDER BY a.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL OR
                                         i.external_batch IS NOT NULL), i.seq LIMIT 1",
+                    Self::READY_ROUTER_INPUT
+                ),
                 [chat_id],
                 |row| {
                     let attempt = match row.get::<_, Option<String>>(2)? {

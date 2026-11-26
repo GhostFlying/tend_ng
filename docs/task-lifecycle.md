@@ -6,7 +6,7 @@
 
 ## 工作委派与 Issue 结案
 
-Issue Agent 按用户原目标、授权和停点委派与验收。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。
+顶层 Owner 保留用户原目标、授权和停点。单人交付由 Work Agent 在原顶层 Task 执行，不创建占位子 Issue。协调工作由 Issue Agent 委派，直接 Owner 也可以按需委派真正独立的目标。Server 按 category 分配具名配置，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。
 
 只读调查或待确认建议以一份主报告说明根因证据、推荐以及会影响决定的取舍或未知，备查证据按需提供。需要用户作决定时沿现有 Attention 等待，保持原停点。已直接授权的实现按授权完成，不另设调查或审批阶段。
 
@@ -14,9 +14,9 @@ Issue Agent 按用户原目标、授权和停点委派与验收。它通过工�
 
 Work Agent 可以随时提交阶段或最终产物，也可以显式结算自己负责的 Task。Task 结算可与最终产物同一次提交，也允许无产物结算。各 Issue 的结案由各自 Owner 决定。子 Issue 仍在推进时，父 Issue 可以先结案。子 Issue 的实际状态和 Owner 继续保留，停止与资源归还依据相应控制操作和 Runner 的停妥证据。 [Run 正常结束时的 Task 结算](#run-正常结束时的-task-结算)
 
-结案指引要求 Issue Agent 对照原用户目标说明实际交付、尚存风险和有影响的子项后续安排。产物、Task 结算和 Issue 结案沿原操作持久化，界面按 Server 已应用的事实显示。 [Agent 角色](design.md#agent-角色)
+结案指引要求顶层 Owner 对照原用户目标说明实际交付、尚存风险和有影响的子项后续安排。产物、Task 结算和 Issue 结案沿原操作持久化，界面按 Server 已应用的事实显示。 [Agent 角色](design.md#agent-角色)
 
-用户明确要求当前 Issue 交付计划、报告或附件后原地等待确认或审阅时，Issue Agent 用 `tend_report_result` 上报阶段结果和原件，再用 `tend_request_attention` 登记一个具体、可作答的选择。结束当前 Run，停妥后归还 slot，Issue 保持开放。报告或附件回执不等于结案。答复唤醒原 Task 后，Issue Agent 决定继续还是结案。无明确等待要求时，Owner 仍可在目标达成后上报并结案。 [结果怎样回来](chat-routing.md#结果怎样回来) · [等待期间的用户输入](#等待期间的用户输入)
+用户明确要求当前 Issue 交付计划、报告或附件后原地等待确认或审阅时，顶层 Owner 用 `tend_report_result` 上报阶段结果和原件，再用 `tend_request_attention` 登记一个具体、可作答的选择。结束当前 Run，停妥后归还 slot，Issue 保持开放。报告或附件回执不等于结案。答复唤醒原 Task 后，Issue Agent 决定继续还是结案。无明确等待要求时，Owner 仍可在目标达成后上报并结案。 [结果怎样回来](chat-routing.md#结果怎样回来) · [等待期间的用户输入](#等待期间的用户输入)
 
 ## 父子 Issue 的等待与唤醒
 
@@ -74,13 +74,13 @@ Issue Agent 按原取消范围发出停止控制后，可以显式将父 Issue �
 
 ## 独立审阅
 
-**已确认。** Work Agent 可以在当前工作子 Issue 内调用未参与该范围实现的 Codex 原生 subagent 完成自选独审。由 Tend 单独分配审阅时，创建 `review` 子 Issue，由 Review Agent 承担。用户、仓库或平台明确要求的审阅方式仍作用于相应操作。
+**已确认。** Work Agent 可以在当前原工作 Issue 内调用未参与该范围实现的 Codex 原生 subagent 完成自选独审。由 Tend 单独分配审阅时，创建 `review` 子 Issue，由 Review Agent 承担。用户、仓库或平台明确要求的审阅方式仍作用于相应操作。
 
 调查通常直接交付，用户明确要求复核或新证据可能改变关键结论时，只复核有必要的点。复杂实现建议审阅实际候选。
 
 Runner 通过 App Server 观察实际执行，记录发起线程和子线程的关联。创建回执记录 subagent 已创建。子回合终态或 `wait` 返回的该子 Agent 状态提供实际完成、失败或中断证据。已持久保存的线程历史按原 thread ID 补读，缺少终态证据时保持待确认。 [原生创建与等待事件](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/event_mapping.rs#L97-L134) · [等待结果的状态](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/event_mapping.rs#L224-L258)
 
-Work Agent 显式登记候选提交或产物、审阅范围及结论，引用 Runner 观察到的子线程和本次审阅结果。记录随原工作子 Issue 持久保存，通过现有 Runner 与 Server 同步回传，Issue 详情按需读取。
+Work Agent 显式登记候选提交或产物、审阅范围及结论，引用 Runner 观察到的子线程和本次审阅结果。记录随原工作 Issue 持久保存，通过现有 Runner 与 Server 同步回传，Issue 详情按需读取。
 
 确需由 Tend 单独安排时，发起方用 `tend_request_review` 绑定候选、范围、原作者 Issue/Task 和审阅 Issue/Task。若作者是工作子项，审阅作为同一协调父 Issue 的子项单独归属。审阅在作者所属 Runner 本地排队。作者可在请求被持久受理后继续本轮，Runner 确认实际停妥后才允许审阅取得同一 workspace。审阅结论可先送达原作者 Task，作者仍须等审阅 Run 实际停妥才可开工。原 PR/CI 等待的目录保留不受此交接影响。 [Workspace 分配](server-runner.md#workspace-分配)
 

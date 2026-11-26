@@ -68,7 +68,7 @@ Runner 取件按自己的待投递记录查询。心跳可与同步一起上报�
 
 **已确认。** 顶层 Issue 首次由 Runner 持久领取时，确定整棵 Issue 树的 Runner 和 Host。常规派发、审阅、续跑和重开沿该归属调度。缺 slot 时在所属 Runner 排队，Runner 暂不可用时等它恢复。Repo 或 Agent 配置缺失时，保留实际原因并送回负责判断的派发方。不同顶层 Issue 各自选择 Runner，主 Chat 的 Router 沿自己的配置运行。 [无候选时的反馈](agent-selection.md#无候选时的反馈与改选)
 
-Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner 和 Runner 归属。Runner 可以先在本地受理子项委派。Server 若先收到子项操作，保留原操作，取得顶层领取事实后再应用子项分配。全量对账和增量同步沿原领取和接替记录恢复归属。
+Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner 和 Runner 归属，直接领取和协调领取使用同一条路径。Runner 以可选 `direct_issue_owners` 上报直接顶层 Owner 支持，旧 Runner 仍可领取原有角色；已拥有开放直接工作或仍有直接派发待确认时，接替方也必须支持直接 Owner。Runner 可以先在本地受理子项委派。Server 若先收到子项操作，保留原操作，取得顶层领取事实后再应用子项分配。全量对账和增量同步沿原领取和接替记录恢复归属。
 
 远期如果工作目标本身需要多台设备上的 Agent 协作，再单独设计跨设备子 Issue 的显式派发和结果回传。
 
@@ -112,7 +112,7 @@ Server 首次返回任务前，在同一个短事务中确认分配仍可投递�
 
 ## Workspace 分配
 
-**已确认。** 顶层 Issue 需要代码时，在所属 Runner 上共用一个 workspace。子 Issue 默认使用共用的工作目录。上层 Issue Agent 在拆分时按需为子 Issue 指定独立 worktree，Runner 按派发准备目录并记录实际绑定。续跑或更换 session 时沿原绑定恢复。
+**已确认。** 顶层 Issue 需要代码时，在所属 Runner 上共用一个 workspace。直接 Owner 的首个 Task 绑定顶层 Issue 的 workspace key，按原 repo 和起点挂载，分支沿 Run 事实供同一 PR/MR 发现入口使用。子 Issue 默认使用共用的工作目录。上层 Issue Agent 在拆分时按需为子 Issue 指定独立 worktree，Runner 按派发准备目录并记录实际绑定。续跑或更换 session 时沿原绑定恢复。
 
 角色 Skill 指引 Work Agent 使用已分配的目录。工作中发现需要独立 worktree 时，Work Agent 向上级提出，由上层 Issue Agent 决定并在派发中指定。Git 命令保持可用，Agent 按仓库约定使用。 [Agent 工具与本地受理](agent-tools.md#调用接口)
 

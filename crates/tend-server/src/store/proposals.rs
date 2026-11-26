@@ -59,7 +59,7 @@ pub(super) fn register(
                 JOIN report_artifacts link ON link.report_id = r.id
                 JOIN artifacts file ON file.id = link.artifact_id
                 WHERE r.id = ?1 AND r.issue_id = ?2 AND run.task_id = ?3 AND file.id = ?4
-                  AND file.published = 1 AND (lower(file.name) GLOB '*.md' OR lower(file.name) GLOB '*.markdown')
+                  AND (file.published = 1 OR file.issue_id = ?2) AND (lower(file.name) GLOB '*.md' OR lower(file.name) GLOB '*.markdown')
                   AND NOT EXISTS (SELECT 1 FROM proposal_versions WHERE report_id = r.id)
             )",
             params![proposal.report_id, issue, task, proposal.artifact_id],

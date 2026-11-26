@@ -142,6 +142,7 @@ impl Config {
             shared_reviews: true,
             handoff_slots: true,
             codebase_review_comments: true,
+            direct_issue_owners: true,
         }
     }
 

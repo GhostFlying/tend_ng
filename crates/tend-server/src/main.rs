@@ -403,7 +403,10 @@ fn handle(
         if !query.valid() {
             return Ok(api_error(400, "invalid category or task requirements"));
         }
-        return Ok((200, json!({"candidates": store.agent_candidates(&query)?})));
+        return Ok((
+            200,
+            json!({"candidates": store.agent_candidates(&query, false)?}),
+        ));
     }
     if let Some(message) = path
         .strip_prefix("/api/v1/messages/")

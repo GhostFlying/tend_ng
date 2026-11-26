@@ -127,7 +127,7 @@ def exercise(args, root, env):
     with closing(sqlite3.connect(root / "server.sqlite")) as db:
         [saved] = db.execute(
             "SELECT m.id, m.text, d.request, i.objective, t.repo_ids, t.base_refs, "
-            "t.requested_agent, t.pinned_agent_id, t.pinned_runner_id, a.turn_id "
+            "t.requested_agent, t.pinned_agent_id, t.pinned_runner_id, a.turn_id, t.category "
             "FROM router_dispatches d JOIN issues i ON i.id = d.issue_id "
             "JOIN chat_messages m ON m.seq = i.source_seq JOIN tasks t ON t.id = d.task_id "
             "JOIN router_attempts a ON a.id = d.attempt_id"
@@ -138,7 +138,8 @@ def exercise(args, root, env):
         assert request["repo_ids"] == json.loads(saved[4]) == ["lynx"], saved
         assert "agent" not in request and "base_refs" not in request, request
         assert json.loads(saved[5]) == {} and saved[6:9] == (None, None, None), saved
-        assert saved[9] == turn_id, saved
+        assert saved[9:] == (turn_id, "investigation"), saved
+        assert request["category"] == "investigation", request
         assert db.execute("SELECT count(*) FROM router_dispatches").fetchone()[0] == 1
     assert not github_log.exists(), github_log.read_text() if github_log.exists() else ""
 

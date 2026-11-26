@@ -5,6 +5,36 @@ use protocol::{
     DispatchIssue, IssueDetail, IssueDispatch, RecordedIssue, RunObservation, TaskAssignment,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
+use serde::{Deserialize, Serialize};
+
+// Keep category in the Router request, not the Runner work payload. Omit the
+// legacy default when serializing so retries still match historical receipts.
+#[derive(Serialize)]
+pub(crate) struct DispatchRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    #[serde(flatten)]
+    pub work: DispatchIssue,
+}
+
+impl DispatchRequest {
+    pub fn parse(
+        mut fields: serde_json::Map<String, serde_json::Value>,
+    ) -> serde_json::Result<Self> {
+        let category: Option<String> = fields
+            .remove("category")
+            .map(serde_json::from_value)
+            .transpose()?;
+        Ok(Self {
+            category: category.filter(|value| value != "issue-router"),
+            work: DispatchIssue::deserialize(serde_json::Value::Object(fields))?,
+        })
+    }
+
+    fn category(&self) -> &str {
+        self.category.as_deref().unwrap_or("issue-router")
+    }
+}
 
 pub(super) const DISPATCH_QUERY: &str =
     "SELECT i.id, t.id, coalesce(d.operation_id,
@@ -87,7 +117,7 @@ impl Store {
         &mut self,
         attempt_id: &str,
         call: &ToolCall,
-        work: &DispatchIssue,
+        dispatch: &DispatchRequest,
         record_only: bool,
         dispatcher_name: Option<&str>,
     ) -> Result<Option<IssueDetail>> {
@@ -123,7 +153,8 @@ impl Store {
         )? {
             return Ok(None);
         }
-        let request = serde_json::to_string(work)?;
+        let request = serde_json::to_string(dispatch)?;
+        let work = &dispatch.work;
         let prior = tx
             .query_row(
                 "SELECT operation_id, request, recorded FROM router_dispatches WHERE attempt_id=?1 AND call_id=?2",
@@ -171,7 +202,7 @@ impl Store {
             dispatcher_name.filter(|_| source_chat == "main"),
         )?;
         if !record_only {
-            start_first_task(&tx, &issue_id, &operation_id, work)?;
+            start_first_task(&tx, &issue_id, &operation_id, dispatch)?;
         }
         let result = receipt(&tx, &operation_id)?;
         super::board::commit(tx)?;
@@ -288,7 +319,8 @@ pub(super) fn start_first_recorded(
         if state != "open" {
             return Ok(None);
         }
-        start_first_task(db, id, &operation, &serde_json::from_str(&raw)?)?;
+        let dispatch = DispatchRequest::parse(serde_json::from_str(&raw)?)?;
+        start_first_task(db, id, &operation, &dispatch)?;
     }
     Ok(Some(receipt(db, &operation)?))
 }
@@ -297,13 +329,14 @@ fn start_first_task(
     db: &Connection,
     issue: &str,
     operation: &str,
-    work: &DispatchIssue,
+    dispatch: &DispatchRequest,
 ) -> Result<()> {
     let task = protocol::new_id();
+    let work = &dispatch.work;
     db.execute(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, base_refs,
-                            requested_agent, pinned_runner_id, pinned_agent_id)
-         VALUES (?1, ?2, 'issue-router', 'awaiting_assignment', ?3, ?4, ?5, ?6, ?7, ?8)",
+                            requested_agent, pinned_runner_id, pinned_agent_id, workspace_key)
+         VALUES (?1, ?2, ?9, 'awaiting_assignment', ?3, ?4, ?5, ?6, ?7, ?8, ?10)",
         params![
             task, issue,
             serde_json::to_string(&work.repo_ids)?,
@@ -312,6 +345,8 @@ fn start_first_task(
             work.agent.as_ref().map(serde_json::to_string).transpose()?,
             work.agent.as_ref().and_then(|agent| agent.runner_id.as_ref()),
             work.agent.as_ref().map(|agent| &agent.id),
+            dispatch.category(),
+            dispatch.category.as_ref().map(|_| issue),
         ],
     )?;
     db.execute(
@@ -345,9 +380,15 @@ fn receipt(db: &Connection, operation: &str) -> Result<IssueDetail> {
 }
 
 fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedIssue> {
-    let work = serde_json::from_str(row.get_ref(5)?.as_str()?).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(5, rusqlite::types::Type::Text, Box::new(error))
-    })?;
+    let dispatch = serde_json::from_str(row.get_ref(5)?.as_str()?)
+        .and_then(DispatchRequest::parse)
+        .map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                5,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     Ok(RecordedIssue {
         issue_id: row.get(0)?,
         short_number: row.get(6)?,
@@ -355,7 +396,7 @@ fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedIssue> {
         source_message_id: row.get(2)?,
         chat_id: row.get(3)?,
         issue_state: row.get(4)?,
-        work,
+        work: dispatch.work,
     })
 }
 

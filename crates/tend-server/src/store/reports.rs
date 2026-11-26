@@ -86,7 +86,7 @@ pub fn enqueue(
             db.execute(
                 "INSERT INTO report_artifacts (report_id, artifact_id)
              SELECT ?1, a.id FROM artifacts a JOIN issues i ON i.id = a.issue_id
-             WHERE a.id = ?2 AND a.published = 1 AND (i.id = ?3 OR i.parent_issue_id = ?3)",
+             WHERE a.id = ?2 AND (i.id = ?3 OR (i.parent_issue_id = ?3 AND a.published = 1))",
                 params![operation.operation_id, id, issue],
             )? == 1,
             "Report file does not belong to the Issue tree"
@@ -399,6 +399,55 @@ mod tests {
     use crate::store::Store;
     use codex_app::Answer;
     use std::path::Path;
+
+    #[test]
+    fn direct_report_waits_for_its_original_without_blocking_chat() -> Result<()> {
+        let mut store = Store::initialize(Path::new(":memory:"))?;
+        store.db.execute_batch(
+            "INSERT INTO chat_messages(seq,id,chat_id,text) VALUES
+                (1,'original','main','Deliver the file'), (2,'unrelated','main','Continue chatting');
+             INSERT INTO runners(id,host_id,profile,last_seen) VALUES ('runner','host','{}',0);
+             INSERT INTO issues(id,source_seq,title,objective) VALUES ('root',1,'Title','Delivery');
+             INSERT INTO tasks(id,issue_id,category,status,repo_ids,required_capabilities)
+               VALUES ('task','root','implementation','completed','[]','[]');
+             INSERT INTO runner_operations(id,runner_id,operation) VALUES
+                ('file','runner','{}'), ('report','runner','{}');
+             INSERT INTO artifacts(id,issue_id,task_id,runner_id,name,bytes)
+               VALUES ('file','root','task','runner','file.md',5);
+             INSERT INTO router_inputs(chat_id,message_seq) VALUES ('main',2);",
+        )?;
+        enqueue(
+            &store.db,
+            &WorkOperation {
+                operation_id: "report".into(),
+                assignment_id: "assignment".into(),
+                run_id: "run".into(),
+                action: protocol::WorkAction::ReportIssue {
+                    summary: "Done".into(),
+                    artifact_ids: vec!["file".into()],
+                },
+            },
+            "root",
+            1,
+            "Done",
+            &["file".into()],
+        )?;
+        let ordinary = store.next_input("main")?.unwrap();
+        assert_eq!(ordinary.message_id, "unrelated");
+        store.finish(ordinary.seq, &[], None)?;
+        assert!(store.next_input("main")?.is_none());
+        assert!(store.pending_chats()?.is_empty());
+        store.finish_artifact(Artifact {
+            id: "file".into(),
+            name: "file.md".into(),
+            bytes: 5,
+            available: true,
+        })?;
+        let delivery = store.next_input("main")?.unwrap();
+        assert_eq!(delivery.report_id.as_deref(), Some("report"));
+        assert_eq!(delivery.message_id, "original");
+        Ok(())
+    }
 
     #[test]
     fn issue_details_only_promote_proven_reports_and_keep_historical_sources() -> Result<()> {

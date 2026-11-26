@@ -31,6 +31,17 @@ START_ISSUE = "开始刚才记下的发布说明。"
 PARK_ISSUE = "Park fixture Issue "
 PARK_FOREIGN_ISSUE = "Reject parking foreign fixture Issue "
 REGISTERED_REVIEW = "review Lynx MR !75573"
+DIRECT_CASES = {
+    "Merge the example change and stop at remote main.": ("merge", "implementation"),
+    "Merge the example change and wait for green CI on remote main.": ("ci", "implementation-economy"),
+    "Coordinate two independent deliverables in example.": ("multi", "issue-router"),
+    "Investigate example and get an independent review if necessary.": ("review", "investigation"),
+}
+DIRECT_REVIEW_REPLY = "Review the example candidate."
+cases[DIRECT_REVIEW_REPLY] = {"answer": "Decision delivered to the owner."}
+for prompt in DIRECT_CASES:
+    cases[prompt] = {"answer": "Assigned the requested work."}
+
 cases[RECORD_ISSUE] = {"answer": "已记下，稍后再做。"}
 cases[START_ISSUE] = {"answer": "已经安排原 Issue 开工。"}
 cases[REGISTERED_REVIEW] = {"answer": "I’ve queued the read-only review."}
@@ -239,6 +250,9 @@ for line in sys.stdin:
                 if "original_message_provenance" in attention:
                     case = {"attention": attention, "question": attention["request"]["question"],
                             "answer": "TEND_NO_UPDATE", "handoff_background": attention}
+                elif attention["original_request"] in DIRECT_CASES:
+                    case = {"attention": attention, "question": attention["request"]["question"],
+                            "answer": "TEND_NO_UPDATE"}
                 elif attention["original_request"] == PROPOSAL_REQUEST:
                     if attention["proposal"]:
                         assert attention["proposal"]["version"] == 1
@@ -270,6 +284,8 @@ for line in sys.stdin:
                 report = json.loads(text.split("\n", 1)[1])
                 if "original_message_provenance" in report:
                     case = {"answer": report["summary"], "handoff_background": report}
+                elif report["original_request"] in DIRECT_CASES:
+                    case = {"answer": report["summary"]}
                 elif report["original_request"] == PROPOSAL_REQUEST:
                     case = {"answer": report["summary"]}
                 elif report["original_request"] == STAGE_REQUEST:
@@ -281,6 +297,7 @@ for line in sys.stdin:
                     assert report["artifacts"] == []
                     case = {"answer": "I also verified the repository command."}
                 else:
+                    assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST}
                     assert report["summary"] == "The requested guide is ready."
                     [file] = report["artifacts"]
                     assert file["name"] == "guide.txt"
@@ -475,6 +492,12 @@ for line in sys.stdin:
                                          params["clientUserMessageId"])
                 assert repeated == receipt
                 answer = case["answer"]
+            elif text == DIRECT_REVIEW_REPLY:
+                assert context and "explicitly replies to this Tend Attention" in context
+                fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
+                decision_tool("tend_answer_attention", {"attention_id": fact["id"], "answer": text},
+                              thread_id, turn_id, params["clientUserMessageId"])
+                answer = case["answer"]
             elif text in {ATTENTION_REPLY, STAGE_REPLY}:
                 if context and "explicitly replies to this Tend Attention" in context:
                     fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
@@ -515,12 +538,30 @@ for line in sys.stdin:
                 assert receipt["issue_id"] == issue and receipt["text"] == text
                 assert receipt["short_number"] == number
                 answer = case["answer"]
+            elif text in DIRECT_CASES:
+                title, category = DIRECT_CASES[text]
+                catalogue, instructions = database.execute(
+                    "SELECT tools, instructions FROM threads WHERE id = ?", (thread_id,)
+                ).fetchone()
+                schema = next(tool["inputSchema"] for tool in json.loads(catalogue)
+                              if tool["name"] == "tend_dispatch_issue")
+                assert category in schema["properties"]["category"]["enum"]
+                for rule in ("one person can deliver the outcome", "verified remote main SHA",
+                             "only when the user explicitly asks for that endpoint",
+                             "one responsible Agent observe"):
+                    assert rule in instructions, rule
+                receipt = decision_tool("tend_dispatch_issue", {
+                    "title": title, "objective": text, "category": category,
+                    "repo_ids": ["example"],
+                }, thread_id, turn_id, params["clientUserMessageId"])
+                assert receipt["category"] == category and "parent_issue_id" not in receipt
+                answer = case["answer"]
             elif text == REGISTERED_REVIEW:
                 decision_tool("tend_dispatch_issue", {
                     "title": "Review Lynx MR !75573",
                     "objective": "Review Lynx MR !75573 read-only. Report review findings and stop. "
                                  "Do not modify or merge the MR.",
-                    "repo_ids": ["lynx"],
+                    "repo_ids": ["lynx"], "category": "investigation",
                 }, thread_id, turn_id, params["clientUserMessageId"])
                 answer = case["answer"]
             elif case.get("dispatch"):

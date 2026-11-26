@@ -1,8 +1,8 @@
 use crate::store::discussion::HandoffSource;
-use crate::store::{Attempt, Input, Store};
+use crate::store::{Attempt, DispatchRequest, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{AgentQuery, DispatchIssue, ExternalCondition, IssueDetail};
+use protocol::{AgentQuery, ExternalCondition, IssueDetail, TOP_LEVEL_CATEGORIES};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -14,7 +14,7 @@ use std::{
 };
 
 pub(crate) const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 19;
+const TOOL_REVISION: i64 = 20;
 const HANDOFF_WRITES: &[&str] = &[
     "tend_dispatch_issue",
     "tend_record_issue",
@@ -33,7 +33,12 @@ const HANDOFF_READS: &[&str] = &[
 ];
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
-    "Use tend_dispatch_issue to delegate project work. Its receipt tells you the current assignment status. ",
+    "Use tend_dispatch_issue to assign project work. Its receipt tells you the current assignment status. ",
+    "When one person can deliver the outcome, explicitly set category to implementation or investigation so the Work Agent owns and works on the original top-level Issue and Task. ",
+    "For a small, clear implementation you may explicitly choose implementation-economy. Use issue-router only when multiple independent deliveries need coordination. Do not create a placeholder child for one person's work. ",
+    "Keep the same delivery endpoint through every handoff. When the user asks to merge, apply the repository's existing merge gates, do focused verification, and report the verified remote main SHA. ",
+    "Extend tracking beyond merge to CI success, a package, or deployment only when the user explicitly asks for that endpoint. ",
+    "When observation is needed, let one responsible Agent observe and share the exact SHA and result along the ownership chain. Do not duplicate checks or hold this turn open for an existing child event. ",
     "Preserve the user's original goal, named targets, explicit limits, and stopping point in the dispatch objective. Add only the context needed to carry out that work. ",
     "Do not add operational restrictions the user did not specify. State an implicit stopping point as the requested outcome, not as new prohibitions on out-of-scope actions. ",
     "Leave repository-specific steps needed to preserve dependencies (such as rebase, stack, or dependency updates) to the Work Agent's judgment and execution within scope. ",
@@ -99,6 +104,7 @@ fn dispatch_tool(name: &str, description: &str) -> Value {
             "properties": {
                 "title": { "type": "string" },
                 "objective": { "type": "string" },
+                "category": { "type": "string", "enum": TOP_LEVEL_CATEGORIES },
                 "repo_ids": { "type": "array", "items": { "type": "string" } },
                 "agent": {"type":"object","properties":{"id":{"type":"string"},"runner_id":{"type":"string"}},
                           "required":["id","runner_id"],"additionalProperties":false},
@@ -292,9 +298,9 @@ fn consume_inputs(
         }),
         json!({
             "type":"function", "name":"tend_agent_candidates",
-            "description":"Read qualifying Issue Agent configurations by repository and capability.",
+            "description":"Read qualifying top-level Owner configurations by category, repository, and capability.",
             "inputSchema":{"type":"object","properties":{
-                "category":{"type":"string","enum":["issue-router"]},
+                "category":{"type":"string","enum":TOP_LEVEL_CATEGORIES},
                 "repo_ids":{"type":"array","items":{"type":"string"}},
                 "required_capabilities":{"type":"array","items":{"type":"string"}}
             },"required":["category"],"additionalProperties":false}
@@ -702,12 +708,14 @@ impl TurnHandler for DispatchHandler<'_> {
                         "Provide category and any repository or capability requirements",
                     ));
                 };
-                if query.category != "issue-router" || !query.valid() {
-                    return Ok(tool_error("Provide a valid issue-router query"));
+                if !TOP_LEVEL_CATEGORIES.contains(&query.category.as_str()) || !query.valid() {
+                    return Ok(tool_error(
+                        "Provide a valid top-level category and task requirements",
+                    ));
                 }
                 Ok(ToolOutput {
                     success: true,
-                    body: json!({"candidates": self.store.agent_candidates(&query)?}),
+                    body: json!({"candidates": self.store.agent_candidates(&query, true)?}),
                 })
             }
             "tend_subscribe" => {
@@ -804,11 +812,18 @@ impl DispatchHandler<'_> {
         })
     }
     fn dispatch(&mut self, call: &ToolCall) -> Result<ToolOutput> {
-        let work: DispatchIssue = match serde_json::from_value(call.arguments.clone()) {
-            Ok(work) => work,
+        let dispatch = match serde_json::from_value(call.arguments.clone())
+            .and_then(DispatchRequest::parse)
+        {
+            Ok(dispatch) => dispatch,
             Err(error) => return Ok(tool_error(&format!("Invalid dispatch request ({error})"))),
         };
-        if work.title.trim().is_empty()
+        let work = &dispatch.work;
+        if dispatch
+            .category
+            .as_deref()
+            .is_some_and(|category| !TOP_LEVEL_CATEGORIES.contains(&category))
+            || work.title.trim().is_empty()
             || work.objective.trim().is_empty()
             || work
                 .agent
@@ -831,7 +846,7 @@ impl DispatchHandler<'_> {
             self.store.dispatch_issue(
                 self.attempt_id,
                 call,
-                &work,
+                &dispatch,
                 call.tool == "tend_record_issue",
                 self.dispatcher_name,
             )?,

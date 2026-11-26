@@ -19,6 +19,8 @@ def main():
         parser.add_argument(component, type=lambda value: Path(value).resolve())
     parser.add_argument("--codex-home", required=True, type=lambda value: Path(value).resolve())
     parser.add_argument("--image", action="store_true")
+    parser.add_argument("--direct-owner", action="store_true",
+                        help="Exercise natural-language single-owner dispatch and original Chat delivery")
     args = parser.parse_args()
     personal_home = (Path.home() / ".codex").resolve()
     inherited_home = os.environ.get("CODEX_HOME")
@@ -44,6 +46,10 @@ def main():
             "agents": [{"id": "coordinator", "category": "issue-router", "revision": "one", "reasoning_effort": "low"},
                        {"id": "worker", "category": "implementation", "revision": "one", "reasoning_effort": "low", "capabilities": ["image_gen"]}],
         }
+        if args.direct_owner:
+            runner_config["agents"].append({"id": "quick-worker", "category": "implementation-economy",
+                                            "revision": "one", "reasoning_effort": "low"})
+
         (root / "runner.json").write_text(json.dumps(runner_config))
         with socket.socket() as sock:
             sock.bind(("127.0.0.1", 0))
@@ -74,6 +80,34 @@ def main():
                     processes.append(subprocess.Popen([getattr(args, name), *arguments], env=env, cwd=root, stderr=stderr, start_new_session=True))
             time.sleep(2)
             wait(lambda: cli("runner", "list"), bool, 8)
+            if args.direct_owner:
+                source = cli(
+                    "chat", "send", "main",
+                    "请现在在已登记的 example 仓库整理一个极短的 quickstart.txt。"
+                    "阅读 README.md 和 seed.py，核对并记录 seed.py 输出的两种植物。"
+                    "用 Tend 附件把完整文件和一句结论发回本对话，交付后结案。"
+                    "这是本机隔离仓库，不提交、不推送，也不访问外部服务。",
+                )["message_id"]
+                rows = wait(lambda: cli("chat", "read", "main")["messages"],
+                            lambda messages: any(m.get("reply_to") == source and m.get("artifacts")
+                                                 for m in messages), 240)
+                [issue] = next(m for m in rows if m["id"] == source)["issue_ids"]
+                owner = wait(lambda: cli("issue", "read", issue),
+                             lambda item: item["issue_state"] == "closed"
+                             and item["status"] == "completed")
+                assert owner["category"] in {"implementation", "implementation-economy"}
+                assert owner["placement"]["agent"]["id"] in {"worker", "quick-worker"}
+                with sqlite3.connect(root / "server.sqlite") as db:
+                    assert db.execute("SELECT id FROM issues WHERE parent_issue_id=?", (issue,)).fetchall() == []
+                    assert db.execute("SELECT id FROM tasks WHERE issue_id=?", (issue,)).fetchall() == [
+                        (owner["task_id"],)]
+                report = next(m for m in rows if m.get("reply_to") == source and m.get("artifacts"))
+                [file] = [a for a in report["artifacts"] if a["name"] == "quickstart.txt"]
+                body = cli("artifact", "download", file["id"], raw=True).lower()
+                assert b"radish" in body and b"thyme" in body
+                print("PASS actual Codex directly owned one Issue/Task and delivered the original file to Chat",
+                      flush=True)
+                return
             req_a = cli("chat", "send", "main",
                         "请立即创建一个工作 Issue，只需要登记的 example 仓库。让 Issue Agent 委派给 implementation Work Agent，"
                         "在分配的本机 Git worktree 中阅读 README.md 并创建 quickstart.txt，内容含 radish and thyme。"

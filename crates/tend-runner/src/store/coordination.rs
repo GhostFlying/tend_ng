@@ -327,13 +327,17 @@ impl Store {
             let mut known = self.0.prepare(
                 "SELECT EXISTS(SELECT 1 FROM local_issue_inputs i JOIN received_assignments a ON a.id = i.assignment_id
                  WHERE i.id = ?1 AND json_extract(i.payload, '$.kind') = 'artifact_available'
+                 AND json_extract(a.contract, '$.issue_id') = ?2
+                 UNION ALL
+                 SELECT 1 FROM local_task_intents o JOIN received_assignments a ON a.id = o.assignment_id
+                 WHERE o.id = ?1 AND json_extract(o.operation, '$.action.kind') = 'submit_artifact'
                  AND json_extract(a.contract, '$.issue_id') = ?2)",
             )?;
             for id in artifact_ids {
                 ensure!(
                     known.query_row(params![id, run.assignment.issue_id], |row| row
                         .get::<_, bool>(0))?,
-                    "Delivery {id} has not been received by this Issue"
+                    "Delivery {id} was neither submitted nor received by this Issue"
                 );
             }
         }

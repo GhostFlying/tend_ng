@@ -117,12 +117,28 @@ pub fn apply(
     else {
         return Ok(false);
     };
+    let owns_root = protocol::can_own_root(&category, parent_issue.as_deref());
+    if !owns_root
+        && matches!(
+            operation.action,
+            WorkAction::ReportIssue { .. }
+                | WorkAction::ForwardIssueMessage { .. }
+                | WorkAction::EscalateAttention { .. }
+                | WorkAction::AnswerChildAttention { .. }
+                | WorkAction::AskAttention {
+                    proposal: Some(_),
+                    ..
+                }
+        )
+    {
+        return Ok(false);
+    }
     if let WorkAction::Delegate {
         category: requested,
         work,
         ..
     } = &operation.action
-        && (category != "issue-router"
+        && (!owns_root
             || !WORK_CATEGORIES.contains(&requested.as_str())
             || work
                 .agent
@@ -300,6 +316,7 @@ pub fn apply(
             )?;
             if changed != 0
                 && let Some(parent_issue) = parent_issue
+                && !review_reports_directly(db, &source_task, &parent_issue)?
                 && let Some(parent_task) = latest_task(db, &parent_issue)?
             {
                 enqueue(
@@ -333,9 +350,6 @@ pub fn apply(
             summary,
             artifact_ids,
         } => {
-            if category != "issue-router" {
-                return Ok(false);
-            }
             super::reports::enqueue(
                 db,
                 operation,
@@ -580,6 +594,18 @@ fn delegate(
     Ok(())
 }
 
+// A bound review for a direct Owner already delivers a result (including
+// failure without a verdict) to that original parent Task. Its ordinary
+// close/stop fact remains visible on the review Issue without a second wake.
+fn review_reports_directly(db: &Connection, review_task: &str, parent_issue: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM tend_reviews v JOIN tasks author ON author.id = v.author_task_id
+         WHERE v.review_task_id = ?1 AND author.issue_id = ?2 AND author.category != 'issue-router')",
+        params![review_task, parent_issue],
+        |row| row.get(0),
+    )?)
+}
+
 pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) -> Result<()> {
     let RunPhase::Stopped {
         outcome,
@@ -640,7 +666,9 @@ pub(super) fn report_task_stop(db: &Connection, observation: &RunObservation) ->
     };
     // A successful close already carries the owner's outcome. A stopped
     // Task with the Issue still open, or an actual failure, carries its own fact.
-    if *outcome == RunOutcome::Completed && state == "closed" {
+    if *outcome == RunOutcome::Completed && state == "closed"
+        || review_reports_directly(db, &observation.task_id, &parent_issue)?
+    {
         return Ok(());
     }
     let parent_task = if *outcome == RunOutcome::Completed {

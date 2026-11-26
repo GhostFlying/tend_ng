@@ -11,6 +11,17 @@ pub const WORK_CATEGORIES: &[&str] = &[
     "review",
 ];
 
+pub const TOP_LEVEL_CATEGORIES: &[&str] = &[
+    "issue-router",
+    "implementation",
+    "implementation-economy",
+    "investigation",
+];
+
+pub fn can_own_root(category: &str, parent_issue: Option<&str>) -> bool {
+    parent_issue.is_none() && TOP_LEVEL_CATEGORIES.contains(&category)
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentProfile {
     pub id: String,
@@ -87,9 +98,16 @@ pub struct RunnerProfile {
     pub handoff_slots: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub codebase_review_comments: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub direct_issue_owners: bool,
 }
 
 impl RunnerProfile {
+    pub fn supports_root_category(&self, category: &str) -> bool {
+        category == "issue-router"
+            || self.direct_issue_owners && TOP_LEVEL_CATEGORIES.contains(&category)
+    }
+
     pub fn valid(&self) -> bool {
         crate::valid_id(&self.runner_id)
             && crate::valid_id(&self.host_id)
@@ -135,6 +153,13 @@ pub struct TaskAssignment {
 }
 
 impl TaskAssignment {
+    pub fn owns_root(&self) -> bool {
+        can_own_root(
+            &self.placement.agent.category,
+            self.parent_issue_id.as_deref(),
+        )
+    }
+
     pub fn workspace_path(&self) -> String {
         match self
             .workspace_key

@@ -47,6 +47,7 @@ fn runner(id: &str, limit: u32, available: u32) -> RunnerProfile {
         shared_reviews: true,
         handoff_slots: false,
         codebase_review_comments: false,
+        direct_issue_owners: true,
     }
 }
 
@@ -91,6 +92,21 @@ fn dispatch(
     work: &DispatchIssue,
     record_only: bool,
 ) -> Result<IssueDetail> {
+    dispatch_category(store, call, work, record_only, None)
+}
+
+fn dispatch_category(
+    store: &mut Store,
+    call: &str,
+    work: &DispatchIssue,
+    record_only: bool,
+    category: Option<&str>,
+) -> Result<IssueDetail> {
+    let mut args = json!(work);
+    if let Some(category) = category {
+        args["category"] = json!(category);
+    }
+    let request = crate::store::DispatchRequest::parse(args.as_object().unwrap().clone())?;
     Ok(store
         .dispatch_issue(
             "attempt",
@@ -100,9 +116,9 @@ fn dispatch(
                 call_id: call.into(),
                 tool: "tend_dispatch_issue".into(),
                 namespace: None,
-                arguments: json!(work),
+                arguments: args,
             },
-            work,
+            &request,
             record_only,
             None,
         )?
@@ -473,6 +489,82 @@ fn first_assignment_balances_against_the_successors_effective_limit() -> Result<
     assert_eq!(
         placement(&store, &second.task_id)?.as_deref(),
         Some("b-other")
+    );
+    Ok(())
+}
+
+#[test]
+fn direct_root_keeps_recorded_intent_and_requires_a_compatible_named_profile() -> Result<()> {
+    let mut store = fixture(Path::new(":memory:"))?;
+    let mut legacy = runner("legacy", 2, 2);
+    legacy.direct_issue_owners = false;
+    announce(&mut store, legacy, 2)?;
+    let mut selected = runner("selected", 2, 2);
+    let worker = selected
+        .agents
+        .iter_mut()
+        .find(|agent| agent.id == "worker")
+        .unwrap();
+    worker.model = Some("registered-model".into());
+    worker.reasoning_effort = Some("registered-effort".into());
+    announce(&mut store, selected, 2)?;
+    let mut work = work();
+    work.repo_ids = vec!["repo".into()];
+    work.required_capabilities = vec!["image_gen".into()];
+    let IssueDetail::Recorded(record) =
+        dispatch_category(&mut store, "direct", &work, true, Some("implementation"))?
+    else {
+        panic!("expected recorded intent");
+    };
+    let Some(IssueDetail::Dispatched(started)) =
+        store.start_recorded_issue(&record.issue_id, None)?
+    else {
+        panic!("expected a Task on the recorded Issue");
+    };
+    assert_eq!(started.issue_id, record.issue_id);
+    assert_eq!(started.category, "implementation");
+    assert!(started.parent_issue_id.is_none());
+    let contract: String = store.db.query_row(
+        "SELECT contract FROM runner_assignments WHERE task_id = ?1",
+        [&started.task_id],
+        |row| row.get(0),
+    )?;
+    let assignment: TaskAssignment = serde_json::from_str(&contract)?;
+    assert_eq!(assignment.placement.runner_id, "selected");
+    assert!(assignments_to_send(&store.db, "selected", true, 2, true, false)?.is_empty());
+    assert_eq!(
+        assignments_to_send(&store.db, "selected", true, 2, true, true)?.as_slice(),
+        std::slice::from_ref(&assignment),
+    );
+    assert_eq!(
+        assignment.placement.agent.model.as_deref(),
+        Some("registered-model")
+    );
+    assert_eq!(
+        assignment.placement.agent.reasoning_effort.as_deref(),
+        Some("registered-effort")
+    );
+    assert_eq!(
+        assignment.workspace_key.as_deref(),
+        Some(record.issue_id.as_str())
+    );
+    let legacy = top_level(&mut store, "legacy", &work)?;
+    let saved: String = store.db.query_row(
+        "SELECT request FROM router_dispatches WHERE issue_id = ?1",
+        [&legacy.issue_id],
+        |row| row.get(0),
+    )?;
+    assert_eq!(saved, serde_json::to_string(&work)?);
+    let IssueDetail::Dispatched(replay) =
+        dispatch_category(&mut store, "legacy", &work, false, Some("issue-router"))?
+    else {
+        panic!("expected legacy replay");
+    };
+    assert_eq!(legacy.category, "issue-router");
+    assert_eq!(legacy.task_id, replay.task_id);
+    assert_eq!(
+        placement(&store, &legacy.task_id)?.as_deref(),
+        Some("legacy")
     );
     Ok(())
 }

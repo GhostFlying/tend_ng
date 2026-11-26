@@ -4,10 +4,10 @@
 
 ## 默认按要求派发，必要时指名
 
-**已确认。** 主 Chat 的 Router 使用独立的 Server 配置，显示名可选，不参与 Runner 候选匹配。Router 派发顶层 Issue，Server 从 `issue-router` 选择 Issue Agent。Issue Agent 通过工作子 Issue 委派给 Work Agent，Server 在该顶层 Issue 所属的 Runner 上按 repo、category 和 capability 等要求匹配。派发方可以查询合格候选并指名。按要求派发和指名派发共用匹配逻辑。 [Issue 树的 Runner 归属](server-runner.md#issue-树的-runner-归属)
+**已确认。** 主 Chat 的 Router 使用独立的 Server 配置，显示名可选，不参与 Runner 候选匹配。Router 按原交付选择顶层 category。单人可交付时用 `implementation` 或 `investigation`，范围小、路径明确的实现可由派发方显式指定 `implementation-economy`。多个独立交付需要协调时用 `issue-router`。派发和待安排记录都可指定 category，省略时（含旧记录）仍按 `issue-router` 解释。实际工作子 Issue 只在该顶层 Issue 所属 Runner 上匹配。派发方可以查询合格候选并指名。按要求派发和指名派发共用匹配逻辑。 [Issue 树的 Runner 归属](server-runner.md#issue-树的-runner-归属)
 
 1. **Runner 上报具体配置。** 本机保存执行与访问配置，Server 从 Runner 上报构建清单。顶层 Issue 首次选择时，多台 Runner 提供的合格配置可以共同参与匹配。同名配置有差异时按 Runner 和配置区分。
-2. **派发方提交任务要求。** 顶层 Issue 的协调派发携带目标、约束及已知的工作要求。实际使用 repo 或既有 workspace 的子 Issue 填写相应条件。用 `category` 表达用途和配置的默认选择，用 `required_capabilities` 提出实际必需的能力。用户明确指名时保留原选择及其来源。
+2. **派发方提交任务要求。** 顶层 Issue 的派发携带目标、约束及已知的工作要求。实际使用 repo 或既有 workspace 的子 Issue 填写相应条件。用 `category` 表达用途和配置的默认选择，用 `required_capabilities` 提出实际必需的能力。用户明确指名时保留原选择及其来源。
 3. **Server 分配。** 在允许调度的 Runner 上，核对角色对应的 category、实际派发所需的 repo 或 workspace、必需能力、具名选择及可用容量。选定 Runner 后，按配置的默认顺序选择合格的 Agent，或使用指名的 Agent。Server 持久记录实际分配与配置版本。Runner 接收时核对本机条件，无法满足时保留具体原因。
 
 候选查询可以按这项任务筛选，只提供会影响选择的名字、用途、模型、effort、能力及可用状态。派发方通过本机工具读取最近同步的清单，Server 落实分配时核对当前事实。执行端也可通过工具本地受理按要求派发，由 Server 应用时选择执行配置。Agent 的操作范围按实际角色和已领取的 Issue 校验。
@@ -16,7 +16,7 @@
 
 ## 顶层 Issue 首次选 Runner
 
-**已确认。** Router 在顶层派发时带上已经明确必需的 repo 和 capability。Server 在提供 `issue-router` 的 Runner 中筛选同时能访问全部所需 repo、且具备对应工作配置的候选。`image_gen` 等工作能力按该 Runner 上符合用途的具名 Agent 配置核对。例如工作需要 repo X 和 Y，Runner B 能同时访问两仓并有合适的配置，就可以成为候选。
+**已确认。** Router 在顶层派发时带上已经明确必需的 repo 和 capability。Server 筛选能访问全部所需 repo、支持所选顶层 category 的 Runner。直接 Owner 的必需 capability 匹配实际工作的具名配置。对 `issue-router`，则核对同一 Runner 是否有满足工作能力的 Work Agent。`image_gen` 等工作能力按该 Runner 上符合用途的具名 Agent 配置核对。例如工作需要 repo X 和 Y，Runner B 能同时访问两仓并有合适的配置，就可以成为候选。
 
 对于未显式指定 Runner、没有前序 Task 或既有 Runner 归属的顶层 Issue 首次派发，Server 在满足全部资格的候选中选占用比例最低的 Runner。占用数等于最新上报的 `slot_limit - available_for_assignment`，再加上 Server 尚未收到领取结论的 `reserved` 和 `issued` 分配数。分母通常为 `slot_limit`，接替期间使用 Server 当前授予后继的执行上限。占用数达到执行上限时，该 Runner 不参与首次派发。
 
@@ -36,7 +36,7 @@
 | `investigation` | Work Agent | 独立交付调查结论、复现结果或证据。 |
 | `review` | Review Agent | 通过子 Issue 委派独立审阅，交付指定候选和范围的审阅结果。 |
 
-`investigation` 和 `review` 按实际需要派发。缺少合格候选时，Server 保留原派发要求，并在分配结果中提供待分配原因。派发方决定是否改选。模型和 effort 由具名配置指定，DeepSeek 是首期 `issue-router` 具名配置的候选。
+`investigation` 和 `review` 按实际需要派发。缺少合格候选时，Server 保留原派发要求，并在分配结果中提供待分配原因。派发方决定是否改选。模型和 effort 只取自实际具名配置，顶层或子项角色不覆盖该配置。
 
 旧 Tend 用跨 Runner 的 category 表达工作分类，Runner 本机定义具名 Agent、runtime、模型和 effort。后来普通派发用 `category_id` 和 `required_capabilities` 说明要求，由调度器解析为具体执行配置。共享 PR 审阅出现过真实执行已选出 Agent、报告也已持久保存，登记入口仍因创建时缺少 `spec.agent_id` 无法使用的回归。修复沿实际执行的冻结配置登记原报告。 [旧 Agent 定义](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/agent-definitions.md#L3-L25) · [旧工作要求](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/task-work-requirements.md#L3-L21) · [审阅身份绑定回归](https://github.com/GhostFlying/tend/blob/83bc15ae/docs/plans/category-shared-review-binding.md#L3-L14)
 

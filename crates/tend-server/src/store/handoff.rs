@@ -281,6 +281,16 @@ impl Store {
             || predecessor.host_id != successor.host_id
             || !workspace.is_some_and(|path| Path::new(path).is_absolute())
             || workspace != successor.workspace_root.as_deref()
+            || !successor.direct_issue_owners && tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM handoff_roots h JOIN issues i ON i.id = h.root_id
+                   JOIN tasks t ON t.issue_id = i.id
+                   WHERE h.runner_id = ?1 AND i.state = 'open' AND t.category != 'issue-router')
+                 OR EXISTS(SELECT 1 FROM runner_assignments a JOIN tasks t ON t.current_assignment = a.id
+                   JOIN issues i ON i.id = t.issue_id
+                   WHERE a.runner_id = ?1 AND (a.state = 'issued' OR a.state = 'accepted' AND i.state = 'open')
+                     AND i.parent_issue_id IS NULL AND t.category != 'issue-router')",
+                [old], |row| row.get::<_, bool>(0),
+            )?
             || tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM runner_replacements
                      WHERE predecessor = ?2 OR successor = ?2 OR (successor = ?1 AND retired_at IS NULL))
@@ -456,6 +466,7 @@ mod budget_tests {
             shared_reviews: true,
             handoff_slots: true,
             codebase_review_comments: false,
+            direct_issue_owners: false,
         };
         store.db.execute(
             "INSERT INTO runners (id, host_id, profile, last_seen, protocol)

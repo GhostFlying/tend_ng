@@ -192,6 +192,8 @@ PYTHONDONTWRITEBYTECODE=1 python3 tests/e2e/live_codex.py \
   --codex-home .local/tend-smoke-codex
 ```
 
+Add `--direct-owner` to check that the live Router chooses a single top-level Task from a natural-language request and that its owner works in the assigned repository and returns the original file to Chat.
+
 Set `TEND_SQLITE_TIMING=1` on the Server to report lock acquisition, transaction, and commit times for Chat receipts, Attention answers, and Runner writes.
 
 The [Server and Runner contract](docs/server-runner.md) covers reconnects, original Run history, and same-host replacement. See the [phase-one acceptance log](docs/plans/phase-one-closeout.md) for fixture entry points, native Codex checks, and SQLite diagnostics. The [product design](docs/design.md) and [engineering guide](docs/engineering.md) describe the implementation boundaries.

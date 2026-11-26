@@ -21,7 +21,11 @@ const FIND_PULL: &str = "tend_find_pull_request";
 const LINK_PULL: &str = "tend_link_pull_request";
 const POST: &str = "tend_post_issue_message";
 
-pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<Value>) {
+pub fn catalogue(
+    assignment: &protocol::TaskAssignment,
+    proposal_approval: bool,
+) -> (&'static str, Vec<Value>) {
+    let category = assignment.placement.agent.category.as_str();
     let post = json!({
         "type":"function", "name":POST,
         "description":"Publish a complete message to the current Issue. When answering a message, use its original ID as reply_to.",
@@ -135,7 +139,33 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
             }, "required":["candidate","scope"], "additionalProperties":false}
         })
     };
-    if category == "issue-router" {
+    let mut catalogue = vec![
+        close,
+        ask,
+        post,
+        link_pull,
+        find_pull,
+        waitfor,
+        subscribe,
+        clear_waits,
+        stop_task,
+        issue_state,
+        record_review,
+        review_handoff,
+    ];
+    if category != "issue-router" {
+        catalogue.push(json!({
+            "type": "function", "name": SUBMIT,
+            "description": "Save an immutable delivery copy of a regular file in this workspace. Returns an operation_id that is also the file ID.",
+            "inputSchema": {
+                "type": "object",
+                "properties": { "path": { "type": "string" } },
+                "required": ["path"],
+                "additionalProperties": false
+            }
+        }));
+    }
+    if assignment.owns_root() {
         let delegate = json!({
             "type": "function",
             "name": DELEGATE,
@@ -159,7 +189,7 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
         let report = json!({
             "type": "function",
             "name": REPORT,
-            "description": "Return a result to the Router in the original Chat. Reference delivery file IDs received in the child inputs.",
+            "description": "Return a result to the Router in the original Chat. Reference immutable delivery file IDs submitted by this Issue or received in child inputs.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -209,26 +239,7 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
                 "child_issue_id":{"type":"string"},"message_id":{"type":"string"}
             },"required":["child_issue_id","message_id"],"additionalProperties":false}
         });
-        let mut catalogue = vec![
-            delegate,
-            candidates,
-            close,
-            report,
-            ask,
-            escalate,
-            answer,
-            post,
-            forward,
-            link_pull,
-            find_pull,
-            waitfor,
-            subscribe,
-            clear_waits,
-            stop_task,
-            issue_state,
-            record_review,
-            review_handoff,
-        ];
+        catalogue.extend([delegate, candidates, report, escalate, answer, forward]);
         if proposal_approval {
             catalogue.push(json!({
                 "type":"function", "name": PROPOSE,
@@ -241,45 +252,18 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
                 },"required":["question","version","report_id","artifact_id","title","highlights","action"],"additionalProperties":false}
             }));
         }
-        (
-            include_str!("../../../docs/roles/issue-agent.md"),
-            catalogue,
-        )
-    } else {
-        let submit = json!({
-            "type": "function",
-            "name": SUBMIT,
-            "description": "Save an immutable delivery copy of a regular file in this workspace. Returns an operation_id that is also the file ID.",
-            "inputSchema": {
-                "type": "object",
-                "properties": { "path": { "type": "string" } },
-                "required": ["path"],
-                "additionalProperties": false
-            }
-        });
-        (
-            if category == "review" {
-                include_str!("../../../docs/roles/review-agent.md")
-            } else {
-                include_str!("../../../docs/roles/work-agent.md")
-            },
-            vec![
-                close,
-                submit,
-                ask,
-                post,
-                link_pull,
-                find_pull,
-                waitfor,
-                subscribe,
-                clear_waits,
-                stop_task,
-                issue_state,
-                record_review,
-                review_handoff,
-            ],
-        )
     }
+    let instructions = match category {
+        "issue-router" => include_str!("../../../docs/roles/issue-agent.md"),
+        "review" => include_str!("../../../docs/roles/review-agent.md"),
+        _ if assignment.owns_root() => concat!(
+            include_str!("../../../docs/roles/work-agent.md"),
+            "\n",
+            include_str!("../../../docs/roles/direct-owner.md"),
+        ),
+        _ => include_str!("../../../docs/roles/work-agent.md"),
+    };
+    (instructions, catalogue)
 }
 
 #[derive(Deserialize)]
@@ -514,7 +498,7 @@ pub fn action(
                 reply_to: post.reply_to,
             })
         }
-        FORWARD if run.assignment.placement.agent.category == "issue-router" => {
+        FORWARD if run.assignment.owns_root() => {
             let forward: Forward = serde_json::from_value(call.arguments.clone())?;
             ensure!(
                 protocol::valid_id(&forward.child_issue_id)
@@ -526,7 +510,7 @@ pub fn action(
                 message_id: forward.message_id,
             })
         }
-        DELEGATE if run.assignment.placement.agent.category == "issue-router" => {
+        DELEGATE if run.assignment.owns_root() => {
             let args: Delegation = serde_json::from_value(call.arguments.clone())?;
             ensure!(
                 WORK_CATEGORIES.contains(&args.category.as_str()),
@@ -582,7 +566,7 @@ pub fn action(
             let args: Submission = serde_json::from_value(call.arguments.clone())?;
             crate::artifacts::snapshot(artifacts, cwd, &args.path, operation)
         }
-        REPORT if run.assignment.placement.agent.category == "issue-router" => {
+        REPORT if run.assignment.owns_root() => {
             let mut args: Report = serde_json::from_value(call.arguments.clone())?;
             ensure!(!args.summary.trim().is_empty(), "Summarize the result");
             args.artifact_ids.sort();
@@ -592,10 +576,7 @@ pub fn action(
                 artifact_ids: args.artifact_ids,
             })
         }
-        PROPOSE
-            if run.assignment.parent_issue_id.is_none()
-                && run.assignment.placement.agent.category == "issue-router" =>
-        {
+        PROPOSE if run.assignment.owns_root() => {
             ensure!(
                 proposal_approval,
                 "The connected Server does not advertise proposal approval. Ask a concrete question in the original Chat instead."
@@ -636,7 +617,7 @@ pub fn action(
                 proposal: None,
             })
         }
-        ESCALATE if run.assignment.placement.agent.category == "issue-router" => {
+        ESCALATE if run.assignment.owns_root() => {
             let args: Escalation = serde_json::from_value(call.arguments.clone())?;
             ensure!(
                 protocol::valid_id(&args.attention_id),
@@ -646,7 +627,7 @@ pub fn action(
                 attention_id: args.attention_id,
             })
         }
-        ANSWER if run.assignment.placement.agent.category == "issue-router" => {
+        ANSWER if run.assignment.owns_root() => {
             let args: ChildAnswer = serde_json::from_value(call.arguments.clone())?;
             ensure!(
                 protocol::valid_id(&args.attention_id) && !args.answer.trim().is_empty(),
