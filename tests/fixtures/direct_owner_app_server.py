@@ -75,7 +75,7 @@ if direct:
     assert "Do not create a placeholder child" in instructions
     assert Path.cwd() == root / "runner.runs" / "workspaces" / issue
     assert (Path.cwd() / "AGENTS.md").is_file()
-if owner["category"] != "review":
+if owner["category"] != "review" and title != "legacy":
     for rule in ("existing merge gates", "remote main SHA", "only if the user explicitly asks",
                  "one responsible Agent", "End the current turn"):
         assert rule in instructions, rule
@@ -102,8 +102,14 @@ if title in {"merge", "ci"}:
                  url="https://github.com/example/guide/pull/82")
         else:
             publish(f"Remote main {sha}; merge endpoint reached.", [file_id])
+    elif title == "merge":
+        assert assignment["placement"]["runner_id"] == "next-runner"
+        assert assignment["followup"]["previous_task_id"]
+        assert any(item.get("message", {}).get("text") == "Recheck the original delivery." for item in inputs)
+        assert (Path.cwd() / "repos/example/merge.txt").is_file()
+        assert marker.read_text().strip() == git("rev-parse", "HEAD")
+        publish("Reopened with the original owner and workspace.")
     else:
-        assert title == "ci"
         sha = (root / "direct-main-sha").read_text()
         assert marker.read_text().strip() == sha
         assert any(x["kind"] == "external_fact" and x["fact"]["head_sha"] == sha
@@ -112,6 +118,23 @@ if title in {"merge", "ci"}:
         [file] = [item for item in assignment["handoff"]["operations"]
                   if item["action"]["kind"] == "submit_artifact"]
         publish(f"Remote main {sha}; CI success.", [file["operation_id"]])
+elif title == "stage":
+    assert direct
+    if not inputs:
+        assert "after_report_id" in instructions
+        (Path.cwd() / "stage.md").write_text("The isolated stage plan.\n")
+        artifact = tool("tend_submit_artifact", path="stage.md")["operation_id"]
+        report = tool("tend_report_result", summary="The example plan is ready.", artifact_ids=[artifact])
+        tool("tend_request_attention", question="Close the delivered plan?",
+             after_report_id=report["operation_id"], options=["Close the delivered example plan."])
+    else:
+        [decision] = [item for item in inputs if item["kind"] == "attention_answered"]
+        assert decision["user_message_id"], decision
+        publish("The delivered plan was confirmed.")
+elif title == "legacy":
+    assert owner["category"] == "issue-router" and "tend_submit_artifact" not in tools
+    assert "workspace_key" not in assignment
+    publish("Legacy work completed.")
 elif title == "review":
     assert direct
     if not inputs:

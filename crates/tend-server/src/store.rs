@@ -67,7 +67,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 42;
+pub(crate) const SCHEMA_VERSION: i64 = 43;
 
 pub struct Store {
     db: Connection,
@@ -314,6 +314,9 @@ impl Store {
         if version < 42 {
             discussion::migrate_titles_and_handoffs(&tx)?;
         }
+        if version < 43 {
+            attention::migrate_report_dependencies(&tx)?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -511,8 +514,8 @@ impl Store {
 
     pub fn pending_chats(&self) -> Result<Vec<String>> {
         let mut statement = self.db.prepare(&format!(
-            "SELECT DISTINCT chat_id FROM router_inputs i WHERE outcome IS NULL AND {}",
-            Self::READY_ROUTER_INPUT,
+            "SELECT DISTINCT i.chat_id FROM router_inputs i LEFT JOIN attentions a ON a.id = i.attention_id WHERE i.outcome IS NULL AND {} AND {}",
+            Self::READY_ROUTER_INPUT, attention::REPORT_DELIVERED,
         ))?;
         Ok(statement
             .query_map([], |row| row.get(0))?
@@ -524,18 +527,19 @@ impl Store {
             .db
             .query_row(
                 &format!(
-                    "SELECT i.seq, m.text, a.id, a.thread_id, a.turn_id,
-                        a.number, a.process_pid, a.process_start, m.id, i.message_seq, i.report_id,
+                    "SELECT i.seq, m.text, attempt.id, attempt.thread_id, attempt.turn_id,
+                        attempt.number, attempt.process_pid, attempt.process_start, m.id, i.message_seq, i.report_id,
                         i.attention_id, m.reply_to, i.external_batch
                  FROM router_inputs i
                  JOIN chat_messages m ON m.seq = i.message_seq
-                 LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = (
+                 LEFT JOIN attentions a ON a.id = i.attention_id
+                 LEFT JOIN router_attempts attempt ON attempt.seq = i.seq AND attempt.number = (
                      SELECT MAX(number) FROM router_attempts WHERE seq = i.seq
                  )
-                 WHERE i.chat_id = ?1 AND i.outcome IS NULL AND {}
-                 ORDER BY a.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL OR
+                 WHERE i.chat_id = ?1 AND i.outcome IS NULL AND {} AND {}
+                 ORDER BY attempt.id IS NULL, (i.report_id IS NOT NULL OR i.attention_id IS NOT NULL OR
                                         i.external_batch IS NOT NULL), i.seq LIMIT 1",
-                    Self::READY_ROUTER_INPUT
+                    Self::READY_ROUTER_INPUT, attention::REPORT_DELIVERED
                 ),
                 [chat_id],
                 |row| {

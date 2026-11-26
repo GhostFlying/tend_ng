@@ -321,6 +321,8 @@ pub enum WorkAction {
         request: AttentionRequest,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         proposal: Option<crate::ProposalRequest>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        after_report_id: Option<String>,
     },
     EscalateAttention {
         attention_id: String,

@@ -102,7 +102,7 @@ pub fn catalogue(
             "additionalProperties": false
         }
     });
-    let ask = json!({
+    let mut ask = json!({
         "type": "function",
         "name": ASK,
         "description": "Record a decision needed to continue this Task. Return the durable question ID and yield the slot when independent work is done.",
@@ -119,6 +119,12 @@ pub fn catalogue(
             "additionalProperties": false
         }
     });
+    if assignment.owns_root() {
+        ask["inputSchema"]["properties"]["after_report_id"] = json!({
+            "type":"string",
+            "description":"For a decision that must follow a stage delivery, use the operation ID returned by this Task's tend_report_result. Tend publishes the question only after that report reaches the original Chat."
+        });
+    }
     let review_handoff = if category == "review" {
         json!({
             "type": "function", "name": DELIVER_REVIEW,
@@ -604,10 +610,23 @@ pub fn action(
                     due_at: None,
                 },
                 proposal: Some(proposal),
+                after_report_id: None,
             })
         }
         ASK => {
-            let request: AttentionRequest = serde_json::from_value(call.arguments.clone())?;
+            let mut arguments = call.arguments.clone();
+            let after_report_id: Option<String> = arguments
+                .as_object_mut()
+                .and_then(|fields| fields.remove("after_report_id"))
+                .map(serde_json::from_value)
+                .transpose()?;
+            ensure!(
+                after_report_id
+                    .as_deref()
+                    .is_none_or(|id| { run.assignment.owns_root() && protocol::valid_id(id) }),
+                "A stage Attention needs this top-level Task's original report operation ID"
+            );
+            let request: AttentionRequest = serde_json::from_value(arguments)?;
             ensure!(
                 !request.question.trim().is_empty(),
                 "Specify the decision needed"
@@ -615,6 +634,7 @@ pub fn action(
             Ok(WorkAction::AskAttention {
                 request,
                 proposal: None,
+                after_report_id,
             })
         }
         ESCALATE if run.assignment.owns_root() => {

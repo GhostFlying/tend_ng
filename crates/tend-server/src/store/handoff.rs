@@ -284,11 +284,11 @@ impl Store {
             || !successor.direct_issue_owners && tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM handoff_roots h JOIN issues i ON i.id = h.root_id
                    JOIN tasks t ON t.issue_id = i.id
-                   WHERE h.runner_id = ?1 AND i.state = 'open' AND t.category != 'issue-router')
+                   WHERE h.runner_id = ?1 AND t.workspace_key = i.id AND t.category != 'issue-router')
                  OR EXISTS(SELECT 1 FROM runner_assignments a JOIN tasks t ON t.current_assignment = a.id
                    JOIN issues i ON i.id = t.issue_id
-                   WHERE a.runner_id = ?1 AND (a.state = 'issued' OR a.state = 'accepted' AND i.state = 'open')
-                     AND i.parent_issue_id IS NULL AND t.category != 'issue-router')",
+                   WHERE a.runner_id = ?1 AND a.state IN ('issued', 'accepted')
+                     AND i.parent_issue_id IS NULL AND t.workspace_key = i.id AND t.category != 'issue-router')",
                 [old], |row| row.get::<_, bool>(0),
             )?
             || tx.query_row(

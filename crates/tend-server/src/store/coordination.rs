@@ -133,6 +133,24 @@ pub fn apply(
     {
         return Ok(false);
     }
+    if let WorkAction::AskAttention {
+        after_report_id: Some(report),
+        proposal,
+        ..
+    } = &operation.action
+        && (!owns_root
+            || proposal.is_some()
+            || !db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM issue_reports report
+                 JOIN runner_operations op ON op.id = report.id
+                 JOIN task_runs run ON run.id = json_extract(op.operation, '$.run_id')
+                 WHERE report.id = ?1 AND report.issue_id = ?2 AND run.task_id = ?3)",
+                params![report, source_issue, source_task],
+                |row| row.get::<_, bool>(0),
+            )?)
+    {
+        return Ok(false);
+    }
     if let WorkAction::Delegate {
         category: requested,
         work,
@@ -362,6 +380,7 @@ pub fn apply(
         WorkAction::AskAttention {
             request,
             proposal: Some(proposal),
+            ..
         } => {
             super::proposals::register(
                 db,
@@ -377,6 +396,7 @@ pub fn apply(
         WorkAction::AskAttention {
             request,
             proposal: None,
+            after_report_id,
         } => {
             super::attention::register(
                 db,
@@ -387,6 +407,12 @@ pub fn apply(
                 parent_issue.as_deref(),
                 request,
             )?;
+            if let Some(report) = after_report_id {
+                db.execute(
+                    "INSERT INTO attention_report_dependencies (attention_id, report_id) VALUES (?1, ?2)",
+                    params![operation.operation_id, report],
+                )?;
+            }
         }
         WorkAction::EscalateAttention { attention_id } => {
             super::attention::apply_parent(db, &source_issue, attention_id, None)?;
@@ -597,7 +623,11 @@ fn delegate(
 // A bound review for a direct Owner already delivers a result (including
 // failure without a verdict) to that original parent Task. Its ordinary
 // close/stop fact remains visible on the review Issue without a second wake.
-fn review_reports_directly(db: &Connection, review_task: &str, parent_issue: &str) -> Result<bool> {
+pub(super) fn review_reports_directly(
+    db: &Connection,
+    review_task: &str,
+    parent_issue: &str,
+) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM tend_reviews v JOIN tasks author ON author.id = v.author_task_id
          WHERE v.review_task_id = ?1 AND author.issue_id = ?2 AND author.category != 'issue-router')",

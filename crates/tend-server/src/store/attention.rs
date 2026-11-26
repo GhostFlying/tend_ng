@@ -44,6 +44,25 @@ pub(super) fn migrate_issue_replies(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn migrate_report_dependencies(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS attention_report_dependencies (
+            attention_id TEXT PRIMARY KEY REFERENCES attentions(id),
+            report_id TEXT NOT NULL REFERENCES issue_reports(id)
+         );",
+    )?;
+    Ok(())
+}
+
+// The exact linked report has reached the Chat. Questions with no dependency
+// retain their existing behavior. Publication, not an upload receipt, is the gate.
+pub(super) const REPORT_DELIVERED: &str = "NOT EXISTS (
+    SELECT 1 FROM attention_report_dependencies dep WHERE dep.attention_id = a.id
+    AND NOT EXISTS (
+        SELECT 1 FROM issue_report_publications pub WHERE pub.report_id = dep.report_id
+    )
+)";
+
 // The live-target guard used by structured approvals and direct Issue replies.
 // Ordinary Chat replies keep their existing Router validation and semantics.
 pub(super) const LIVE_TARGET: &str =
@@ -389,7 +408,13 @@ impl Store {
         if existing.question_message_id.is_some() {
             return Ok(Some(existing));
         }
-        if existing.status.state != AttentionState::Pending {
+        if existing.status.state != AttentionState::Pending
+            || !tx.query_row(
+                &format!("SELECT ({REPORT_DELIVERED}) FROM attentions a WHERE a.id = ?1"),
+                [id],
+                |row| row.get::<_, bool>(0),
+            )?
+        {
             return Ok(None);
         }
         let text = existing

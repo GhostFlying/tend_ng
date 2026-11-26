@@ -1,5 +1,7 @@
 """Verify direct root delivery, exact-SHA CI waiting, review, and coordination via Chat."""
 
+import argparse
+from threading import Event
 import json
 import os
 from pathlib import Path
@@ -8,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 
-from chat import server, wait_for
+from chat import lose_first_response, server, wait_for
 from child_windows import expire_child_window
 from issue_chat import TESTS, free_port, prepare
 
@@ -16,10 +18,12 @@ MERGE = "Merge the example change and stop at remote main."
 CI = "Merge the example change and wait for green CI on remote main."
 MULTI = "Coordinate two independent deliverables in example."
 REVIEW = "Investigate example and get an independent review if necessary."
+STAGE = "Deliver an example plan, then wait for my decision."
+LEGACY = "Dispatch legacy example work."
 PULL = "https://github.com/example/guide/pull/82"
 
 
-def exercise(server_bin, cli_bin, runner_bin, root):
+def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
     prepare(root, free_port())
     bare = root / "remote.git"
     subprocess.run(["git", "clone", "--bare", "--quiet", root / "source", bare], check=True)
@@ -46,14 +50,14 @@ def exercise(server_bin, cli_bin, runner_bin, root):
     server_env = {**env, "GH_TOKEN": "fixture-read-token", "TEND_GITHUB_FIXTURE_DIR": str(root)}
     processes = []
 
-    def start(name, settings):
+    def start(name, settings, executable=runner_bin):
         file = root / f"{name}.json"
         file.write_text(json.dumps(settings))
         with (root / f"{name}.log").open("w") as log:
             runner = subprocess.Popen([
-                runner_bin, "--config", file, "--db", root / f"{name}.sqlite",
+                executable, "--config", file, "--db", root / f"{name}.sqlite",
                 "--app-server", sys.executable, TESTS / "fixtures/direct_owner_app_server.py", root,
-            ], env=env, stderr=log)
+            ], env={**env, "TEND_URL": f"http://{runner_address}"}, stderr=log)
         processes.append((name, runner))
         return runner
 
@@ -87,17 +91,47 @@ def exercise(server_bin, cli_bin, runner_bin, root):
         assert sql("server", "SELECT id FROM issues WHERE parent_issue_id = ?", issue) == []
         assert sql("server", "SELECT id FROM tasks WHERE issue_id = ?", issue) == [(task,)]
 
-    with server(server_bin, root, server_env, listen=address, github_cli=TESTS / "fixtures/github_cli.py"):
+    hold_upload = Event()
+    with server(server_bin, root, server_env, listen=address, github_cli=TESTS / "fixtures/github_cli.py"), \
+         lose_first_response(address, drop_when=lambda _: False,
+                             block_upload=hold_upload.is_set) as (runner_address, _):
         try:
+            if legacy_bin:
+                start("legacy", {**config, "runner_id": "legacy-runner"}, legacy_bin)
+                [old] = wait_for(lambda: cli("runner", "list"), bool)
+                assert old["protocol"] == 2 and "direct_issue_owners" not in old["profile"]
+                original, merge = send(MERGE)
+                # The old runner has the named implementation category and repo, but not direct work.
+                legacy_msg, legacy_issue = send(LEGACY)
+                old_claim = state(legacy_issue, "completed")
+                assert old_claim["placement"]["runner_id"] == "legacy-runner"
+                assert old_claim["category"] == "issue-router"
+                report(legacy_msg, "Legacy work completed.")
+                pending = state(merge, "awaiting_assignment")
+                assert "placement" not in pending and "run" not in pending
+                no_children(merge, pending["task_id"])
             predecessor = start("runner", config)
-            wait_for(lambda: cli("runner", "list"), bool)
-
-            original, merge = send(MERGE)
+            if not legacy_bin:
+                wait_for(lambda: cli("runner", "list"), bool)
+                original, merge = send(MERGE)
             finished = state(merge, "completed")
+            merged_task = finished["task_id"]
             assert finished["category"] == "implementation" and finished["issue_state"] == "closed"
+            assert finished["placement"]["runner_id"] == config["runner_id"]
+            if legacy_bin:
+                assert pending["task_id"] == merged_task
+                start("legacy-next", {**config, "runner_id": "legacy-next", "standby": True}, legacy_bin)
+                roster = wait_for(lambda: cli("runner", "list"), lambda entries: len(entries) == 3)
+                candidate = next(row for row in roster if row["profile"]["runner_id"] == "legacy-next")
+                assert candidate["protocol"] == 2 and "direct_issue_owners" not in candidate["profile"]
+                rejected = subprocess.run([cli_bin, "runner", "replace", config["runner_id"], "legacy-next"],
+                                          env=env, capture_output=True, text=True, timeout=5)
+                assert rejected.returncode and "409" in rejected.stderr, rejected.stderr
+                assert sql("server", "SELECT predecessor, successor FROM runner_replacements") == []
             assert finished["placement"]["agent"]["id"] == "worker"
             assert finished["placement"]["agent"]["reasoning_effort"] == "medium"
             assert finished["placement"]["host_id"] == config["host_id"]
+            original_merge = original
             sha = remote_main()
             delivered = report(original, f"Remote main {sha}; merge endpoint reached.")
             [artifact] = delivered["artifacts"]
@@ -125,7 +159,7 @@ def exercise(server_bin, cli_bin, runner_bin, root):
                            for message in cli("chat", "read", "main")["messages"])
 
             start("next", {**config, "runner_id": "next-runner", "standby": True})
-            wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == 2)
+            wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == (4 if legacy_bin else 2))
             cli("runner", "replace", config["runner_id"], "next-runner")
             moved = wait_for(lambda: cli("issue", "read", ci), lambda view: view["status"] == "waiting"
                              and view.get("placement", {}).get("runner_id") == "next-runner")
@@ -148,10 +182,17 @@ def exercise(server_bin, cli_bin, runner_bin, root):
             assert cli("artifact", "download", file["id"], raw=True) == (sha + "\n").encode()
             no_children(ci, task)
 
+            cli("issue", "reopen", merge, "Check the completed delivery again.")
+            cli("issue", "message", merge, "Recheck the original delivery.")
+            report(original_merge, "Reopened with the original owner and workspace.")
+            reopened = state(merge, "completed")
+            assert reopened["task_id"] != merged_task and reopened["placement"]["runner_id"] == "next-runner"
+            assert reopened["placement"]["agent"]["id"] == "worker"
+
             start("other", {**config, "runner_id": "other-runner", "host_id": "other-host",
                             "workspace_root": str(root / "other.runs"),
                             "agents": [config["agents"][1]]})
-            wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == 3)
+            wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == (5 if legacy_bin else 3))
             original, multi = send(MULTI)
             wait_for(lambda: sql("server", "SELECT state FROM issues WHERE parent_issue_id = ?", multi),
                      lambda rows: rows == [("closed",), ("closed",)])
@@ -163,6 +204,17 @@ def exercise(server_bin, cli_bin, runner_bin, root):
                        "ON t.id=a.task_id JOIN issues i ON i.id=t.issue_id WHERE i.parent_issue_id = ?", multi) == [
                            ("next-runner",)]
             report(original, "Both independent deliveries are complete.")
+
+            hold_upload.set()
+            stage_message, stage = send(STAGE)
+            stage_wait = state(stage, "waiting")
+            [(stage_question, stage_report)] = sql(
+                "server", "SELECT d.attention_id, d.report_id FROM attention_report_dependencies d "
+                "JOIN attentions a ON a.id = d.attention_id WHERE a.issue_id=?", stage)
+            assert sql("server", "SELECT published FROM artifacts WHERE issue_id=?", stage) == [(0,)]
+            probe = cli("chat", "send", "main", "Probe blocked stage Attention.")["message_id"]
+            report(probe, "The stage question is still pending.")
+            assert sql("server", "SELECT question_seq FROM attentions WHERE id=?", stage_question) == [(None,)]
 
             original, investigation = send(REVIEW)
             waiting = state(investigation, "waiting")
@@ -182,6 +234,19 @@ def exercise(server_bin, cli_bin, runner_bin, root):
                              "WHERE task_id = ? AND run_id = ? AND json_extract(payload,'$.kind') = 'review_finished'",
                              done["task_id"], done["run"]["run_id"])
             assert binding == delivery
+
+            hold_upload.clear()
+            report_msg = report(stage_message, "The example plan is ready.")
+            [stage_file] = report_msg["artifacts"]
+            assert cli("artifact", "download", stage_file["id"], raw=True) == b"The isolated stage plan.\n"
+            question = report(stage_message, "Close the delivered plan?")
+            assert sql("server", "SELECT m.seq < a.question_seq FROM issue_report_publications p "
+                       "JOIN chat_messages m ON m.id=p.message_id JOIN attentions a ON a.id=? "
+                       "WHERE p.report_id=?", stage_question, stage_report) == [(1,)]
+            cli("chat", "send", "main", "Close the delivered example plan.", "--reply-to", question["id"])
+            done = state(stage, "completed")
+            assert done["task_id"] == stage_wait["task_id"]
+            report(stage_message, "The delivered plan was confirmed.")
         except BaseException:
             for name, _ in processes:
                 print((root / f"{name}.log").read_text(), file=sys.stderr, end="")
@@ -194,6 +259,15 @@ def exercise(server_bin, cli_bin, runner_bin, root):
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    for binary in ("server", "cli", "runner"):
+        parser.add_argument(binary, type=lambda path: Path(path).resolve())
+    parser.add_argument("--legacy-runner", type=lambda path: Path(path).resolve(),
+                        help="Unchanged protocol-2 runner binary from before direct ownership")
+    args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tend-direct-owner-") as directory:
-        exercise(*(Path(arg).resolve() for arg in sys.argv[1:4]), Path(directory))
-    print("PASS original root ownership, merge-only delivery, exact-SHA CI across handoff, coordination, and original-author review")
+        exercise(args.server, args.cli, args.runner, Path(directory), args.legacy_runner)
+    print("PASS root ownership, merge-only delivery, exact-SHA CI, reopen after handoff, "
+          "coordination, original-author review, and gated stage Attention")
+    if args.legacy_runner:
+        print("PASS real mixed protocol-2 Runners, legacy dispatch, and incompatible successor refusal")

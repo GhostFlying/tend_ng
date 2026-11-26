@@ -63,7 +63,8 @@ def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=Non
 
 
 @contextmanager
-def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_headers=False):
+def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_headers=False,
+                        block_upload=lambda: False):
     posted = []
     dropped = []
 
@@ -78,6 +79,10 @@ def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_header
             self.forward(drop=True)
 
         def do_PUT(self):
+            if block_upload():
+                self.rfile.read(int(self.headers.get("Content-Length", 0)))
+                self.send_error(503, "Fixture is holding the original")
+                return
             self.forward(drop=False)
 
         def forward(self, drop):

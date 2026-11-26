@@ -68,7 +68,7 @@ Runner 取件按自己的待投递记录查询。心跳可与同步一起上报�
 
 **已确认。** 顶层 Issue 首次由 Runner 持久领取时，确定整棵 Issue 树的 Runner 和 Host。常规派发、审阅、续跑和重开沿该归属调度。缺 slot 时在所属 Runner 排队，Runner 暂不可用时等它恢复。Repo 或 Agent 配置缺失时，保留实际原因并送回负责判断的派发方。不同顶层 Issue 各自选择 Runner，主 Chat 的 Router 沿自己的配置运行。 [无候选时的反馈](agent-selection.md#无候选时的反馈与改选)
 
-Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner 和 Runner 归属，直接领取和协调领取使用同一条路径。Runner 以可选 `direct_issue_owners` 上报直接顶层 Owner 支持，旧 Runner 仍可领取原有角色；已拥有开放直接工作或仍有直接派发待确认时，接替方也必须支持直接 Owner。Runner 可以先在本地受理子项委派。Server 若先收到子项操作，保留原操作，取得顶层领取事实后再应用子项分配。全量对账和增量同步沿原领取和接替记录恢复归属。
+Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner 和 Runner 归属，直接领取和协调领取使用同一条路径。Runner 以可选 `direct_issue_owners` 上报直接顶层 Owner 支持，旧 Runner 仍可领取原有角色；只要前驱仍负责直接领取的顶层 Issue 树（含已结案后仍可重开的工作），或已有直接派发待确认，接替方也必须支持直接 Owner。Runner 可以先在本地受理子项委派。Server 若先收到子项操作，保留原操作，取得顶层领取事实后再应用子项分配。全量对账和增量同步沿原领取和接替记录恢复归属。
 
 远期如果工作目标本身需要多台设备上的 Agent 协作，再单独设计跨设备子 Issue 的显式派发和结果回传。
 

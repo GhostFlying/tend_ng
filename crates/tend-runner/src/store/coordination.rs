@@ -342,6 +342,22 @@ impl Store {
             }
         }
         if let WorkAction::AskAttention {
+            after_report_id: Some(report),
+            ..
+        } = &action
+        {
+            let known = self.0.query_row(
+                "SELECT EXISTS(SELECT 1 FROM local_work_operations o JOIN received_assignments a ON a.id = o.assignment_id
+                 WHERE o.id = ?1 AND a.task_id = ?2 AND json_extract(o.operation, '$.action.kind') = 'report_issue')",
+                params![report, run.assignment.task_id],
+                |row| row.get::<_, bool>(0),
+            )?;
+            ensure!(
+                known,
+                "Reference the report operation returned by this Task"
+            );
+        }
+        if let WorkAction::AskAttention {
             proposal: Some(proposal),
             ..
         } = &action

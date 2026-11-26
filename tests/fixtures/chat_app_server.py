@@ -36,9 +36,15 @@ DIRECT_CASES = {
     "Merge the example change and wait for green CI on remote main.": ("ci", "implementation-economy"),
     "Coordinate two independent deliverables in example.": ("multi", "issue-router"),
     "Investigate example and get an independent review if necessary.": ("review", "investigation"),
+    "Deliver an example plan, then wait for my decision.": ("stage", "investigation"),
+    "Dispatch legacy example work.": ("legacy", "issue-router"),
 }
 DIRECT_REVIEW_REPLY = "Review the example candidate."
-cases[DIRECT_REVIEW_REPLY] = {"answer": "Decision delivered to the owner."}
+DIRECT_STAGE_REPLY = "Close the delivered example plan."
+DIRECT_STAGE_PROBE = "Probe blocked stage Attention."
+for answer in (DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY):
+    cases[answer] = {"answer": "Decision delivered to the owner."}
+cases[DIRECT_STAGE_PROBE] = {"answer": "The stage question is still pending."}
 for prompt in DIRECT_CASES:
     cases[prompt] = {"answer": "Assigned the requested work."}
 
@@ -492,7 +498,15 @@ for line in sys.stdin:
                                          params["clientUserMessageId"])
                 assert repeated == receipt
                 answer = case["answer"]
-            elif text == DIRECT_REVIEW_REPLY:
+            elif text == DIRECT_STAGE_PROBE:
+                token = params["clientUserMessageId"]
+                [fact] = [item for item in decision_tool("tend_read_attentions", {}, thread_id, turn_id, token)
+                          if item["request"]["question"] == "Close the delivered plan?"]
+                assert fact["state"] == "pending" and fact["question_message_id"] is None
+                decision_tool("tend_publish_attention", {"attention_id": fact["id"], "text": "Close the delivered plan?"},
+                              thread_id, turn_id, token, success=False)
+                answer = case["answer"]
+            elif text in {DIRECT_REVIEW_REPLY, DIRECT_STAGE_REPLY}:
                 assert context and "explicitly replies to this Tend Attention" in context
                 fact = json.loads(context.split("explicitly replies to this Tend Attention.\n", 1)[1].splitlines()[0])
                 decision_tool("tend_answer_attention", {"attention_id": fact["id"], "answer": text},
@@ -550,10 +564,11 @@ for line in sys.stdin:
                              "only when the user explicitly asks for that endpoint",
                              "one responsible Agent observe"):
                     assert rule in instructions, rule
-                receipt = decision_tool("tend_dispatch_issue", {
-                    "title": title, "objective": text, "category": category,
-                    "repo_ids": ["example"],
-                }, thread_id, turn_id, params["clientUserMessageId"])
+                args = {"title": title, "objective": text, "repo_ids": ["example"]}
+                if title != "legacy":
+                    args["category"] = category
+                receipt = decision_tool("tend_dispatch_issue", args, thread_id, turn_id,
+                                        params["clientUserMessageId"])
                 assert receipt["category"] == category and "parent_issue_id" not in receipt
                 answer = case["answer"]
             elif text == REGISTERED_REVIEW:

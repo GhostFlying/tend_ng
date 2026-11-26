@@ -291,6 +291,7 @@ fn report_unstarted_stop(db: &Connection, task: &str, control: &str) -> Result<(
         )
         .optional()?;
     if let Some((child, parent)) = parent
+        && !super::coordination::review_reports_directly(db, task, &parent)?
         && let Some(owner) = super::coordination::target_task(db, &parent)?
     {
         super::coordination::enqueue(
@@ -460,5 +461,62 @@ impl Store {
         view.state = "queued".to_owned();
         super::board::commit(tx)?;
         Ok(ResultState::Found(view))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unstarted_bound_review_only_wakes_its_direct_author_with_the_review_result() -> Result<()> {
+        let store = Store::initialize(std::path::Path::new(":memory:"))?;
+        store.db.execute_batch(
+            "INSERT INTO chat_messages(seq,id,chat_id,text) VALUES (1,'source','main','Review');
+             INSERT INTO runners(id,host_id,profile,last_seen) VALUES ('runner','host','{}',0);
+             INSERT INTO issues(id,source_seq,title,objective,parent_issue_id) VALUES
+                 ('author',1,'Work','Own the original Issue',NULL),
+                 ('review',1,'Review','Independent review','author');
+             INSERT INTO tasks(id,issue_id,category,status,repo_ids,required_capabilities) VALUES
+                 ('author-task','author','implementation','waiting','[]','[]'),
+                 ('review-task','review','review','awaiting_assignment','[]','[]');
+             INSERT INTO runner_operations(id,runner_id,operation) VALUES ('request','runner','{}');",
+        )?;
+        super::super::tend_review::bind(
+            &store.db,
+            "request",
+            "author",
+            "author-task",
+            "review",
+            "review-task",
+            "candidate",
+            "scope",
+            "workspaces/author",
+        )?;
+        let result = submit(
+            &store.db,
+            "control",
+            "review-task",
+            None,
+            &ControlAction::Stop,
+        )?;
+        assert!(
+            matches!(result, ResultState::Found(control) if control.state == ControlState::Stopped.as_str())
+        );
+        let (task, payload): (String, String) = store.db.query_row(
+            "SELECT task_id, payload FROM issue_inputs WHERE id = (SELECT result_input_id FROM tend_reviews)",
+            [], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        assert_eq!(task, "author-task");
+        let input: protocol::IssueInput = serde_json::from_str(&payload)?;
+        assert!(
+            matches!(input.cause, protocol::IssueInputCause::ReviewFinished {
+            result: None, source_id, .. } if source_id == "control")
+        );
+        let inputs: u32 = store
+            .db
+            .query_row("SELECT count(*) FROM issue_inputs", [], |row| row.get(0))?;
+        assert_eq!(inputs, 1);
+        Ok(())
     }
 }
