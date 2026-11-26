@@ -32,9 +32,6 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.discussion-start-sidebar {
-  width: 100%;
-}
 .discussion-start {
   display: inline-flex;
   flex-wrap: wrap;

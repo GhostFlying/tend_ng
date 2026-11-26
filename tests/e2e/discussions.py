@@ -502,12 +502,15 @@ def main():
             # browser waits for the normal detail polling cadence.
             (root / "finish-first").touch()
             if args.screenshots:
+                user = say("main", "Storage measurement · 主 Chat 普通消息", "Accepted.")
+                reply, = (row for row in messages("main") if row["reply_to"] == user["id"])
                 args.screenshots.mkdir(parents=True,exist_ok=True)
                 subprocess.run([args.node,WEB/"tests/discussions.mjs"], check=True, timeout=150,
                     env={**env,"TEND_SCREENSHOTS":str(args.screenshots),"TEND_TEST_CLI":str(args.cli),
                          "TEND_LEGACY_DISCUSSION":unnamed, "TEND_EXPLICIT_DISCUSSION":explicitly_named,
                          "TEND_REF_ISSUE":str(linked_number),
-                         "TEND_TARGET_ISSUE":str(parent_number)})
+                         "TEND_TARGET_ISSUE":str(parent_number),
+                         "TEND_MAIN_USER_MESSAGE":user["id"], "TEND_MAIN_TEND_REPLY":reply["id"]})
 
         with server(args.server, root, env, **options):
             saved_detail = persisted_discussion(before_archive)

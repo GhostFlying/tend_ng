@@ -6,9 +6,6 @@ export function notifyDiscussionChanged(chat?: string) {
   window.dispatchEvent(new CustomEvent(discussionChanged, { detail: chat }));
 }
 
-export type Origin =
-  | { kind: "chat"; chat_id: "main"; message_id: string }
-  | { kind: "issue"; issue_id: string };
 export type Source =
   | { kind: "repo"; repo_id: string }
   | { kind: "issue"; issue_id: string }
@@ -104,10 +101,10 @@ export const listDiscussions = (archived: boolean, signal: AbortSignal) =>
   request<{ discussions: Discussion[] }>(archived ? "?archived=true" : "", {
     signal,
   });
-export const createDiscussion = (operation_id: string, origin?: Origin) =>
+export const createDiscussion = (operation_id: string) =>
   request<{ chat_id: string }>("", {
     method: "POST",
-    body: { operation_id, origin },
+    body: { operation_id },
   });
 export const readDiscussion = (chat: string, signal: AbortSignal) =>
   request<DiscussionDetail>(`/${chat}`, { signal });

@@ -23,7 +23,6 @@ import {
 } from "./api";
 import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
-import { DiscussionStart } from "./DiscussionStart";
 import { discussionLink } from "./discussionApi";
 import { DispatchAuthor, IssueTakeoverEvent } from "./IssueTimelineEvent";
 const DiscussionMarkdown = lazy(() =>
@@ -267,7 +266,6 @@ function MessageRow({
   onReply,
   onRefresh,
   historical,
-  canStartDiscussion,
 }: {
   message: Message;
   source?: Message;
@@ -277,7 +275,6 @@ function MessageRow({
   onReply: (message: Message) => void;
   onRefresh: () => void;
   historical: boolean;
-  canStartDiscussion: boolean;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -407,12 +404,6 @@ function MessageRow({
         <a className="issue-link" href={discussionLink(message.discussion_id)}>
           回到原讨论 ↗
         </a>
-      )}
-      {canStartDiscussion && !message.attention && !message.discussion_id && (
-        <DiscussionStart
-          compact
-          origin={{ kind: "chat", chat_id: "main", message_id: message.id }}
-        />
       )}
       {pending && <span className="message-state">已收到</span>}
       {message.router_error && (
@@ -882,7 +873,6 @@ export function Chat({
         descendant={descendant}
         onRefresh={() => setRefresh((value) => value + 1)}
         historical={!latestIds.has(message.id)}
-        canStartDiscussion={!standalone && !issue && chatId === "main"}
         onReply={(question) => {
           setReplyId(question.id);
           textarea.current?.focus({ preventScroll: true });

@@ -13,6 +13,8 @@ const {
   TEND_EXPLICIT_DISCUSSION: explicitDiscussion,
   TEND_REF_ISSUE: referenceIssue,
   TEND_TARGET_ISSUE: targetIssue,
+  TEND_MAIN_USER_MESSAGE: mainUserMessage,
+  TEND_MAIN_TEND_REPLY: mainTendReply,
 } = process.env;
 const open = "先聊聊演示项目的快速上手说明。";
 const errors = [];
@@ -301,6 +303,19 @@ try {
       name: "新建讨论",
       exact: true,
     });
+    const main = page.getByRole("main");
+    const userMessage = main.locator(`#message-${mainUserMessage}`);
+    const tendReply = main.locator(`#message-${mainTendReply}`);
+    await visible(userMessage.getByText("你", { exact: true }));
+    await visible(tendReply.getByText("Tend", { exact: true }));
+    assert.equal(
+      await main.getByRole("button", { name: "带入讨论", exact: true }).count(),
+      0,
+      `${name} main Chat messages should not offer discussion creation`,
+    );
+    await userMessage.scrollIntoViewIfNeeded();
+    await tendReply.scrollIntoViewIfNeeded();
+    await shoot(page, `discussion-${name}-main-chat`);
     const beforeNavigation = cliList();
     if (name === "desktop") {
       // The shortcut works globally and doesn't wait for hover or the list.
@@ -314,7 +329,6 @@ try {
     assert.deepEqual(cliList(), beforeNavigation);
     assert.match(await page.title(), /Tend/i);
     await assertSameDocument();
-    const main = page.getByRole("main");
     const currentList = main.getByRole("list", {
       name: "讨论列表",
       exact: true,
@@ -818,22 +832,27 @@ try {
         cliList().filter(({ chat_id }) => !previousIds.has(chat_id)).length,
         1,
       );
-      await activate(chatNav);
-      await page.getByRole("button", { name: "带入讨论" }).first().click();
-      await page.waitForURL(/\/discussions\?chat=/);
-      await visible(page.getByRole("link", { name: "主 Chat 消息" }));
-      cli(
-        "rename",
-        new URL(page.url()).searchParams.get("chat"),
-        "从主 Chat 带入的讨论",
-      );
     }
+    await activate(directory);
+    await activate(currentList.getByRole("link", { name: /主 Chat 引用示例/ }));
+    const origin = await visible(
+      page
+        .getByRole("region", { name: "当前讨论" })
+        .getByRole("link", { name: "主 Chat 消息", exact: true }),
+    );
+    await activate(origin);
+    await page.waitForURL(/\/#message-[a-zA-Z0-9_-]+$/);
+    await visible(
+      page
+        .locator(new URL(page.url()).hash)
+        .getByText("请整理示例仓库的快速上手指南。", { exact: true }),
+    );
     await assertSameDocument();
     await context.close();
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS desktop and mobile Chromium: separate plus, same-document Back/Forward including same-URL entries during a pending create, native new tab and deep links, one in-flight POST, identity retained on lost receipt with storage failure, late create/restore refresh, no Issue header entry, manual Issue references, handoff and backlinks",
+    "PASS desktop and mobile Chromium: separate plus, same-document Back/Forward including same-URL entries during a pending create, native new tab and deep links, one in-flight POST, identity retained on lost receipt with storage failure, late create/restore refresh, no main Chat or Issue creation shortcut, manual references, existing origins, handoff and backlinks",
   );
 } finally {
   await browser.close();
