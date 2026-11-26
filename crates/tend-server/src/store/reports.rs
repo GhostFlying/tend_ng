@@ -105,6 +105,7 @@ pub fn context(
     report: &str,
     original_request: &str,
     original_message_id: &str,
+    provenance: Option<&Value>,
 ) -> Result<String> {
     let mut statement = db.prepare(
         "SELECT a.id, a.name, a.bytes FROM report_artifacts r
@@ -123,7 +124,7 @@ pub fn context(
             }))
         })?
         .collect::<rusqlite::Result<Vec<Value>>>()?;
-    let body = db.query_row(
+    let mut body = db.query_row(
         "SELECT issue_id, summary FROM issue_reports WHERE id = ?1",
         [report],
         |row| {
@@ -137,6 +138,7 @@ pub fn context(
             }))
         },
     )?;
+    super::label_handoff_origin(&mut body, provenance);
     Ok(format!(
         "Tend Issue report for the user's original topic.\n{body}"
     ))

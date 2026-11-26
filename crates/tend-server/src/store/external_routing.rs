@@ -309,13 +309,15 @@ struct Delivery {
     watch_id: String,
     fact_id: String,
     original_message_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    original_message_provenance: Option<serde_json::Value>,
     origin_issue: Option<String>,
     mode: WatchMode,
     fact: ExternalFact,
 }
 
-fn deliveries(db: &Connection, batch: &str) -> Result<Vec<Delivery>> {
-    let mut query = db.prepare(
+fn deliveries(store: &Store, batch: &str) -> Result<Vec<Delivery>> {
+    let mut query = store.db.prepare(
         "SELECT d.id, d.route_id, d.fact_id, m.id, d.origin_issue, r.mode, f.fact
          FROM external_route_deliveries d JOIN external_routes r ON r.id = d.route_id
          JOIN external_facts f ON f.id = d.fact_id JOIN chat_messages m ON m.seq = r.message_seq
@@ -327,7 +329,7 @@ fn deliveries(db: &Connection, batch: &str) -> Result<Vec<Delivery>> {
                 row.get(0)?,
                 row.get(1)?,
                 row.get(2)?,
-                row.get(3)?,
+                row.get::<_, String>(3)?,
                 row.get(4)?,
                 row.get::<_, String>(5)?,
                 row.get::<_, String>(6)?,
@@ -339,6 +341,7 @@ fn deliveries(db: &Connection, batch: &str) -> Result<Vec<Delivery>> {
                 id,
                 watch_id,
                 fact_id,
+                original_message_provenance: store.generated_handoff_quote(&original_message_id)?,
                 original_message_id,
                 origin_issue,
                 mode: if mode == "required" {
@@ -352,9 +355,18 @@ fn deliveries(db: &Connection, batch: &str) -> Result<Vec<Delivery>> {
         .collect()
 }
 
-pub fn context(db: &Connection, batch: &str) -> Result<String> {
-    Ok(format!(
-        "Tend external facts collected for this Chat.\n{}",
-        serde_json::to_string(&deliveries(db, batch)?)?
-    ))
+impl Store {
+    pub fn external_batch_context(&self, batch: &str) -> Result<(String, bool)> {
+        let deliveries = deliveries(self, batch)?;
+        let handoff_background = deliveries
+            .iter()
+            .any(|d| d.original_message_provenance.is_some());
+        Ok((
+            format!(
+                "Tend external facts collected for this Chat.\n{}",
+                serde_json::to_string(&deliveries)?
+            ),
+            handoff_background,
+        ))
+    }
 }

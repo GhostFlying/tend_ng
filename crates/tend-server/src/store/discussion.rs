@@ -6,7 +6,8 @@ use protocol::{
     CreateDiscussion, DiscussionDraft, DiscussionOrigin, DiscussionReference, DiscussionSend,
     DiscussionSource, Receipt, SendMessage,
 };
-pub use quick::QuickInput;
+pub(super) use quick::HandoffMode;
+pub use quick::{HandoffSource, QuickInput};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -909,6 +910,71 @@ mod tests {
             .as_str()
             .unwrap()
             .to_owned())
+    }
+
+    #[test]
+    fn handoff_source_checks_exact_user_identity_and_click_boundary() -> Result<()> {
+        let mut store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let chat = new_discussion(&mut store, None)?;
+        let other = new_discussion(&mut store, None)?;
+        let raw = "  Implement just the fixture.\n Do not deploy.  ";
+        let first = send(&mut store, &chat, &protocol::new_id(), raw)?;
+        let foreign = send(
+            &mut store,
+            &other,
+            &protocol::new_id(),
+            "A foreign Discussion",
+        )?;
+        let operation = store.quick_handoff(&chat, None)?.operation_id;
+        store.request_quick_handoff(
+            &chat,
+            &protocol::DiscussionQuickRequest {
+                operation_id: operation.clone(),
+                retry_generation: None,
+            },
+        )?;
+        let (hidden, seq): (String, i64) = store.db.query_row(
+            "SELECT d.message_id,i.seq FROM discussion_quick_handoffs q JOIN discussion_drafts d ON d.id=q.draft_id
+             JOIN chat_messages m ON m.id=d.message_id JOIN router_inputs i ON i.message_seq=m.seq
+             WHERE q.operation_id=?1", [&operation], |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let later = send(
+            &mut store,
+            &chat,
+            &protocol::new_id(),
+            "Later unrelated user input",
+        )?;
+        let request = store.quick_input(&hidden)?.expect("quick request");
+        store.finish_quick_handoff(seq, &request, "Agent's generated text")?;
+        let handoff = store.next_input("main")?.expect("handoff in main");
+        let source = handoff.handoff_source.expect("source for new handoff");
+        assert_eq!(source.chat_id, chat);
+        let page = store.handoff_history(&source, i64::MAX)?;
+        let [message] = page["messages"]
+            .as_array()
+            .expect("message page")
+            .as_slice()
+        else {
+            anyhow::bail!("expected only the original user message: {page}");
+        };
+        assert_eq!(message["id"], first);
+        assert_eq!(message["text"], raw);
+        assert_eq!(
+            message["href"],
+            format!("/discussions?chat={chat}#message-{first}")
+        );
+        let evidence = store
+            .handoff_user_messages(&source, &[&first])?
+            .expect("valid source");
+        assert_eq!(evidence["user_messages"][0]["text"], raw);
+        for invalid in [&foreign, &hidden, &later, &handoff.message_id] {
+            assert!(
+                store
+                    .handoff_user_messages(&source, &[&first, invalid])?
+                    .is_none()
+            );
+        }
+        Ok(())
     }
 
     fn legacy_database(db: &Connection) -> Result<()> {

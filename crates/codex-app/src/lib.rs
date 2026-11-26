@@ -16,7 +16,34 @@ use std::{
 };
 
 const DISCUSSION_PROFILE: &str = "tend-discussion";
+const ROUTING_PROFILE: &str = "tend-router-routing";
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+const ROUTING_DISABLED_FEATURES: &[&str] = &[
+    "shell_tool",
+    "unified_exec",
+    "apply_patch_freeform",
+    "web_search_request",
+    "browser_use",
+    "browser_use_external",
+    "browser_use_full_cdp_access",
+    "in_app_browser",
+    "view_image",
+    "image_generation",
+    "apps",
+    "plugins",
+    "remote_plugin",
+    "multi_agent",
+    "multi_agent_v2",
+    "multi_agent_v2_dynamic_tools",
+    "skill_mcp_dependency_install",
+    "code_mode",
+    "code_mode_host",
+    "goals",
+    "memories",
+    "hooks",
+    "remote_control",
+    "tool_suggest",
+];
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum WorkThreadResume {
@@ -32,6 +59,7 @@ pub struct Client {
     notifications: VecDeque<Value>,
     request_id: u64,
     work_rollout: Option<(String, PathBuf)>,
+    routing_cwd: Option<PathBuf>,
 }
 
 #[derive(Debug, Deserialize, serde::Serialize)]
@@ -203,6 +231,7 @@ impl Client {
             notifications: VecDeque::new(),
             request_id: 0,
             work_rollout: None,
+            routing_cwd: None,
         };
         client.call(
             "initialize",
@@ -222,14 +251,22 @@ impl Client {
         tools: &[Value],
         model: Option<&str>,
     ) -> Result<String> {
-        let response = self.call(
-            "thread/start",
-            json!({
+        let mut params = json!({
                 "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
                 "developerInstructions": instructions, "dynamicTools": tools, "model": model
-            }),
-        )?;
+        });
+        if let Some(verified) = &self.routing_cwd {
+            ensure!(
+                cwd == verified,
+                "Router cwd differs from its verified configuration"
+            );
+            routing_thread_scope(&mut params, verified);
+        }
+        let response = self.call("thread/start", params)?;
+        if self.routing_cwd.is_some() {
+            verify_routing_scope(&response)?;
+        }
         let id = response["thread"]["id"]
             .as_str()
             .context("thread/start missing thread ID")?
@@ -363,14 +400,87 @@ impl Client {
     }
 
     pub fn resume_thread(&mut self, thread_id: &str) -> Result<bool> {
-        match self.call(
-            "thread/resume",
-            json!({ "threadId": thread_id, "excludeTurns": true }),
-        ) {
-            Ok(_) => Ok(true),
+        let ordinary = json!({ "threadId": thread_id, "excludeTurns": true });
+        let mut params = ordinary.clone();
+        if let Some(cwd) = &self.routing_cwd {
+            routing_thread_scope(&mut params, cwd);
+        }
+        let mut response = self.call("thread/resume", params);
+        if self.routing_cwd.is_none()
+            && response
+                .as_ref()
+                .err()
+                .and_then(|e| e.downcast_ref::<RpcError>())
+                .is_some_and(|e| {
+                    e.message.contains(&format!(
+                        "Could not load saved permission profile `{ROUTING_PROFILE}`"
+                    ))
+                })
+        {
+            // Switch back to the ordinary Router's start-thread defaults
+            // only when Codex persisted our temporary receiving profile.
+            let mut ordinary = ordinary;
+            ordinary["sandbox"] = json!("danger-full-access");
+            ordinary["approvalPolicy"] = json!("never");
+            response = self.call("thread/resume", ordinary);
+        }
+        match response {
+            Ok(response) => {
+                if self.routing_cwd.is_some() {
+                    verify_routing_scope(&response)?;
+                    ensure!(
+                        response["thread"]["id"] == thread_id,
+                        "resumed an unexpected Router thread"
+                    );
+                }
+                Ok(true)
+            }
             Err(error) if missing_thread(&error, thread_id) => Ok(false),
             Err(error) => Err(error),
         }
+    }
+
+    /// Start a Router process using its normal model and session storage, but
+    /// expose no native side-effect tools. Only the checked Tend RPCs remain.
+    pub fn connect_routing_only(command: &mut Command, cwd: &Path) -> Result<Self> {
+        command.arg("--strict-config");
+        for feature in ROUTING_DISABLED_FEATURES {
+            command.arg("-c").arg(format!("features.{feature}=false"));
+        }
+        for setting in [
+            "approval_policy=\"never\"",
+            "agents.enabled=false",
+            "web_search=\"disabled\"",
+            "mcp_servers={}",
+            "tools.experimental_request_user_input.enabled=false",
+            "shell_environment_policy={inherit=\"none\"}",
+        ] {
+            command.arg("-c").arg(setting);
+        }
+        command
+            .arg("-c")
+            .arg(format!("default_permissions=\"{ROUTING_PROFILE}\""));
+        command.arg("-c").arg(format!("permissions.{ROUTING_PROFILE}.filesystem={{\":minimal\"=\"read\",\":workspace_roots\"=\"read\"}}"));
+        command.arg("-c").arg(format!(
+            "permissions.{ROUTING_PROFILE}.network.enabled=false"
+        ));
+        let mut client = Self::connect(command)?;
+        let response = client.call("config/read", json!({"includeLayers":false, "cwd":cwd}))?;
+        let config = &response["config"];
+        ensure!(
+            config["approval_policy"] == "never"
+                && config["agents"]["enabled"] == false
+                && config["web_search"] == "disabled"
+                && config["mcp_servers"]
+                    .as_object()
+                    .is_some_and(|servers| servers.is_empty())
+                && ROUTING_DISABLED_FEATURES
+                    .iter()
+                    .all(|feature| config["features"][*feature] == false),
+            "App Server did not confirm that Router native tools are disabled"
+        );
+        client.routing_cwd = Some(cwd.to_owned());
+        Ok(client)
     }
 
     /// Resume a previously stopped work thread before submitting any turn.
@@ -519,6 +629,16 @@ impl Client {
         });
         if let Some(scope) = discussion_scope {
             scope.apply(&mut params)?;
+        }
+        if let Some(cwd) = &self.routing_cwd {
+            ensure!(
+                discussion_scope.is_none(),
+                "Discussion scope cannot override a routing-only turn"
+            );
+            params["cwd"] = json!(cwd);
+            params["permissions"] = json!(ROUTING_PROFILE);
+            params["approvalPolicy"] = json!("never");
+            params["runtimeWorkspaceRoots"] = json!([]);
         }
         let request_id = self.send_request("turn/start", params)?;
         let startup_deadline = Instant::now() + RPC_TIMEOUT;
@@ -764,6 +884,38 @@ fn live_usage<'a>(event: &'a Value, thread: &str, turn: &str) -> Option<&'a Valu
         && params["threadId"] == thread
         && params["turnId"] == turn)
         .then(|| &params["tokenUsage"])
+}
+
+fn routing_thread_scope(params: &mut Value, cwd: &Path) {
+    params["cwd"] = json!(cwd);
+    if let Some(object) = params.as_object_mut() {
+        object.remove("sandbox");
+    }
+    params["permissions"] = json!(ROUTING_PROFILE);
+    params["approvalPolicy"] = json!("never");
+    params["runtimeWorkspaceRoots"] = json!([]);
+    // A resumed ordinary rollout may carry its former feature settings. Use
+    // per-thread overrides as well as the process config for this load.
+    let disabled: serde_json::Map<_, _> = ROUTING_DISABLED_FEATURES
+        .iter()
+        .map(|feature| (feature.to_string(), json!(false)))
+        .collect();
+    params["config"] = json!({"agents":{"enabled":false},"features":disabled,"mcp_servers":{},"web_search":"disabled"});
+}
+
+fn verify_routing_scope(response: &Value) -> Result<()> {
+    ensure!(
+        response["activePermissionProfile"]["id"] == ROUTING_PROFILE
+            && response["activePermissionProfile"]["extends"].is_null()
+            && response["sandbox"]["type"] == "readOnly"
+            && response["sandbox"]["networkAccess"] == false
+            && response["approvalPolicy"] == "never"
+            && response["runtimeWorkspaceRoots"]
+                .as_array()
+                .is_some_and(Vec::is_empty),
+        "App Server did not confirm the read-only, no-network Router sandbox"
+    );
+    Ok(())
 }
 
 fn verify_discussion_permissions(response: &Value, roots: &BTreeSet<PathBuf>) -> Result<()> {

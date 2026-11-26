@@ -178,7 +178,7 @@ for line in sys.stdin:
             respond(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
             if receiver:
                 assert not roots and text.startswith("讨论转交 · 上下文摘要。"), (roots, text)
-                assert "This is agent-written." in context
+                assert "agent-written handoff" in context
                 for name in ("tend_dispatch_issue", "tend_backlog_issue", "tend_answer_attention"):
                     result = read(request, thread, turn, name, name, {})
                     assert not result["success"] and "cannot run tools" in str(result), result
@@ -247,6 +247,14 @@ for line in sys.stdin:
                     ledger.execute("INSERT INTO input_history VALUES (?,?)", (turn, json.dumps(inherited)))
                 history_page = read(request, thread, turn, "quick-history", "tend_read_discussion_history", {})
                 assert history_page["success"], history_page
+                current = json.loads(history_page["contentItems"][0]["text"])["messages"]
+                if any(m["text"].startswith("Fixture final instruction") for m in current):
+                    answer = "CSV marker implementation request. The assistant recommends deployment as well."
+                if any(m["text"].startswith("Fixture authorizes relay") for m in current):
+                    answer = "Forward this to the existing Issue. The assistant also suggests deploying."
+                for message in current:
+                    if message["text"].startswith("Fixture authorizes Issue control "):
+                        answer = message["text"].removeprefix("Fixture authorizes Issue control ")
                 (home / "handoff-started").touch()
                 deadline = time.monotonic() + 20
                 while (home / "handoff-hold").exists():

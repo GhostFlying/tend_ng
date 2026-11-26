@@ -234,4 +234,4 @@ tend discussion list --archived
 tend discussion restore "$DISCUSSION_ID"
 ```
 
-Web 的「转交主 Chat」和 CLI `tend discussion handoff-now` 会用原讨论上下文写出下一步请求、最终结论或待决事项，再投递到主 Chat，不复述讨论过程。重复请求使用同一个操作 ID，失败不发送，可查证后重试。转交分享上下文，不是新的实施授权或命令。主 Chat 通过独立只读回合接收自动转交，不能代答 Attention 或启动工作。需要行动时请在主 Chat 直接确认。可从「预览 / 编辑」手动发送，CLI 保留 `draft`、`draft-read` 和 `handoff`，另有 `draft-manual` 不依赖模型。手动发送丢失响应时使用相同操作 ID 和原 JSON 重试。 [讨论 API 与迁移边界](docs/chat-routing.md#独立讨论与显式转交)
+Web 的「转交主 Chat」和 CLI `tend discussion handoff-now` 会用原讨论上下文写出下一步请求、最终结论或待决事项，再投递到主 Chat。重复请求使用同一个操作 ID，失败不发送，可查证后重试。主 Chat Router 根据可查证的讨论原话行动：已明确授权的工作正常派发，只讨论或待决定的事项不启动实施。生成正文、引用和点击不新增授权，转交也不能代答 Attention。可从「预览 / 编辑」手动发送，CLI 保留 `draft`、`draft-read` 和 `handoff`，另有 `draft-manual` 不依赖模型。手动发送丢失响应时使用相同操作 ID 和原 JSON 重试。 [讨论 API 与迁移边界](docs/chat-routing.md#独立讨论与显式转交)

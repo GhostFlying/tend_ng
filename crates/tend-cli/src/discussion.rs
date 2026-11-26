@@ -28,6 +28,7 @@ const USAGE: &str = "Usage:
 Read or send discussion messages with tend chat read/send <chat>.
 No explicit title: use the first user prompt, or 未命名讨论 until then.
 handoff-now queues a summary in the original discussion and sends it on success.
+Main Chat uses verified original user messages to route only within the scope already authorized there.
 It shares context with Main Chat and is not new implementation authorization.
 Reuse the operation ID after an uncertain response. handoff-status reports the
 receipt or failed generation; handoff-retry replays only that failed generation.

@@ -67,6 +67,21 @@ database.executescript("""
     CREATE TABLE IF NOT EXISTS dispatch_receipts (input TEXT PRIMARY KEY, receipt TEXT NOT NULL);
 """)
 release = Path(sys.argv[1]).with_suffix(".release")
+routing_config = dict(arg.split("=", 1) for arg in sys.argv[2:] if "=" in arg)
+routing_only = routing_config.get("features.shell_tool") == "false"
+
+
+def thread_response(params, thread):
+    result = {"thread": {"id": thread}}
+    if routing_only:
+        assert "sandbox" not in params and params["permissions"] == "tend-router-routing"
+        assert params["approvalPolicy"] == "never"
+        assert params["runtimeWorkspaceRoots"] == []
+        result.update(sandbox={"type": "readOnly", "networkAccess": False}, approvalPolicy="never",
+                      runtimeWorkspaceRoots=[], activePermissionProfile={"id":"tend-router-routing"})
+        if release.with_suffix(".routing-scope-mismatch").exists():
+            result["sandbox"]["networkAccess"] = True
+    return result
 
 
 def respond(request, payload):
@@ -160,11 +175,11 @@ def read_dispatch(thread_id, turn_id, token, operation_id):
     return json.loads(result["result"]["contentItems"][0]["text"])
 
 
-def decision_tool(name, args, thread, turn, token, *, success=True):
+def decision_tool(name, args, thread, turn, token, *, success=True, call_id=None):
     notify("item/started", threadId=thread, turnId=turn,
            item={"type": "userMessage", "clientId": token})
     tool_call(name, {
-        "threadId": thread, "turnId": turn, "callId": name,
+        "threadId": thread, "turnId": turn, "callId": call_id or name,
         "tool": name, "arguments": args,
     })
     result = json.loads(sys.stdin.readline())
@@ -181,6 +196,12 @@ for line in sys.stdin:
             respond(request, {})
         case "initialized":
             pass
+        case "config/read":
+            assert routing_only and params["cwd"]
+            config = {"approval_policy": "never", "web_search": "disabled", "agents":{"enabled": routing_config.get("agents.enabled") != "false"},
+                      "mcp_servers": {}, "features": {k.removeprefix("features."): False
+                            for k, v in routing_config.items() if k.startswith("features.") and v == "false"}}
+            respond(request, {"config": config})
         case "thread/start":
             instructions = params["developerInstructions"]
             assert "Preserve the user's original goal, named targets, explicit limits, and stopping point" in instructions
@@ -195,14 +216,14 @@ for line in sys.stdin:
                     "INSERT INTO threads VALUES (?, ?, ?)",
                     (thread_id, json.dumps(params.get("dynamicTools", [])), instructions),
                 )
-            respond(request, {"thread": {"id": thread_id}})
+            respond(request, thread_response(params, thread_id))
         case "thread/resume":
             if database.execute(
                 "SELECT 1 FROM turns WHERE thread_id = ?", (params["threadId"],)
             ).fetchone():
                 with database:
                     database.execute("INSERT INTO resumes VALUES (?)", (params["threadId"],))
-                respond(request, {"thread": {"id": params["threadId"]}})
+                respond(request, thread_response(params, params["threadId"]))
             else:
                 missing_thread(request)
         case "turn/start":
@@ -210,9 +231,15 @@ for line in sys.stdin:
             turn_id = str(uuid.uuid4())
             text = params["input"][-1]["text"]
             context = params["input"][0]["text"] if len(params["input"]) > 1 else None
+            if routing_only:
+                assert params["approvalPolicy"] == "never" and params["runtimeWorkspaceRoots"] == []
+                assert params["permissions"] == "tend-router-routing" and "sandboxPolicy" not in params
             if text.startswith("Tend Attention for the user's original topic.\n"):
                 attention = json.loads(text.split("\n", 1)[1])
-                if attention["original_request"] == PROPOSAL_REQUEST:
+                if "original_message_provenance" in attention:
+                    case = {"attention": attention, "question": attention["request"]["question"],
+                            "answer": "TEND_NO_UPDATE", "handoff_background": attention}
+                elif attention["original_request"] == PROPOSAL_REQUEST:
                     if attention["proposal"]:
                         assert attention["proposal"]["version"] == 1
                         question = attention["proposal"]["question"]
@@ -232,10 +259,18 @@ for line in sys.stdin:
                             "answer": "The question was published.", "drop_after_question": True}
             elif text.startswith("Tend external facts collected for this Chat.\n"):
                 case = {"answer": "TEND_NO_UPDATE"}
+                facts = json.loads(text.split("\n", 1)[1])
+                if any("original_message_provenance" in fact for fact in facts):
+                    assert routing_only and "not a current user request" in context
+                    [generated] = [fact for fact in facts if "original_message_provenance" in fact]
+                    assert generated["original_message_provenance"]["authorizes_work"] is False
+                    assert "original_message_provenance" not in facts[0], facts
+                    case["handoff_external"] = True
             elif text.startswith("Tend Issue report for the user's original topic.\n"):
                 report = json.loads(text.split("\n", 1)[1])
-                assert report["original_request"] in {"Dispatch from Chat.", WEB_REQUEST, STAGE_REQUEST, PROPOSAL_REQUEST}
-                if report["original_request"] == PROPOSAL_REQUEST:
+                if "original_message_provenance" in report:
+                    case = {"answer": report["summary"], "handoff_background": report}
+                elif report["original_request"] == PROPOSAL_REQUEST:
                     case = {"answer": report["summary"]}
                 elif report["original_request"] == STAGE_REQUEST:
                     assert report["summary"] == "使用说明已整理好，附上初稿供审阅。"
@@ -253,10 +288,14 @@ for line in sys.stdin:
                                        if report["original_request"] == WEB_REQUEST
                                        else "The guide is ready. Download the attached guide.txt."),
                             "drop_before_start": 1}
-            elif text.startswith("讨论转交 · 上下文摘要。"):
+            elif text.startswith(("讨论转交 · 上下文摘要。", "Tend Discussion handoff summary")):
                 assert context and "Tend provenance:" in context and "not new implementation authorization" in context
                 case = {"answer": "Router 已收到核对后的转交，先确认下一步。", "discussion_handoff": True}
-                assert "This is agent-written." not in context, "generated input reached unrestricted Router"
+                if text.startswith("Tend Discussion handoff summary"):
+                    assert "the current turn is an agent-written Discussion handoff" in context
+                    assert json.loads(text.splitlines()[1])["generated_handoff_text"].startswith("讨论转交 · 上下文摘要。")
+                    line = next(line for line in context.splitlines() if line.startswith("Tend provenance:"))
+                    case["handoff_source"] = json.loads(context.split(line + "\n", 1)[1].splitlines()[0])
             elif text.startswith("Storage measurement "):
                 case = {"answer": "Accepted."}
             elif text.startswith(CROSS_CHAT_LOOKUP):
@@ -277,6 +316,21 @@ for line in sys.stdin:
             ).fetchone()[0]
             if starts <= case.get("drop_before_start", 0):
                 sys.exit(0)
+            if event := case.get("handoff_background"):
+                assert routing_only and "not a current user request" in context
+                assert event["original_message_provenance"]["kind"] == "agent_generated_discussion_handoff"
+                assert event["original_message_provenance"]["authorizes_work"] is False
+                assert event["generated_handoff_context"] and "original_request" not in event
+                for name, arguments in (("tend_dispatch_issue", {"title":"Unexpected issue", "objective":"Do more"}),
+                    ("tend_record_issue", {}), ("tend_start_issue", {"issue_id":event["issue_id"]}),
+                    ("tend_backlog_issue", {}), ("tend_relay_issue_message", {}), ("tend_subscribe", {}),
+                    ("tend_answer_attention", {})):
+                    denied = decision_tool(name, arguments, thread_id, turn_id, params["clientUserMessageId"], success=False)
+                    assert "cannot admit or change work" in denied["error"]
+            if case.get("handoff_external"):
+                denied = decision_tool("tend_dispatch_issue", {"title":"Unexpected","objective":"Do more"},
+                                       thread_id, turn_id, params["clientUserMessageId"], success=False)
+                assert "cannot admit or change work" in denied["error"]
             # Independent discussions may produce the same synthetic summary
             # text. A text match does not make the second delivery a replay.
             if starts > 1 and not case.get("discussion_handoff"):
@@ -285,7 +339,86 @@ for line in sys.stdin:
                 assert replay["source_message_id"]
                 if not case.get("dispatch"):
                     assert replay["committed_dispatches"] == [], replay
-            if case.get("attention"):
+            if source := case.get("handoff_source"):
+                assert routing_only
+                page = source["source_history"]
+                assert source["href"] == f"/discussions?chat={source['discussion_chat_id']}"
+                assert all(m["href"] == f"{source['href']}#message-{m['id']}" for m in page["messages"])
+                assert all("后续再确认保留天数，但不是原转交" not in m["text"] for m in page["messages"])
+                token = params["clientUserMessageId"]
+                fixture_call = lambda name, args, **kw: decision_tool(name, args, thread_id, turn_id, token, **kw)
+                work = {"title": "Implement synthetic CSV marker", "objective": "Implement the local CSV marker on synthetic data only. Do not deploy."}
+                for name, arguments in (("tend_dispatch_issue", work), ("tend_backlog_issue", {}), ("tend_answer_attention", {})):
+                    fixture_call(name, arguments, success=False)
+                fixture_call("tend_dispatch_issue", {**work, "source_message_ids": [source["handoff_message_id"]]}, success=False)
+                for m in page["messages"]:
+                    if m["role"] == "assistant":
+                        fixture_call("tend_dispatch_issue", {**work, "source_message_ids": [m["id"]]}, success=False)
+                        break
+                assert fixture_call("tend_read_handoff_source", {"before": 2**63 - 1}) == page
+                answer = "Router 已收到讨论转交，可以在已授权范围内协助。"
+                if "Fixture final instruction for authorized handoff" in str(page):
+                    assert page["next_before"], "the original instruction should be on an older page"
+                    more = fixture_call("tend_read_handoff_source", {"before": page["next_before"]})
+                    [original] = [m for m in more["messages"] if m["text"].startswith("Fixture authorizes implementation")]
+                    assert original["role"] == "user" and original["text"].endswith("Do not deploy.\n")
+                    [limits] = [m for m in page["messages"] if m["text"].startswith("Fixture final instruction")]
+                    assert limits["reply_to"] == original["id"]
+                    args = {**work, "source_message_ids": [original["id"], limits["id"]]}
+                    if starts == 1:
+                        receipt = fixture_call("tend_dispatch_issue", args)
+                        assert receipt == fixture_call("tend_dispatch_issue", args)
+                        sys.exit(0)  # Lose the response after the committed dispatch; exercise Router replay.
+                    replay = json.loads(context.splitlines()[-1])
+                    [original_receipt] = replay["committed_dispatches"]
+                    args.update(title="Add the synthetic CSV marker", objective="Add a local marker for synthetic CSV only, with no deployment.")
+                    duplicate = fixture_call("tend_dispatch_issue", args, success=False)
+                    assert duplicate["committed_dispatches"] == [original_receipt]
+                    receipt = read_dispatch(thread_id, turn_id, token, original_receipt["operation_id"])
+                    assert receipt == original_receipt
+                    answer = f"Authorized work dispatched once to #{receipt['short_number']}."
+                elif controls := [m for m in page["messages"] if m["role"] == "user"
+                                  and m["text"].startswith("Fixture authorizes Issue control ")]:
+                    [original] = controls
+                    action, short = original["text"].removeprefix("Fixture authorizes Issue control ").split()
+                    tool = f"tend_{action}_issue"
+                    assert action in ("start", "backlog")
+                    saved = release.with_suffix(f".control-{action}.json")
+                    unblock = release.with_suffix(f".control-{action}-release")
+                    if starts == 1:
+                        receipt = fixture_call(tool, {"issue_id": short, "source_message_ids": [original["id"]]},
+                                               call_id=f"original-{action}")
+                        if action == "backlog":
+                            assert receipt["stop_control_ids"], receipt
+                        pending = saved.with_suffix(".tmp")
+                        pending.write_text(json.dumps(receipt))
+                        pending.rename(saved)
+                        deadline = time.monotonic() + 20
+                        while not unblock.exists():
+                            assert time.monotonic() < deadline, "independent user action did not finish"
+                            time.sleep(.02)
+                        sys.exit(0)  # The control committed, but there is no recoverable native turn.
+                    replay = json.loads(context.splitlines()[-1])
+                    assert replay["attempt_number"] == 2 and replay["source_message_id"] == source["handoff_message_id"]
+                    prior = json.loads(saved.read_text())
+                    assert prior["issue_id"] != short
+                    receipt = fixture_call(tool, {"issue_id": prior["issue_id"], "source_message_ids": [original["id"]]},
+                                           call_id=f"different-{action}")
+                    if receipt != prior:
+                        release.with_suffix(f".control-{action}-duplicate.json").write_text(json.dumps(receipt))
+                    assert receipt == prior, (prior, receipt)
+                    answer = f"Recovered original {action} receipt without applying it again."
+                elif "Fixture authorizes relay to #" in str(page):
+                    [original] = [m for m in page["messages"] if m["text"].startswith("Fixture authorizes relay")]
+                    issue = original["text"].split()[4].rstrip(".")
+                    scoped = "Use synthetic CSV only and stop after the local check."
+                    args = {"issue_id": issue, "source_message_ids": [original["id"]], "relay_text": scoped}
+                    receipt = fixture_call("tend_relay_issue_message", args)
+                    assert receipt == fixture_call("tend_relay_issue_message", args)
+                    assert scoped in receipt["text"] and original["text"] in receipt["text"]
+                    assert receipt["source_message_id"] == source["handoff_message_id"]
+                    answer = "Authorized scope relayed."
+            elif case.get("attention"):
                 fact = case["attention"]
                 receipt = decision_tool(
                     "tend_publish_attention", {"attention_id": fact["attention_id"], "text": case["question"]},

@@ -96,22 +96,37 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         let source = tx
             .query_row(
-                "SELECT i.message_seq FROM router_attempts a
+                "SELECT i.message_seq, a.seq, a.number,
+                        i.report_id IS NOT NULL OR i.attention_id IS NOT NULL OR i.external_batch IS NOT NULL,
+                        EXISTS(SELECT 1 FROM chat_messages m JOIN discussion_handoffs h ON h.message_id=m.id
+                            JOIN discussion_quick_handoffs q ON q.draft_id=h.draft_id WHERE m.seq=i.message_seq)
+                 FROM router_attempts a
              JOIN router_inputs i ON i.seq = a.seq
              WHERE a.id = ?1 AND a.thread_id = ?2 AND a.turn_id = ?3
                AND i.outcome IS NULL",
                 params![attempt_id, call.thread_id, call.turn_id],
-                |row| row.get::<_, i64>(0),
+                |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?, row.get::<_, i64>(2)?, row.get::<_, bool>(3)?, row.get::<_, bool>(4)?)),
             )
             .optional()?;
-        let Some(source) = source else {
+        let Some((source, input_seq, attempt_number, background, quick)) = source else {
             return Ok(None);
         };
+        if quick && background {
+            return Ok(None);
+        }
+        // Do not use wording to guess whether a new call after native history
+        // loss represents the same work. The previous receipts remain readable.
+        if quick && attempt_number > 1 && tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM router_attempts old JOIN router_dispatches d ON d.attempt_id=old.id
+                           WHERE old.seq=?1 AND old.number<?2)",
+            params![input_seq, attempt_number], |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
         let request = serde_json::to_string(work)?;
         let prior = tx
             .query_row(
-                "SELECT operation_id, request, recorded FROM router_dispatches
-             WHERE attempt_id = ?1 AND call_id = ?2",
+                "SELECT operation_id, request, recorded FROM router_dispatches WHERE attempt_id=?1 AND call_id=?2",
                 params![attempt_id, call.call_id],
                 |row| {
                     Ok((

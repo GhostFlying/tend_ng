@@ -126,6 +126,13 @@ enabled = true
         }))
         env = {**os.environ, "TEND_TOKEN": "synthetic-native-receiver"}
         with server(args.server, root, env, discussion_config=config, router_fixture=FIXTURE) as address:
+            # Emulate deliveries already persisted by v42, without migrating
+            # them into the newly authorized routing path.
+            with sqlite3.connect(root / "server.sqlite") as db:
+                db.executescript("""CREATE TRIGGER legacy_handoffs AFTER INSERT ON discussion_handoffs
+                    WHEN json_extract(NEW.intent, '$.mode')='quick'
+                    BEGIN UPDATE discussion_handoffs SET intent='{"mode":"quick"}'
+                        WHERE message_id=NEW.message_id; END;""")
             def cli(*words):
                 result = subprocess.run([args.cli, *words], capture_output=True, text=True, timeout=10,
                                         env={**env, "TEND_URL": f"http://{address}"})
