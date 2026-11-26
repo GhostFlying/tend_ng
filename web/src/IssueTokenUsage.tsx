@@ -1,8 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { issueLink, issueTitle, readIssueTokenUsage } from "./api";
-import type { IssueTokenUsageData, TokenBreakdown, TokenField } from "./api";
+import type { IssueTokenUsageData } from "./api";
+import {
+  fieldNote,
+  format,
+  RunCoverage,
+  tokens,
+  TokenTotal,
+} from "./TokenUsageSummary";
 
-const format = new Intl.NumberFormat("zh-CN");
 const metrics = [
   ["input_tokens", "输入"],
   ["cached_input_tokens", "缓存读取"],
@@ -16,52 +22,6 @@ type State =
   | { status: "loading" }
   | { status: "error" }
   | { status: "ready"; usage: IssueTokenUsageData };
-
-function tokens(field: TokenField) {
-  return field.tokens === null ? "—" : format.format(BigInt(field.tokens));
-}
-
-function fieldNote(field: TokenField, usage: TokenBreakdown) {
-  if (field.tokens === null) {
-    return usage.reported_requests > 0 ? "字段缺失" : "未知";
-  }
-  if (field.reported_requests < usage.reported_requests) {
-    return `${format.format(field.reported_requests)} / ${format.format(usage.reported_requests)} 条请求有此字段`;
-  }
-  return undefined;
-}
-
-function RunCoverage({ usage }: { usage: TokenBreakdown }) {
-  if (usage.started_runs === 0) {
-    return <p className="detail-muted token-coverage">没有已开始的 Run。</p>;
-  }
-  return (
-    <div className="token-coverage">
-      <p>
-        <strong>{usage.observed_runs ? "部分覆盖" : "完全未观测"}</strong>
-        <span>
-          已观测 {format.format(usage.observed_runs)} /{" "}
-          {format.format(usage.started_runs)} 个已开始 Run
-        </span>
-      </p>
-      {usage.unobserved_before_collection > 0 && (
-        <p className="detail-muted">
-          采集启用前 · {format.format(usage.unobserved_before_collection)} 个
-        </p>
-      )}
-      {usage.unobserved_no_usage > 0 && (
-        <p className="detail-muted">
-          已开始但无可用用量事件 · {format.format(usage.unobserved_no_usage)} 个
-        </p>
-      )}
-      {usage.observed_runs > 0 && (
-        <p className="detail-muted">
-          至少收到一条有效请求即为已观测，无法确认尾部完整。
-        </p>
-      )}
-    </div>
-  );
-}
 
 function IssueRows({
   issue,
@@ -199,16 +159,7 @@ function UsagePane({ issue }: { issue: string }) {
       )}
       {active && (
         <>
-          <div className="token-total">
-            <bdi>{tokens(active.total_tokens)}</bdi>
-            <span>Token</span>
-          </div>
-          <p className="detail-muted token-source">
-            App Server 原生上报
-            {fieldNote(active.total_tokens, active)
-              ? ` · ${fieldNote(active.total_tokens, active)}`
-              : ""}
-          </p>
+          <TokenTotal usage={active} />
           <RunCoverage usage={active} />
           <dl className="token-metrics">
             {metrics.map(([key, label]) => (

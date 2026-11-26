@@ -1,7 +1,14 @@
 import { Notifications } from "./Notifications";
 
 type IconName =
-  "chat" | "discussion" | "board" | "agents" | "hosts" | "more" | "notice";
+  | "chat"
+  | "discussion"
+  | "board"
+  | "agents"
+  | "hosts"
+  | "usage"
+  | "more"
+  | "notice";
 
 export function NavIcon({ name }: { name: IconName }) {
   const shape = {
@@ -25,6 +32,7 @@ export function NavIcon({ name }: { name: IconName }) {
         <rect x="3" y="11.2" width="14" height="5" rx="1.2" />
       </>
     ),
+    usage: <path d="M3.5 16.5h13m-11-3v-3m4.5 3V7m4.5 6.5v-10" />,
     more: (
       <>
         <circle cx="4.5" cy="10" r="1" />
@@ -57,6 +65,7 @@ export function NavIcon({ name }: { name: IconName }) {
 export const resourceLinks = [
   { href: "/agents", label: "Agents", icon: "agents" },
   { href: "/hosts", label: "主机", icon: "hosts" },
+  { href: "/token-usage", label: "Token 用量", icon: "usage" },
 ] as const;
 
 export function PhoneNavigation({

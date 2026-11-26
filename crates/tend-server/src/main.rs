@@ -448,6 +448,9 @@ fn handle(
     if path == protocol::EXECUTION_HOSTS_PATH && request.method() == &Method::Get {
         return Ok((200, serde_json::to_value(store.execution_hosts()?)?));
     }
+    if path == protocol::TOKEN_OVERVIEW_PATH {
+        return token_usage_api::overview(store, request.method(), query);
+    }
     if path == "/api/v1/runners" && request.method() == &Method::Get {
         return Ok((200, serde_json::to_value(store.runner_instances()?)?));
     }

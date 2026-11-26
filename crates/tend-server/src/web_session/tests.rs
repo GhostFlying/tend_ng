@@ -58,6 +58,11 @@ fn cookie_routes_are_explicit_and_method_specific() {
     for (method, path) in [
         (Method::Get, "/api/v1/runners"),
         (Method::Get, protocol::EXECUTION_HOSTS_PATH),
+        (Method::Get, protocol::TOKEN_OVERVIEW_PATH),
+        (
+            Method::Get,
+            "/api/v1/token-usage?parent=%2342&before=v1.1.fixture",
+        ),
         (Method::Get, "/api/v1/issues/%2342/messages?before=10"),
         (Method::Get, "/api/v1/issues/42/attention-replies?before=10"),
         (Method::Get, "/api/v1/issues/42/token-usage"),
@@ -101,6 +106,7 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (Method::Head, "/api/v1/issues/42/state"),
         (Method::Post, protocol::REPORT_REVISIONS_PATH),
         (Method::Post, protocol::TOKEN_BACKFILL_PATH),
+        (Method::Post, protocol::TOKEN_OVERVIEW_PATH),
         (Method::Get, "/api/v1/token-usage/backfills/job/audit"),
         (Method::Post, protocol::TOKEN_REBUILD_PATH),
     ] {

@@ -279,6 +279,7 @@ def verify(args, root, address):
                         assert tally["reported_requests"] == 7422, tally
                     assert tally["total_tokens"]["tokens"] == str(tokens), tally
                 expected = usage()
+                assert maint("overview")["total"] == expected["subtree"]
                 for job, scope in (("again", ("--all",)), ("issue", ("--issue", "#1")),
                                    ("runner", ("--runner", ORIGINAL)), ("host", ("--host", "fixture-host"))):
                     maint("backfill", *scope, "--job", job)
@@ -297,8 +298,10 @@ def verify(args, root, address):
                 assert usage()["subtree"]["reported_requests"] == 0
                 assert maint("rebuild", "--issue", "#1")["runs"] == RUNS
                 assert usage() == expected
+                assert maint("overview")["total"] == expected["subtree"]
                 assert maint("rebuild", "--all")["runs"] == RUNS
                 assert usage() == expected
+                assert maint("overview")["total"] == expected["subtree"]
                 page_query_plan(root, get)
                 print(f"PASS {RUNS} Started Runs, {NATIVE} native keys, {CONSISTENT} dual-source matches, "
                       "coverage gaps, original owner, replay, real sync interleaving, correction and rebuild")

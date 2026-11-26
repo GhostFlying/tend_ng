@@ -161,7 +161,20 @@ See the [Web session contract](docs/web-session.md) for API and verification det
 
 `tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]` explicitly links two ordinary reports already published in the same Issue's original Chat. Supply a publication message ID for each report without a saved mapping. Keep the operation ID for a retry. Check the result with `tend issue read '#123'` without changing Chat or the Issue's execution state. See the [API, idempotency and read-only verification commands](docs/plans/report-version-backfill.md#implemented-contract).
 
-## Historical token usage
+## Token usage
+
+Open `/token-usage` from Resources on desktop or More on mobile. The page totals reported usage attributable to Issues and shows coverage across started Runs. Browse top-level Issues or expand immediate children to compare direct and subtree values. The Token usage section on Issue detail remains available.
+
+```sh
+tend token-usage overview
+tend token-usage overview --parent '#123'
+tend token-usage overview --before <next_before>
+tend issue token-usage '#123'
+```
+
+Use `next_before` with the same parent when paging through children. These reads use saved projections and never start historical collection or rebuild. See the [global Token usage contract](docs/plans/global-token-usage.md).
+
+### Historical maintenance
 
 With the existing `TEND_URL` and `TEND_TOKEN`, start with a narrow backfill and inspect its coverage and audit. Use `--all` explicitly to scan every verified Started Run.
 

@@ -453,6 +453,29 @@ export async function readIssueTokenUsage(issue: string, signal: AbortSignal) {
   ).json() as Promise<IssueTokenUsageData>;
 }
 
+export type TokenOverviewIssue = IssueTokenUsageData["nodes"][number] & {
+  subtree: TokenBreakdown;
+  has_children: boolean;
+};
+
+export type TokenOverviewPage = {
+  total?: TokenBreakdown;
+  issues: TokenOverviewIssue[];
+  next_before: string | null;
+};
+
+export async function readTokenOverview(
+  parent: string | undefined,
+  before: string | null,
+  signal: AbortSignal,
+) {
+  const query = new URLSearchParams();
+  if (parent) query.set("parent", parent);
+  if (before) query.set("before", before);
+  const url = `/api/v1/token-usage${query.size ? `?${query}` : ""}`;
+  return (await request(url, { signal })).json() as Promise<TokenOverviewPage>;
+}
+
 export async function readIssueAttentionHistory(
   issue: string,
   before: number,

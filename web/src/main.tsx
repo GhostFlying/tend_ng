@@ -22,6 +22,12 @@ const IssueDetail = lazy(() =>
   import("./IssueDetail").then(({ IssueDetail }) => ({ default: IssueDetail })),
 );
 
+const GlobalTokenUsage = lazy(() =>
+  import("./GlobalTokenUsage").then(({ GlobalTokenUsage }) => ({
+    default: GlobalTokenUsage,
+  })),
+);
+
 const DiscussionSidebar = lazy(() =>
   import("./Discussions").then(({ DiscussionSidebar }) => ({
     default: DiscussionSidebar,
@@ -140,9 +146,11 @@ function App() {
       ? "Agents"
       : path === "/hosts"
         ? "执行主机"
-        : path === "/more"
-          ? "更多"
-          : "";
+        : path === "/token-usage"
+          ? "Token 用量"
+          : path === "/more"
+            ? "更多"
+            : "";
   const chatQuery = query.get("chat") ?? "";
   const archivedDiscussions = query.get("archived") === "true";
   const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
@@ -317,6 +325,12 @@ function App() {
             <Agents onReachable={setReachable} />
           ) : path === "/hosts" ? (
             <Hosts onReachable={setReachable} />
+          ) : path === "/token-usage" ? (
+            <Suspense
+              fallback={<main className="resource-page" aria-busy="true" />}
+            >
+              <GlobalTokenUsage onReachable={setReachable} />
+            </Suspense>
           ) : path === "/more" ? (
             <MoreResources
               disconnect={() => void disconnect()}

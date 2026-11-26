@@ -30,7 +30,14 @@ mod work;
 pub(crate) use work::DispatchRequest;
 
 #[cfg(test)]
+pub(crate) fn remove_token_usage_overview_schema(db: &Connection) -> Result<()> {
+    db.execute_batch("DROP TABLE token_global_rollup; DROP INDEX issues_token_usage_page;")?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn remove_token_usage_schema(db: &Connection) -> Result<()> {
+    remove_token_usage_overview_schema(db)?;
     db.execute_batch(
         "DROP TRIGGER token_issue_tree_insert;
          DROP TRIGGER token_backfill_reroute;
@@ -67,7 +74,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 43;
+pub(crate) const SCHEMA_VERSION: i64 = 44;
 
 pub struct Store {
     db: Connection,
@@ -316,6 +323,9 @@ impl Store {
         }
         if version < 43 {
             attention::migrate_report_dependencies(&tx)?;
+        }
+        if version < 44 {
+            token_usage::overview::migrate(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

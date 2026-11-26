@@ -1,0 +1,143 @@
+.usage-page-inner {
+  max-width: 1080px;
+  margin-inline: auto;
+  padding: 16px clamp(12px, 3vw, 28px) 24px;
+}
+
+.usage-page-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.usage-page-toolbar p,
+.usage-tree-heading p {
+  margin: 0;
+}
+
+.usage-page-toolbar button,
+.usage-tree-more {
+  min-height: 36px;
+}
+
+.usage-overview .token-total bdi,
+.usage-tree-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-tree-heading {
+  margin-block: 22px 10px;
+}
+
+.usage-tree-heading h2 {
+  margin: 0 0 4px;
+  font-size: 16px;
+}
+
+.usage-tree-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.usage-tree-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 4px 16px;
+  padding-block: 8px;
+  border-top: 1px solid var(--border);
+}
+
+.usage-tree-issue {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 40px;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+.usage-tree-issue a {
+  min-width: 0;
+  color: var(--label);
+  text-decoration-color: var(--muted);
+  text-underline-offset: 3px;
+}
+
+.usage-tree-toggle,
+.usage-tree-toggle-space {
+  flex: 0 0 40px;
+}
+
+.usage-tree-toggle {
+  display: grid;
+  min-height: 40px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--label);
+}
+
+.usage-tree-toggle:hover {
+  background: var(--active);
+}
+
+.usage-tree-toggle[aria-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.usage-tree-values {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-tree-value dt,
+.usage-tree-value .detail-muted {
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.usage-tree-value dd {
+  margin: 0;
+}
+
+.usage-tree-value bdi {
+  font-weight: 650;
+}
+
+.usage-tree-children[data-indent="true"] {
+  margin-inline-start: 18px;
+  padding-inline-start: 10px;
+  border-inline-start: 2px solid var(--border);
+}
+
+.usage-tree-status {
+  color: var(--warning);
+}
+
+.usage-tree-more {
+  margin-block: 8px;
+}
+
+@media (max-width: 760px) {
+  .usage-tree-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .usage-tree-values {
+    margin-inline-start: 44px;
+  }
+
+  .usage-tree-children[data-indent="true"] {
+    margin-inline-start: 10px;
+    padding-inline-start: 6px;
+  }
+}

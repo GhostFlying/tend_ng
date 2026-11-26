@@ -1,4 +1,5 @@
 pub(super) mod backfill;
+pub(super) mod overview;
 pub(super) mod rebuild;
 
 use super::Store;
@@ -79,10 +80,14 @@ struct Summary {
 
 impl Summary {
     fn merge(&mut self, other: Self) {
-        self.started_runs += other.started_runs;
-        self.observed_runs += other.observed_runs;
-        self.legacy_unobserved += other.legacy_unobserved;
-        self.tally.merge(other.tally, 1);
+        self.merge_signed(other, 1);
+    }
+
+    fn merge_signed(&mut self, other: Self, sign: i64) {
+        self.started_runs += sign * other.started_runs;
+        self.observed_runs += sign * other.observed_runs;
+        self.legacy_unobserved += sign * other.legacy_unobserved;
+        self.tally.merge(other.tally, sign);
     }
 }
 
@@ -352,11 +357,13 @@ fn run_delta(run: &VerifiedRun, after: Tally, new_start: bool) -> Summary {
 
 fn update_rollups(db: &Connection, direct: BTreeMap<String, Summary>) -> Result<()> {
     let mut subtree: BTreeMap<String, Summary> = BTreeMap::new();
+    let mut global = Summary::default();
     for (issue, delta) in direct {
         if delta == Summary::default() {
             continue;
         }
         update_issue(db, &issue, "direct", delta)?;
+        global.merge(delta);
         let mut query =
             db.prepare_cached("SELECT ancestor FROM token_issue_tree WHERE descendant = ?1")?;
         for ancestor in query.query_map([&issue], |row| row.get::<_, String>(0))? {
@@ -367,6 +374,11 @@ fn update_rollups(db: &Connection, direct: BTreeMap<String, Summary>) -> Result<
         if delta != Summary::default() {
             update_issue(db, &issue, "subtree", delta)?;
         }
+    }
+    if global != Summary::default() {
+        let mut total = overview::read_global(db)?;
+        total.merge(global);
+        overview::write_global(db, total)?;
     }
     Ok(())
 }

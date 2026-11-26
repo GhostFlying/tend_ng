@@ -302,6 +302,7 @@ fn web_route(method: &Method, url: &str) -> bool {
             protocol::ISSUE_BOARD_PATH
                 | protocol::TOP_LEVEL_BOARD_PATH
                 | protocol::EXECUTION_HOSTS_PATH
+                | protocol::TOKEN_OVERVIEW_PATH
                 | "/api/v1/runners"
                 | "/api/v1/agents"
         ) {

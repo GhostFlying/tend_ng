@@ -3,6 +3,7 @@
 use super::{
     Summary, Tally,
     backfill::{SCOPE_JOINS, scope_filter},
+    overview,
 };
 use crate::store::{Store, timing};
 use anyhow::{Context, Result};
@@ -93,6 +94,7 @@ struct Snapshot {
     ancestors: BTreeMap<String, Vec<String>>,
     direct: ScopeIssues,
     subtree: ScopeIssues,
+    global: Summary,
 }
 
 impl Snapshot {
@@ -111,10 +113,7 @@ impl Snapshot {
     fn apply(&mut self, keys: &[IssueKey], summary: Summary, sign: i64) {
         for key in keys {
             let total = self.totals.entry(key.clone()).or_default();
-            total.started_runs += summary.started_runs * sign;
-            total.observed_runs += summary.observed_runs * sign;
-            total.legacy_unobserved += summary.legacy_unobserved * sign;
-            total.tally.merge(summary.tally, sign);
+            total.merge_signed(summary, sign);
         }
     }
 
@@ -359,7 +358,7 @@ fn clear_shadows(db: &mut Connection) -> Result<()> {
     Ok(())
 }
 
-fn stage_snapshot(db: &mut Connection, snapshot: &Snapshot, issues: Rows) -> Result<()> {
+fn stage_snapshot(db: &mut Connection, snapshot: &mut Snapshot, issues: Rows) -> Result<()> {
     let runs = snapshot.runs.iter().collect::<Vec<_>>();
     for batch in runs.chunks(STAGE_BATCH) {
         let (tx, clock) = timing::begin(db, "token_rebuild_stage")?;
@@ -376,6 +375,7 @@ fn stage_snapshot(db: &mut Connection, snapshot: &Snapshot, issues: Rows) -> Res
             .into_iter()
             .map(|(key, value)| (key, Some(value)))
             .collect::<Vec<_>>(),
+        &mut snapshot.global,
     )
 }
 
@@ -383,13 +383,28 @@ fn stage_issues(
     db: &mut Connection,
     operation: &'static str,
     modifications: &[(IssueKey, Option<String>)],
+    global: &mut Summary,
 ) -> Result<()> {
     for batch in modifications.chunks(STAGE_BATCH) {
         let (tx, clock) = timing::begin(db, operation)?;
+        let mut next = *global;
         for (key, summary) in batch {
+            if key.1 == Level::Direct {
+                // Use the exact rows being published, including untouched
+                // Issues in a scoped rebuild. Subtrees would double count.
+                let previous: Option<String> = tx.prepare_cached(
+                    "SELECT summary FROM token_rebuild_issues WHERE issue_id = ?1 AND scope = 'direct'",
+                )?.query_row([&key.0], |row| row.get(0)).optional()?;
+                for (raw, sign) in [(previous.as_deref(), -1), (summary.as_deref(), 1)] {
+                    if let Some(raw) = raw {
+                        next.merge_signed(serde_json::from_str(raw)?, sign);
+                    }
+                }
+            }
             stage_issue(&tx, key, summary.as_deref())?;
         }
         timing::commit(tx, clock)?;
+        *global = next;
         yield_writer();
     }
     Ok(())
@@ -473,7 +488,12 @@ fn catch_up(
     }
     timing::commit(tx, clock)?;
     yield_writer();
-    stage_issues(write, "token_rebuild_catchup_issues", &modifications)?;
+    stage_issues(
+        write,
+        "token_rebuild_catchup_issues",
+        &modifications,
+        &mut snapshot.global,
+    )?;
 
     // If a fact changed during staging, the newer revision is still dirty.
     let (tx, clock) = timing::begin(write, "token_rebuild_catchup_ack")?;
@@ -486,7 +506,7 @@ fn catch_up(
     Ok(true)
 }
 
-fn publish(db: &mut Connection) -> Result<bool> {
+fn publish(db: &mut Connection, global: Summary) -> Result<bool> {
     let (tx, clock) = timing::begin(db, "token_rebuild_publish")?;
     if tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM token_rebuild_dirty)",
@@ -504,6 +524,7 @@ fn publish(db: &mut Connection) -> Result<bool> {
          ALTER TABLE token_rebuild_issue_swap RENAME TO token_rebuild_issues;
          UPDATE token_rebuild_state SET collecting = 0 WHERE id = 1;",
     )?;
+    overview::write_global(&tx, global)?;
     timing::commit(tx, clock)?;
     Ok(true)
 }
@@ -538,10 +559,10 @@ impl Store {
             let tx = read.transaction()?;
             let (mut snapshot, issues) = capture(&tx, &resolved)?;
             tx.commit()?;
-            stage_snapshot(&mut self.db, &snapshot, issues)?;
+            stage_snapshot(&mut self.db, &mut snapshot, issues)?;
             loop {
                 if !catch_up(&mut read, &mut self.db, &resolved, &mut snapshot)?
-                    && publish(&mut self.db)?
+                    && publish(&mut self.db, snapshot.global)?
                 {
                     break;
                 }
@@ -604,8 +625,9 @@ mod tests {
         let c = native_run("run-c", "c");
         let c0 = observation(&c, 0, Some(4));
         sync(&mut writer, "runner", &[c], &[c0])?;
-        stage_snapshot(&mut writer.db, &snapshot, issues)?;
-        assert!(!publish(&mut writer.db)?);
+        writer.db.execute("UPDATE token_global_rollup SET summary = (SELECT summary FROM token_issue_rollups WHERE issue_id = 'left' AND scope = 'direct')", [])?;
+        stage_snapshot(&mut writer.db, &mut snapshot, issues)?;
+        assert!(!publish(&mut writer.db, snapshot.global)?);
         let before = view(&writer, "root")?;
         assert_eq!(before["subtree"]["total_tokens"]["tokens"], "12");
         let held = held.transaction()?;
@@ -613,10 +635,15 @@ mod tests {
             db.query_row("SELECT summary FROM token_issue_rollups WHERE issue_id = 'root' AND scope = 'subtree'", [], |r| r.get(0))
         };
         let old = root_summary(&held)?;
+        let global_before = overview::read_global(&held)?;
+        assert_eq!(global_before.tally.sums[0], 16);
         while catch_up(&mut read, &mut writer.db, &scope, &mut snapshot)? {}
         assert_eq!(view(&writer, "root")?, before);
-        assert!(publish(&mut writer.db)?);
+        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 16);
+        assert!(publish(&mut writer.db, snapshot.global)?);
         assert_eq!(root_summary(&held)?, old);
+        assert_eq!(overview::read_global(&held)?.tally.sums[0], 16);
+        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 23);
         assert_ne!(root_summary(&writer.db)?, old);
         let rebuilt = view(&writer, "root")?;
         assert_eq!(rebuilt["subtree"]["reported_requests"], 5);
@@ -630,6 +657,7 @@ mod tests {
         // republish exactly the same counts.
         writer.rebuild_token_usage(&TokenUsageScope::All)?;
         assert_eq!(view(&writer, "root")?, rebuilt);
+        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 23);
         Ok(())
     }
 
@@ -657,6 +685,7 @@ mod tests {
         assert_eq!(reply["runs"], 1);
         assert_eq!(view(&writer, "left")?, expected);
         assert_eq!(view(&writer, "right")?, unrelated);
+        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 11);
         assert_eq!(
             writer.db.query_row(
                 "SELECT tally, valid_records FROM token_run_tallies WHERE run_id = 'run-b'",
@@ -696,7 +725,7 @@ mod tests {
         let mut read = Connection::open_with_flags(file.file(), OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let scope = TokenUsageScope::All;
         let (mut snapshot, issues) = capture(&read, &scope)?;
-        stage_snapshot(&mut writer.db, &snapshot, issues)?;
+        stage_snapshot(&mut writer.db, &mut snapshot, issues)?;
         sync(&mut writer, "runner", &[], &usages)?;
         // The root sorts after all branch keys: it belongs to the second
         // Issue chunk. A failure there must not roll back the first shadow
@@ -726,16 +755,19 @@ mod tests {
                 .valid_records,
             1
         );
-        assert!(!publish(&mut writer.db)?);
+        assert!(!publish(&mut writer.db, snapshot.global)?);
         writer.db.execute_batch("DROP TRIGGER reject_last_shadow")?;
         let more = observation(&runs[31], 1, Some(7));
         sync(&mut writer, "runner", &[], &[more.clone(), more])?;
         let expected = view(&writer, "root")?;
         assert!(catch_up(&mut read, &mut writer.db, &scope, &mut snapshot)?);
-        assert!(publish(&mut writer.db)?);
+        assert!(publish(&mut writer.db, snapshot.global)?);
         assert_eq!(view(&writer, "root")?, expected);
         assert_eq!(expected["subtree"]["reported_requests"], DIRTY_BATCH + 1);
         assert_eq!(expected["subtree"]["total_tokens"]["tokens"], "167");
+        let total = overview::read_global(&writer.db)?;
+        assert_eq!(total.tally.valid_records, DIRTY_BATCH + 1);
+        assert_eq!(total.tally.sums[0], 167);
         Ok(())
     }
 }

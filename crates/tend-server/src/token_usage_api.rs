@@ -1,6 +1,9 @@
 use crate::{api_error, json_response, request_bytes, store::Store};
 use anyhow::Result;
-use protocol::{StartTokenBackfill, TOKEN_BACKFILL_PATH, TOKEN_REBUILD_PATH, TokenUsageScope};
+use protocol::{
+    StartTokenBackfill, TOKEN_BACKFILL_PATH, TOKEN_REBUILD_PATH, TokenOverviewCursor,
+    TokenUsageScope,
+};
 use serde_json::Value;
 use std::{
     path::Path,
@@ -8,6 +11,44 @@ use std::{
     thread,
 };
 use tiny_http::{Method, Request};
+
+// Keep the bounded read on the regular user API, off the maintenance queue.
+pub fn overview(store: &Store, method: &Method, query: &str) -> Result<(u16, Value)> {
+    if method != &Method::Get {
+        return Ok(api_error(405, "method not allowed"));
+    }
+    let (mut parent, mut before) = (None, None);
+    for (key, value) in url::form_urlencoded::parse(query.as_bytes()) {
+        match key.as_ref() {
+            "parent" if parent.is_none() => {
+                if !protocol::valid_id(&value) && protocol::parse_issue_number(&value).is_none() {
+                    return Ok(api_error(400, "invalid parent Issue reference"));
+                }
+                parent = Some(value);
+            }
+            "before" if before.is_none() => {
+                let Some(cursor) = TokenOverviewCursor::decode(&value) else {
+                    return Ok(api_error(400, "invalid Token usage cursor"));
+                };
+                before = Some(cursor);
+            }
+            _ => return Ok(api_error(400, "invalid Token usage query")),
+        }
+    }
+    let parent = match parent.as_deref() {
+        Some(reference) => match store.resolve_issue(reference)? {
+            Some(id) => Some(id),
+            None => return Ok(api_error(404, "Issue not found")),
+        },
+        None => None,
+    };
+    Ok(
+        match store.token_overview(parent.as_deref(), before.as_ref())? {
+            Some(page) => (200, serde_json::to_value(page)?),
+            None => api_error(404, "Issue not found"),
+        },
+    )
+}
 
 pub fn matches(path: &str) -> bool {
     path == TOKEN_REBUILD_PATH

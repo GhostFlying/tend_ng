@@ -979,6 +979,7 @@ mod tests {
 
     fn legacy_database(db: &Connection) -> Result<()> {
         remove_quick_handoff_and_title_schema(db)?;
+        crate::store::remove_token_usage_overview_schema(db)?;
         db.pragma_update(None, "user_version", 41)?;
         Ok(())
     }

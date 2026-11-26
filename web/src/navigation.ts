@@ -9,6 +9,7 @@ const pages = new Set([
   "/issues",
   "/agents",
   "/hosts",
+  "/token-usage",
   "/more",
 ]);
 const changed = "tend:navigate";

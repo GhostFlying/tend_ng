@@ -90,8 +90,30 @@ impl RunTokenUsage {
     }
 }
 
+pub const TOKEN_OVERVIEW_PATH: &str = "/api/v1/token-usage";
 pub const TOKEN_BACKFILL_PATH: &str = "/api/v1/token-usage/backfills";
 pub const TOKEN_REBUILD_PATH: &str = "/api/v1/token-usage/rebuild";
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct TokenOverviewCursor {
+    pub source_seq: i64,
+    pub issue_id: String,
+}
+
+impl TokenOverviewCursor {
+    pub fn encode(&self) -> String {
+        format!("v1.{}.{}", self.source_seq, self.issue_id)
+    }
+
+    pub fn decode(cursor: &str) -> Option<Self> {
+        let (seq, issue_id) = cursor.strip_prefix("v1.")?.split_once('.')?;
+        let source_seq = seq.parse::<i64>().ok()?;
+        (seq == source_seq.to_string() && crate::valid_id(issue_id)).then(|| Self {
+            source_seq,
+            issue_id: issue_id.to_owned(),
+        })
+    }
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "id")]

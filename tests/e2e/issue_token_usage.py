@@ -139,6 +139,7 @@ def test_tree(args):
                 (root / "append-evidence").touch()
                 noticed = wait_for(lambda: usage(parent)["direct"], lambda direct: direct["reported_requests"] == 1)
                 assert noticed["total_tokens"]["tokens"] == "24800", noticed
+                assert cli("token-usage", "overview")["total"] == noticed
                 assert cli("issue", "read", parent)["status"] == "running"
                 assert sql("runner", "SELECT response_id FROM local_token_usage") == [("parent-first",)]
                 steer_id = "usage-live-steer"
@@ -195,11 +196,53 @@ def test_tree(args):
             assert cli("issue", "token-usage", f"#{number}") == after_loss
             get("/api/v1/issues/missing-fixture/token-usage", 404)
 
+            overview_path = "/api/v1/token-usage"
+            overview = get(overview_path)
+            assert overview == cli("token-usage", "overview")
+            assert overview["total"] == subtree, "global total must not add children twice"
+            assert {row["issue_id"] for row in overview["issues"]} == {parent, empty}
+            assert overview["next_before"] is None
+            root_row = next(row for row in overview["issues"] if row["issue_id"] == parent)
+            assert root_row["direct"] == after_loss["direct"]
+            assert root_row["subtree"] == subtree and root_row["has_children"]
+            children = get(f"{overview_path}?parent={parent}")
+            assert children == cli("token-usage", "overview", "--parent", f"#{number}")
+            assert "total" not in children and children["next_before"] is None
+            assert {row["issue_id"] for row in children["issues"]} == {missing, metered}
+            assert get(f"{overview_path}?parent={metered}")["issues"] == []
+            get(f"{overview_path}?parent=missing-fixture", 404)
+            get(f"{overview_path}?before=invalid", 400)
+            get(f"{overview_path}?parent={parent}&parent={empty}", 400)
+            try:
+                urllib.request.urlopen(env["TEND_URL"] + overview_path, timeout=5)
+            except urllib.error.HTTPError as error:
+                assert error.code == 401, error
+            else:
+                raise AssertionError("Token usage was accessible without authentication")
+
+            # Additional issues share the source, exercising the cursor's tie-breaker.
+            with sqlite3.connect(root / "server.sqlite") as db:
+                db.executemany(
+                    "INSERT INTO issues (id, source_seq, title, objective) "
+                    "SELECT ?, source_seq, ?, '' FROM issues WHERE id = ?",
+                    [(f"0-more-root-{n:02}", f"后续记录 {n:02}", parent) for n in range(32)],
+                )
+            first = cli("token-usage", "overview")
+            second = cli("token-usage", "overview", "--before", first["next_before"])
+            assert len(first["issues"]) == 30 and len(second["issues"]) == 4
+            assert {row["issue_id"] for row in first["issues"]}.isdisjoint(
+                row["issue_id"] for row in second["issues"])
+            assert second["next_before"] is None and first["total"] == second["total"] == subtree
+
             if args.web:
                 [empty_node] = usage(empty)["nodes"]
                 subprocess.run(["node", "tests/issue-token-usage.mjs", str(number),
                                 str(nodes[missing]["number"]), str(empty_node["number"])],
                                cwd=WEB, env=env, check=True, timeout=80)
+                subprocess.run(["node", "tests/global-token-usage.mjs", str(number),
+                                str(nodes[missing]["number"]), str(nodes[metered]["number"]),
+                                str(empty_node["number"]), parent], cwd=WEB, env=env,
+                               check=True, timeout=80)
 
             # Prepare the settled predecessor boundary directly; this section
             # isolates drain receipts, not handoff execution or collection.
@@ -232,7 +275,7 @@ def test_tree(args):
             sync("--once")
             drained, count = drain_state()
             assert drained is not None and count == 37, (drained, count)
-    print("PASS live delayed evidence, synthetic snapshots excluded, usage during Steer, offline persistence, lost response, restart and paged reconcile with runner-wide drain fencing")
+    print("PASS live and replayed Issue/global totals, CLI/HTTP parity, root keyset pagination, direct children, authentication and runner-wide drain fencing")
 
 
 def test_stop(args):
