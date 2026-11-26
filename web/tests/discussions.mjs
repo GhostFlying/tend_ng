@@ -1,18 +1,34 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import { chromium } from "playwright";
-import { collectPageErrors } from "./console-errors.mjs";
+import { isAnonymousSessionProbe } from "./console-errors.mjs";
 
 const {
   TEND_URL: base,
   TEND_TOKEN: token,
+  TEND_TEST_CLI: cliPath,
   TEND_SCREENSHOTS: output,
+  TEND_LEGACY_DISCUSSION: legacyDiscussion,
+  TEND_EXPLICIT_DISCUSSION: explicitDiscussion,
   TEND_REF_ISSUE: referenceIssue,
   TEND_TARGET_ISSUE: targetIssue,
 } = process.env;
 const open = "先聊聊演示项目的快速上手说明。";
 const errors = [];
-const browser = await chromium.launch();
+const browser = await chromium.launch({
+  channel: "chromium",
+  ignoreDefaultArgs: ["--disable-back-forward-cache"],
+});
+
+function cli(...args) {
+  return JSON.parse(
+    execFileSync(cliPath, ["discussion", ...args], { encoding: "utf8" }),
+  );
+}
+function cliList(archived = false) {
+  return cli("list", ...(archived ? ["--archived"] : [])).discussions;
+}
 
 async function visible(locator) {
   await locator.waitFor({ state: "visible" });
@@ -45,7 +61,25 @@ try {
       locale: "zh-CN",
       colorScheme: "light",
     });
-    collectPageErrors(page, errors);
+    await page.addInitScript(() => {
+      globalThis.addEventListener("pageshow", (event) => {
+        document.documentElement.dataset.bfcache = String(event.persisted);
+      });
+    });
+    page.on("pageerror", (error) => errors.push(error.message));
+    page.on("console", (message) => {
+      // Full Chromium probes /favicon.ico, which this Server does not serve.
+      const faviconProbe =
+        message.location().url === `${base}/favicon.ico` &&
+        /\b401\b/.test(message.text());
+      if (
+        ["error", "warning"].includes(message.type()) &&
+        !isAnonymousSessionProbe(message) &&
+        !faviconProbe
+      ) {
+        errors.push(`${message.location().url} ${message.text()}`);
+      }
+    });
     await page.goto(base);
     await page.getByLabel("访问令牌").fill(token);
     await page.getByRole("button", { name: "连接", exact: true }).click();
@@ -55,14 +89,61 @@ try {
     await menu.getByRole("link", { name: "讨论", exact: true }).click();
     assert.equal(new URL(page.url()).pathname, "/discussions");
     assert.match(await page.title(), /Tend/i);
-    await page
-      .getByRole("main")
-      .getByRole("button", { name: "新讨论" })
-      .click();
+    const main = page.getByRole("main");
+    const currentList = main.getByRole("list", {
+      name: "讨论列表",
+      exact: true,
+    });
+    const sidebarList = menu.getByRole("list", { name: "最近讨论" });
+    const create = (name === "desktop" ? menu : main).getByRole("button", {
+      name: "新建讨论",
+      exact: true,
+    });
+    const legacyHref = `/discussions?chat=${legacyDiscussion}`;
+    const explicitHref = `/discussions?chat=${explicitDiscussion}`;
+    const legacyLink = currentList.locator(`a[href="${legacyHref}"]`);
+    assert.equal(
+      await (await visible(legacyLink)).locator("strong").textContent(),
+      "未命名讨论",
+    );
+    const explicitlyNamed = currentList.locator(`a[href="${explicitHref}"]`);
+    assert.equal(
+      await (await visible(explicitlyNamed)).locator("strong").textContent(),
+      "新讨论",
+    );
+    assert.equal(
+      await create.locator('[aria-hidden="true"]').textContent(),
+      "+",
+    );
+    assert.equal(await create.getAttribute("aria-current"), null);
+    if (name === "desktop") {
+      await visible(sidebarList.locator(`a[href="${legacyHref}"]`));
+      assert.equal(await sidebarList.getByRole("button").count(), 0);
+      assert.equal(await sidebarList.locator("[aria-current]").count(), 0);
+    }
+    if (name === "mobile") await shoot(page, "discussion-mobile-directory");
+    await create.click();
     await page.waitForURL(/\/discussions\?chat=[a-zA-Z0-9_-]+$/);
     const discussion = page.url();
+    const chat = new URL(discussion).searchParams.get("chat");
+    assert.notEqual(
+      new URL(discussion).search,
+      new URL(legacyHref, base).search,
+    );
+    await visible(page.getByRole("heading", { name: "未命名讨论" }));
     await visible(page.getByRole("heading", { name: "可以直接开聊" }));
-    const main = page.getByRole("main");
+    if (name === "desktop") {
+      const selected = await visible(
+        sidebarList
+          .getByRole("link", { name: "未命名讨论", exact: true })
+          .and(sidebarList.locator('a[aria-current="page"]')),
+      );
+      assert.equal(
+        await selected.getAttribute("href"),
+        new URL(discussion).pathname + new URL(discussion).search,
+      );
+      assert.equal(await menu.locator('[aria-current="page"]').count(), 1);
+    }
     await shoot(page, `discussion-${name}-empty`);
     await page.getByRole("button", { name: "改标题" }).click();
     const title =
@@ -156,6 +237,103 @@ try {
     await sent.getByRole("link", { name: "回到原讨论 ↗" }).click();
     await page.waitForURL(discussion);
     await visible(page.getByRole("link", { name: "查看主 Chat 回执 ↗" }));
+
+    const beforeArchive = cli("read", chat);
+    const count = cliList().length + cliList(true).length;
+    const archive = page.getByRole("button", { name: "归档讨论", exact: true });
+    const archiveRequest = page.waitForRequest(
+      (req) =>
+        req.method() === "PATCH" &&
+        new URL(req.url()).pathname === `/api/v1/discussions/${chat}`,
+    );
+    await archive.click();
+    assert.deepEqual((await archiveRequest).postDataJSON(), { archived: true });
+    await page.waitForURL(`${base}/discussions`);
+    await visible(legacyLink);
+    assert.equal(
+      await currentList.getByRole("link", { name: new RegExp(title) }).count(),
+      0,
+    );
+    assert.equal(
+      cliList().some((row) => row.chat_id === chat),
+      false,
+    );
+    assert.equal(
+      cliList(true).find((row) => row.chat_id === chat).archived,
+      true,
+    );
+    assert.equal(cliList().length + cliList(true).length, count);
+
+    const restore = page.getByRole("button", { name: "恢复讨论", exact: true });
+    // Exercise a real cached document, not a cold navigation to the old URL.
+    await page.goBack({ waitUntil: "commit" });
+    assert.equal(page.url(), discussion);
+    await page.waitForFunction(
+      () => document.documentElement.dataset.bfcache === "true",
+      null,
+      { timeout: 5000 },
+    );
+    await visible(restore.and(page.locator(":enabled")));
+    await page.goForward({ waitUntil: "commit" });
+    assert.equal(page.url(), `${base}/discussions`);
+
+    await main.getByRole("link", { name: "已归档", exact: true }).click();
+    await page.waitForURL(`${base}/discussions?archived=true`);
+    const archivedLink = await visible(
+      main
+        .getByRole("list", { name: "已归档讨论" })
+        .getByRole("link", { name: new RegExp(title) }),
+    );
+    assert.equal(
+      new URL(await archivedLink.getAttribute("href"), base).href,
+      discussion,
+    );
+    await shoot(page, `discussion-${name}-archive-list`);
+    await archivedLink.click();
+    await page.waitForURL(discussion);
+    await visible(restore);
+    await visible(page.getByText("已归档", { exact: true }));
+    await visible(main.getByText(open, { exact: true }));
+    await visible(references.getByRole("link", { name: "example" }));
+    await visible(page.getByRole("link", { name: "查看主 Chat 回执 ↗" }));
+    if (name === "desktop")
+      assert.equal(await sidebarList.locator("[aria-current]").count(), 0);
+    await shoot(page, `discussion-${name}-restore`);
+
+    await restore.click();
+    await visible(archive);
+    assert.equal(page.url(), discussion);
+    assert.deepEqual(cli("read", chat), beforeArchive);
+    assert.equal(
+      cliList(true).some((row) => row.chat_id === chat),
+      false,
+    );
+    assert.equal(cliList().find((row) => row.chat_id === chat).archived, false);
+    if (name === "desktop") {
+      await visible(
+        sidebarList
+          .getByRole("link", { name: title, exact: true })
+          .and(sidebarList.locator('a[aria-current="page"]')),
+      );
+      assert.equal(await menu.locator('[aria-current="page"]').count(), 1);
+    }
+
+    // Keep the document mounted so only polling can observe CLI changes.
+    const recentLink = sidebarList.locator(
+      `a[href="/discussions${new URL(discussion).search}"]`,
+    );
+    cli("archive", chat);
+    await visible(restore);
+    if (name === "desktop") await recentLink.waitFor({ state: "detached" });
+    cli("restore", chat);
+    await visible(archive);
+    if (name === "desktop") {
+      await visible(recentLink.and(page.locator('[aria-current="page"]')));
+      assert.equal(await menu.locator('[aria-current="page"]').count(), 1);
+    }
+    assert.equal(page.url(), discussion);
+    await visible(main.getByText(open, { exact: true }));
+
     if (name === "desktop") {
       await page.goto(`${base}/issues/${targetIssue}`);
       await page.getByRole("button", { name: "带入讨论" }).click();
@@ -166,16 +344,26 @@ try {
           .getByRole("link", { name: new RegExp(`#${targetIssue}`) })
           .first(),
       );
+      cli(
+        "rename",
+        new URL(page.url()).searchParams.get("chat"),
+        "从 Issue 带入的讨论",
+      );
       await page.goto(base);
       await page.getByRole("button", { name: "带入讨论" }).first().click();
       await page.waitForURL(/\/discussions\?chat=/);
       await visible(page.getByRole("link", { name: "主 Chat 消息" }));
+      cli(
+        "rename",
+        new URL(page.url()).searchParams.get("chat"),
+        "从主 Chat 带入的讨论",
+      );
     }
     await page.close();
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS discussion desktop and mobile Chromium, reference picker, draft, explicit send and bidirectional links",
+    "PASS discussion desktop and mobile Chromium, separate create and selection, BFCache Back, live Web/CLI archive and restore, references, draft, explicit send and bidirectional links",
   );
 } finally {
   await browser.close();

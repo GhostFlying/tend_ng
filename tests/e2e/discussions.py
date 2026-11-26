@@ -148,6 +148,14 @@ def add_fixture_task(root, based_on, task, namespace, repo, with_mount, existing
     return issue, workspace
 
 
+def persisted_discussion(detail):
+    # Reference availability is projected live and can change when the fixture Runner stops.
+    return {**detail, "references": [
+        {key: value for key, value in row.items() if key != "status"}
+        for row in detail["references"]
+    ]}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ("server", "cli", "runner"):
@@ -255,9 +263,27 @@ def main():
             # Simulate a binding left by the first release, before roots were removed from the key.
             sql(db, "UPDATE router_threads SET model=? WHERE chat_id=?", "f" * 64, chat)
             cli("discussion", "rename", chat, "可恢复的讨论")
+            unnamed = cli("discussion", "create", "--operation", "legacy-unnamed")["chat_id"]
+            explicitly_named = cli("discussion", "create", "新讨论")["chat_id"]
+            renamed_to_default = cli("discussion", "create")["chat_id"]
+            cli("discussion", "rename", renamed_to_default, "新讨论")
+            assert cli("discussion", "read", unnamed)["title"] == "未命名讨论"
+
+        # Model a database stored by v32, including its actual generated title.
+        sql(db, "DROP INDEX discussions_by_activity")
+        sql(db, "ALTER TABLE discussions DROP COLUMN archived")
+        sql(db, "CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id)")
+        sql(db, "UPDATE discussions SET title='新讨论' WHERE chat_id=?", unnamed)
+        sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
+        sql(db, "PRAGMA user_version=32")
 
         with server(args.server, root, env, **options), runner_process(command, env, root):
             assert cli("discussion", "read", chat)["title"] == "可恢复的讨论"
+            assert cli("discussion", "read", unnamed)["title"] == "未命名讨论"
+            assert cli("discussion", "read", explicitly_named)["title"] == "新讨论"
+            assert cli("discussion", "read", renamed_to_default)["title"] == "新讨论"
+            assert cli("discussion", "create", "--operation", "legacy-unnamed")["chat_id"] == unnamed
+            assert not cli("discussion", "list", "--archived")["discussions"]
             assert len(messages(chat)) == 4
             say(chat,"Recover discussion","恢复的是原讨论的同一条答复。")
             attempted = sql(db, """SELECT a.number,i.outcome FROM router_attempts a JOIN router_inputs i ON i.seq=a.seq
@@ -385,8 +411,8 @@ def main():
             probe(chat, original, {stale: None})
 
 
-            assert cli("discussion", "create", "--from-main", parent["id"])["chat_id"] != chat
-            origin = cli("discussion", "create", "--from-issue", f"#{linked_number}")["chat_id"]
+            assert cli("discussion", "create", "主 Chat 引用示例", "--from-main", parent["id"])["chat_id"] != chat
+            origin = cli("discussion", "create", "Issue 资料笔记", "--from-issue", f"#{linked_number}")["chat_id"]
             assert api(f"discussions/{origin}")["references"][0]["id"] == issue["id"]
 
             # An unexpected permission confirmation must never start a turn or replace the binding.
@@ -437,11 +463,59 @@ def main():
             assert sql(db, "SELECT thread_id, model FROM router_threads WHERE chat_id=?", chat) == [(replacement_id, None)]
             assert_scope("Continue after native history loss", replacement_id)
 
+            before_archive = cli("discussion", "read", chat)
+            saved_messages = messages(chat)
+            saved_count = sql(db, "SELECT count(*) FROM discussions")
+            assert api(f"discussions/{chat}", "PATCH", {"archived": "true"}, status=400)
+            assert api(f"discussions/{chat}", "PATCH", {"archived": True, "title": "conflict"}, status=400)
+            assert api("discussions?archived=maybe", status=400)
+            assert api("discussions/absent", "PATCH", {"archived": True}, status=404)
+            expected = {"chat_id": chat, "archived": True}
+            assert cli("discussion", "archive", chat) == expected
+            assert cli("discussion", "archive", chat) == expected
+            assert all(row["chat_id"] != chat for row in api("discussions")["discussions"])
+            assert [row["chat_id"] for row in cli("discussion", "list", "--archived")["discussions"]] == [chat]
+            assert api(f"discussions/{chat}") == {**before_archive, "archived": True}
+            assert messages(chat) == saved_messages
+            assert sql(db, "SELECT count(*) FROM discussions") == saved_count
+
+            # Start a turn on the original native thread, then archive before its reply.
+            cli("discussion", "restore", chat)
+            held = "Hold discussion across archive"
+            op = "archive-spanning-message"
+            held_id = cli("chat", "send", chat, held, op)["message_id"]
+            started = root / "app-home" / "archive-turn-started"
+            wait_for(started.exists, bool)
+            assert not any(row["reply_to"] == held_id for row in messages(chat))
+            assert cli("discussion", "archive", chat) == expected
+            (root / "app-home" / "archive-turn-release").touch()
+            assert say(chat, held, FIRST_ANSWER, operation=op)["id"] == held_id
+            say(chat, "Continue while archived", FIRST_ANSWER)
+            assert_scope(held, replacement_id)
+            assert_scope("Continue while archived", replacement_id)
+            assert api(f"discussions/{chat}")["archived"]
+            assert messages(chat)[:len(saved_messages)] == saved_messages
+            before_archive = {**cli("discussion", "read", chat), "archived": False}
+            saved_messages = messages(chat)
+
+            # The inspection tests are done. Release the fixture worker before the
+            # browser waits for the normal detail polling cadence.
+            (root / "finish-first").touch()
             if args.screenshots:
                 args.screenshots.mkdir(parents=True,exist_ok=True)
-                subprocess.run([args.node,WEB/"tests/discussions.mjs"], check=True, timeout=90,
-                    env={**env,"TEND_SCREENSHOTS":str(args.screenshots),"TEND_REF_ISSUE":str(linked_number),
+                subprocess.run([args.node,WEB/"tests/discussions.mjs"], check=True, timeout=150,
+                    env={**env,"TEND_SCREENSHOTS":str(args.screenshots),"TEND_TEST_CLI":str(args.cli),
+                         "TEND_LEGACY_DISCUSSION":unnamed, "TEND_EXPLICIT_DISCUSSION":explicitly_named,
+                         "TEND_REF_ISSUE":str(linked_number),
                          "TEND_TARGET_ISSUE":str(parent_number)})
+
+        with server(args.server, root, env, **options):
+            saved_detail = persisted_discussion(before_archive)
+            assert persisted_discussion(api(f"discussions/{chat}")) == {**saved_detail, "archived": True}
+            assert cli("discussion", "restore", chat) == {"chat_id": chat, "archived": False}
+            assert persisted_discussion(api(f"discussions/{chat}")) == saved_detail
+            assert messages(chat) == saved_messages
+            assert sql(db, "SELECT thread_id FROM router_threads WHERE chat_id=?", chat) == [(replacement_id,)]
 
         with server(args.server, root, env, listen=address):
             unavailable = cli("discussion", "create", "Unconfigured discussion")["chat_id"]
@@ -450,7 +524,7 @@ def main():
             failed = wait_for(lambda: messages(unavailable), lambda rows: bool(rows and rows[0]["router_state"] == "failed"))
             assert len(failed) == 1 and failed[0]["id"] == msg and "not configured" in failed[0]["router_error"]
 
-    print("PASS Discussion original thread, legacy binding recovery, retry and missing-history fallback, exact turn scopes, Runner worktree switches, and Router handoff")
+    print("PASS Discussion v32 upgrade, CLI/API archive and restore across restart, history and in-flight reply preserved, original thread and retry, exact turn scopes, Runner worktree switches, and Router handoff")
 
 
 if __name__ == "__main__":

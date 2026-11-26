@@ -4,10 +4,12 @@ use serde_json::{Value, json};
 use std::{env, time::Duration};
 
 const USAGE: &str = "Usage:
-  tend discussion list
+  tend discussion list [--archived]
   tend discussion create [title] [--from-issue <issue>] [--from-main <message>] [--operation <id>]
   tend discussion read <chat>
   tend discussion rename <chat> <title>
+  tend discussion archive <chat>
+  tend discussion restore <chat>
   tend discussion candidates [search] [--target]
   tend discussion workspaces <issue>
   tend discussion attach <chat> repo <repo-id>
@@ -38,7 +40,15 @@ pub fn run(args: &[String]) -> Result<()> {
     let auth = format!("Bearer {token}");
     let root = format!("{}{DISCUSSIONS_PATH}", base.trim_end_matches('/'));
     let results = match args.as_slice() {
-        ["list"] => super::checked(http.get(&root).set("Authorization", &auth).call())?,
+        ["list"] | ["list", "--archived"] => {
+            let request = http.get(&root).set("Authorization", &auth);
+            let request = if args.len() == 2 {
+                request.query("archived", "true")
+            } else {
+                request
+            };
+            super::checked(request.call())?
+        }
         ["create", rest @ ..] => {
             let mut rest = rest.iter().copied().peekable();
             let title = if rest.peek().is_some_and(|value| !value.starts_with("--")) {
@@ -96,6 +106,11 @@ pub fn run(args: &[String]) -> Result<()> {
                     http.request("PATCH", &path)
                         .set("Authorization", &auth)
                         .send_json(json!({"title":title})),
+                )?,
+                ("archive" | "restore", []) => super::checked(
+                    http.request("PATCH", &path)
+                        .set("Authorization", &auth)
+                        .send_json(json!({"archived":*command == "archive"})),
                 )?,
                 ("attach", args) => {
                     let body = match args {

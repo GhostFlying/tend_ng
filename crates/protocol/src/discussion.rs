@@ -74,6 +74,13 @@ pub struct CreateDiscussion {
     pub origin: Option<DiscussionOrigin>,
 }
 
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct UpdateDiscussion {
+    pub title: Option<String>,
+    pub archived: Option<bool>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct DiscussionReference {
     pub id: String,

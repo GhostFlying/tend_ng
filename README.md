@@ -159,4 +159,13 @@ tend discussion draft "$DISCUSSION_ID"
 tend discussion draft-read "$DISCUSSION_ID"
 ```
 
+Web 通过独立的「+ 新建讨论」按钮创建讨论，未命名项显示「未命名讨论」。归档只改变列表归属，仍可使用原链接查看消息和引用，也可从「已归档」列表打开原讨论并恢复。CLI 使用同一接口：
+
+```sh
+tend discussion list
+tend discussion archive "$DISCUSSION_ID"
+tend discussion list --archived
+tend discussion restore "$DISCUSSION_ID"
+```
+
 CLI 显式发送使用 `tend discussion handoff`，先按帮助审阅目标、约束和授权终点。丢失响应时用相同的操作 ID 和原 JSON 重试。

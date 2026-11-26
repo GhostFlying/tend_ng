@@ -9,7 +9,7 @@ use crate::{
 use anyhow::Result;
 use protocol::{
     CreateDiscussion, DISCUSSIONS_PATH, DiscussionReference, DiscussionSend, DiscussionSource,
-    valid_id,
+    UpdateDiscussion, valid_id,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -63,7 +63,14 @@ fn handle(service: &Service, store: &mut Store, request: &mut Request) -> Result
     let method = request.method().clone();
     if rest.is_empty() {
         return match method {
-            Method::Get => Ok(ok(json!({"discussions":store.discussion_list()?}))),
+            Method::Get => {
+                let archived = match values.get("archived").map(String::as_str) {
+                    None | Some("false") => false,
+                    Some("true") => true,
+                    Some(_) => return Ok(api_error(400, "archived must be true or false")),
+                };
+                Ok(ok(json!({"discussions":store.discussion_list(archived)?})))
+            }
             Method::Post => match input::<CreateDiscussion>(request)? {
                 Ok(input)
                     if valid_id(&input.operation_id)
@@ -150,14 +157,21 @@ fn handle(service: &Service, store: &mut Store, request: &mut Request) -> Result
             meta["execution_configured"] = json!(service.settings.is_some());
             Ok(ok(meta))
         }
-        ("", Method::Patch) => match input::<Value>(request)? {
-            Ok(input) => match input["title"].as_str().filter(|title| valid_title(title)) {
-                Some(title) if store.rename_discussion(chat, title)? => {
+        ("", Method::Patch) => match input::<UpdateDiscussion>(request)? {
+            Ok(input) => match (input.title.as_deref(), input.archived) {
+                (Some(title), None) if valid_title(title) => {
+                    if !store.rename_discussion(chat, title)? {
+                        return Ok(api_error(404, "Discussion not found"));
+                    }
                     Ok(ok(json!({"title":title.trim()})))
+                }
+                (None, Some(archived)) => {
+                    store.set_discussion_archived(chat, archived)?;
+                    Ok(ok(json!({"chat_id":chat,"archived":archived})))
                 }
                 _ => Ok(api_error(
                     400,
-                    "A non-empty title of at most 120 characters is required",
+                    "Set either archived (boolean) or title (1 to 120 characters)",
                 )),
             },
             Err(reply) => Ok(reply),

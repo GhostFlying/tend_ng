@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import sqlite3
 import sys
+import time
 import uuid
 
 home = Path(os.environ["CODEX_HOME"])
@@ -175,6 +176,12 @@ for line in sys.stdin:
                             {"reference_id": "github:demo/quickstart:7"})
                 assert pull["success"] and "Synthetic PR body" in pull["contentItems"][0]["text"], pull
                 answer = mock_read(checkout / "README.md", roots)
+            elif case == "Hold discussion across archive":
+                (home / "archive-turn-started").touch()
+                deadline = time.monotonic() + 15
+                while not (home / "archive-turn-release").exists():
+                    assert time.monotonic() < deadline, "fixture did not release the archived turn"
+                    time.sleep(0.02)
             elif case == "Scope probe":
                 expected = json.loads(text.removeprefix("Scope probe: "))
                 actual = {path: mock_read(path, roots) for path in expected}

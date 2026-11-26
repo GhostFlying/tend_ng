@@ -8,6 +8,8 @@ use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
 
+const UNTITLED_DISCUSSION: &str = "未命名讨论";
+
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "CREATE TABLE discussions (
@@ -31,6 +33,31 @@ pub fn migrate(db: &Connection) -> Result<()> {
             message_id TEXT NOT NULL UNIQUE REFERENCES chat_messages(id)
          );
          CREATE INDEX discussion_handoffs_by_chat ON discussion_handoffs(chat_id);",
+    )?;
+    Ok(())
+}
+
+pub fn migrate_archive(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE discussions ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
+         DROP INDEX discussions_by_activity;
+         CREATE INDEX discussions_by_activity ON discussions(archived, updated_at);",
+    )?;
+    // In v32 only accepting an ordinary message or renaming could move
+    // updated_at. When no such message exists, a changed timestamp proves a
+    // rename even to the old default. A draft's internal input did not touch it.
+    // Message activity and same-second renames cannot reliably prove intent.
+    db.execute(
+        "UPDATE discussions AS d SET title=?1 WHERE d.title='新讨论'
+           AND json_extract(d.creation, '$.title') IS NULL
+           AND (d.updated_at=d.created_at OR EXISTS (
+               SELECT 1 FROM chat_messages m
+                WHERE m.chat_id=d.chat_id AND m.operation_id IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM discussion_drafts draft WHERE draft.message_id=m.id
+                  )
+           ))",
+        [UNTITLED_DISCUSSION],
     )?;
     Ok(())
 }
@@ -231,7 +258,7 @@ impl Store {
         let id = protocol::new_id();
         tx.execute(
             "INSERT INTO discussions(chat_id,operation_id,creation,title,origin,quoted_text) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![id,request.operation_id,intent,request.title.as_deref().unwrap_or("新讨论").trim(),origin.map(|v|v.to_string()),quoted],
+            params![id,request.operation_id,intent,request.title.as_deref().unwrap_or(UNTITLED_DISCUSSION).trim(),origin.map(|v|v.to_string()),quoted],
         )?;
         if let Some(reference) = reference {
             insert_ref(&tx, &id, &reference)?;
@@ -240,17 +267,20 @@ impl Store {
         Ok(Change::Ok(id))
     }
 
-    pub fn discussion_list(&self) -> Result<Vec<Value>> {
-        let mut st = self.db.prepare("SELECT chat_id,title,created_at,updated_at FROM discussions ORDER BY updated_at DESC, rowid DESC")?;
+    pub fn discussion_list(&self, archived: bool) -> Result<Vec<Value>> {
+        let mut st = self.db.prepare(
+            "SELECT chat_id,title,created_at,updated_at,archived FROM discussions
+             WHERE archived=?1 ORDER BY updated_at DESC, rowid DESC",
+        )?;
         Ok(st
-            .query_map([], discussion_header)?
+            .query_map([archived], discussion_header)?
             .collect::<rusqlite::Result<_>>()?)
     }
 
     pub fn discussion_detail(&self, chat: &str) -> Result<Option<Value>> {
         let meta = self.db.query_row(
-            "SELECT chat_id,title,created_at,updated_at,origin FROM discussions WHERE chat_id=?1",
-            [chat], |r| Ok((discussion_header(r)?,r.get::<_,Option<String>>(4)?)),
+            "SELECT chat_id,title,created_at,updated_at,archived,origin FROM discussions WHERE chat_id=?1",
+            [chat], |r| Ok((discussion_header(r)?,r.get::<_,Option<String>>(5)?)),
         ).optional()?;
         let Some((mut meta, origin)) = meta else {
             return Ok(None);
@@ -274,6 +304,14 @@ impl Store {
             "UPDATE discussions SET title=?2,updated_at=unixepoch() WHERE chat_id=?1",
             [chat, title.trim()],
         )? == 1)
+    }
+
+    pub fn set_discussion_archived(&self, chat: &str, archived: bool) -> Result<()> {
+        self.db.execute(
+            "UPDATE discussions SET archived=?2 WHERE chat_id=?1 AND archived<>?2",
+            params![chat, archived],
+        )?;
+        Ok(())
     }
 
     pub fn discussion_quote(&self, chat: &str) -> Result<Option<String>> {
@@ -614,7 +652,8 @@ impl Store {
 fn discussion_header(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
     Ok(
         json!({"chat_id":r.get::<_,String>(0)?, "title":r.get::<_,String>(1)?,
-        "created_at":r.get::<_,i64>(2)?, "updated_at":r.get::<_,i64>(3)?}),
+        "created_at":r.get::<_,i64>(2)?, "updated_at":r.get::<_,i64>(3)?,
+        "archived":r.get::<_,bool>(4)?}),
     )
 }
 
@@ -641,4 +680,122 @@ fn insert_ref(db: &Connection, chat: &str, reference: &DiscussionReference) -> R
         params![chat,reference.id,serde_json::to_string(reference)?],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn create(store: &mut Store, request: &CreateDiscussion) -> Result<String> {
+        let Change::Ok(chat) = store.create_discussion(request)? else {
+            anyhow::bail!("fixture creation failed");
+        };
+        Ok(chat)
+    }
+
+    #[test]
+    fn archive_migration_distinguishes_legacy_defaults_from_explicit_titles() -> Result<()> {
+        let mut store = Store::initialize(std::path::Path::new(":memory:"))?;
+        store.db.execute_batch(
+            "DROP INDEX discussions_by_activity;
+             ALTER TABLE discussions DROP COLUMN archived;
+             CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id);",
+        )?;
+        let cases = [
+            ("implicit", None, "新讨论", 100, UNTITLED_DISCUSSION),
+            ("explicit", Some("新讨论"), "新讨论", 100, "新讨论"),
+            ("different_title", None, "自选标题", 200, "自选标题"),
+            (
+                "changed_explicit",
+                Some("其他标题"),
+                "新讨论",
+                200,
+                "新讨论",
+            ),
+            ("same_name_rename", None, "新讨论", 200, "新讨论"),
+            ("same_name_with_draft", None, "新讨论", 200, "新讨论"),
+            (
+                "untitled_with_message",
+                None,
+                "新讨论",
+                200,
+                UNTITLED_DISCUSSION,
+            ),
+        ];
+        for (chat, requested, stored, updated, _) in cases {
+            let request = CreateDiscussion {
+                operation_id: format!("op-{chat}"),
+                title: requested.map(str::to_owned),
+                origin: None,
+            };
+            store.db.execute(
+                "INSERT INTO discussions(chat_id,operation_id,creation,title,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,100,?5)",
+                params![
+                    chat,
+                    request.operation_id,
+                    serde_json::to_string(&request)?,
+                    stored,
+                    updated
+                ],
+            )?;
+        }
+        store.db.execute(
+            "INSERT INTO chat_messages (chat_id,id,text,operation_id,created_at)
+             VALUES ('untitled_with_message','test-message','fixture','test-operation',199)",
+            [],
+        )?;
+        assert!(matches!(
+            store.request_discussion_draft("same_name_with_draft", "draft-op")?,
+            Change::Ok(())
+        ));
+        let tx = store.db.transaction()?;
+        migrate_archive(&tx)?;
+        tx.commit()?;
+        for (id, _, _, updated, title) in cases {
+            let header = store.discussion_detail(id)?.expect("same ID");
+            assert_eq!(header["title"], title, "{id}");
+            assert_eq!(header["updated_at"], updated, "{id}");
+            assert_eq!(header["archived"], false, "{id}");
+        }
+        let replay = CreateDiscussion {
+            operation_id: "op-implicit".into(),
+            title: None,
+            origin: None,
+        };
+        assert_eq!(create(&mut store, &replay)?, "implicit");
+        assert_eq!(store.discussion_list(false)?.len(), cases.len());
+        assert!(store.discussion_list(true)?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn archive_is_a_replayable_list_move_not_a_new_discussion() -> Result<()> {
+        let mut store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let request = CreateDiscussion {
+            operation_id: "create-discussion".into(),
+            title: None,
+            origin: None,
+        };
+        let chat = create(&mut store, &request)?;
+        assert_eq!(
+            store.discussion_list(false)?[0]["title"],
+            UNTITLED_DISCUSSION
+        );
+        assert!(store.rename_discussion(&chat, "新讨论")?);
+        let before = store.discussion_detail(&chat)?.expect("created discussion");
+
+        for archived in [true, true, false, false] {
+            store.set_discussion_archived(&chat, archived)?;
+            assert!(store.discussion_list(!archived)?.is_empty());
+            let [header]: [_; 1] = store.discussion_list(archived)?.try_into().unwrap();
+            assert_eq!(header["chat_id"], chat);
+            assert_eq!(header["title"], "新讨论");
+            assert_eq!(header["archived"], archived);
+            assert_eq!(header["updated_at"], before["updated_at"]);
+            assert_eq!(create(&mut store, &request)?, chat);
+        }
+        assert_eq!(store.discussion_detail(&chat)?, Some(before));
+        Ok(())
+    }
 }

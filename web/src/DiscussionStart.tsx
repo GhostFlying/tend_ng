@@ -30,11 +30,12 @@ export function DiscussionStart({
     <span className="discussion-start">
       <button
         type="button"
-        className={compact ? "text-button" : "primary"}
+        className={`primary${compact ? " discussion-start-sidebar" : ""}`}
         disabled={busy}
         onClick={() => void open()}
       >
-        {busy ? "正在新建…" : origin ? "带入讨论" : "新讨论"}
+        {!origin && <span aria-hidden="true">+</span>}
+        {busy ? "正在新建…" : origin ? "带入讨论" : "新建讨论"}
       </button>
       {error && (
         <small className="error" role="alert">

@@ -42,8 +42,11 @@ const resourceTitle =
       : path === "/more"
         ? "更多"
         : "";
-const chatQuery = new URLSearchParams(window.location.search).get("chat") ?? "";
+const query = new URLSearchParams(window.location.search);
+const chatQuery = query.get("chat") ?? "";
+const archivedDiscussions = query.get("archived") === "true";
 const chatId = /^[a-zA-Z0-9_-]{1,128}$/.test(chatQuery) ? chatQuery : "main";
+const discussionChat = chatQuery && chatId !== "main" ? chatId : null;
 const issueRoute =
   /^\/issues\/(%23[1-9][0-9]*|[a-zA-Z0-9_-]+)(?:\/overview)?$/.exec(path);
 const issue = issueRoute ? decodeURIComponent(issueRoute[1]) : undefined;
@@ -170,7 +173,7 @@ function App() {
             </a>
             <a
               href="/discussions"
-              aria-current={discussions ? "page" : undefined}
+              aria-current={discussions && !discussionChat ? "page" : undefined}
               aria-label="讨论"
             >
               <NavIcon name="discussion" />
@@ -178,7 +181,7 @@ function App() {
             </a>
             {discussions && (
               <Suspense fallback={null}>
-                <DiscussionSidebar chat={chatQuery ? chatId : null} />
+                <DiscussionSidebar chat={discussionChat} />
               </Suspense>
             )}
             <a
@@ -277,7 +280,8 @@ function App() {
               }
             >
               <DiscussionPage
-                chat={chatQuery && chatId !== "main" ? chatId : null}
+                chat={discussionChat}
+                archived={archivedDiscussions}
                 onReachable={setReachable}
               />
             </Suspense>

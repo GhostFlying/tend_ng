@@ -6,12 +6,14 @@ import { issueTitle } from "./api";
 import {
   attachReference,
   detachReference,
+  discussionIndexLink,
   discussionLink,
   listDiscussions,
   readDiscussion,
   readWorkspaceChoices,
   referenceStatus,
   renameDiscussion,
+  setDiscussionArchived,
 } from "./discussionApi";
 import type {
   Discussion,
@@ -24,14 +26,26 @@ import { HandoffDialog } from "./DiscussionHandoff";
 import { discussionError, useReferenceSearch } from "./discussionSearch";
 import "./discussions.css";
 
-function useDiscussionList(onReachable?: (online: boolean) => void) {
+const DISCUSSION_LIST_CHANGED = "tend-discussion-list-changed";
+
+function useDiscussionList(
+  archived: boolean,
+  onReachable?: (online: boolean) => void,
+) {
   const [rows, setRows] = useState<Discussion[] | null>(null);
   const [error, setError] = useState("");
   useEffect(() => {
-    const controller = new AbortController();
+    let pending: AbortController | undefined;
     async function load() {
+      pending?.abort();
+      const controller = new AbortController();
+      pending = controller;
       try {
-        const { discussions } = await listDiscussions(controller.signal);
+        const { discussions } = await listDiscussions(
+          archived,
+          controller.signal,
+        );
+        if (controller.signal.aborted) return;
         setRows(discussions);
         setError("");
         onReachable?.(true);
@@ -42,55 +56,81 @@ function useDiscussionList(onReachable?: (online: boolean) => void) {
         }
       }
     }
+    function resume(event: PageTransitionEvent) {
+      if (event.persisted) void load();
+    }
     void load();
-    window.addEventListener("tend-discussion-title", load);
+    window.addEventListener(DISCUSSION_LIST_CHANGED, load);
+    window.addEventListener("focus", load);
+    window.addEventListener("pageshow", resume);
     return () => {
-      controller.abort();
-      window.removeEventListener("tend-discussion-title", load);
+      pending?.abort();
+      window.removeEventListener(DISCUSSION_LIST_CHANGED, load);
+      window.removeEventListener("focus", load);
+      window.removeEventListener("pageshow", resume);
     };
-  }, [onReachable]);
+  }, [archived, onReachable]);
   return { rows, error };
 }
 
+const RECENT_DISCUSSIONS = 8;
+
 export function DiscussionSidebar({ chat }: { chat: string | null }) {
-  const { rows } = useDiscussionList();
+  const { rows } = useDiscussionList(false);
+  const recent = rows?.slice(0, RECENT_DISCUSSIONS) ?? [];
+  const current = rows?.find(({ chat_id }) => chat_id === chat);
+  if (current && !recent.includes(current)) {
+    recent[RECENT_DISCUSSIONS - 1] = current;
+  }
   return (
     <div className="discussion-sidebar-items">
       <DiscussionStart compact />
-      {rows?.slice(0, 8).map(({ chat_id, title }) => (
-        <a
-          key={chat_id}
-          href={discussionLink(chat_id)}
-          aria-current={chat_id === chat ? "page" : undefined}
-          title={title}
-        >
-          <span>{title}</span>
-        </a>
-      ))}
+      {!!recent.length && (
+        <div className="discussion-sidebar-history">
+          <h2>最近讨论</h2>
+          <ul aria-label="最近讨论">
+            {recent.map(({ chat_id, title }) => (
+              <li key={chat_id}>
+                <a
+                  href={discussionLink(chat_id)}
+                  aria-current={chat_id === chat ? "page" : undefined}
+                  title={title}
+                >
+                  <span>{title}</span>
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
 
 export function DiscussionPage({
   chat,
+  archived,
   onReachable,
 }: {
   chat: string | null;
+  archived: boolean;
   onReachable: (online: boolean) => void;
 }) {
   return chat ? (
     <DiscussionView chat={chat} onReachable={onReachable} />
   ) : (
-    <DiscussionIndex onReachable={onReachable} />
+    <DiscussionIndex archived={archived} onReachable={onReachable} />
   );
 }
 
 function DiscussionIndex({
+  archived,
   onReachable,
 }: {
+  archived: boolean;
   onReachable: (online: boolean) => void;
 }) {
-  const { rows, error } = useDiscussionList(onReachable);
+  const { rows, error } = useDiscussionList(archived, onReachable);
   return (
     <main className="timeline">
       <div className="lane discussion-index">
@@ -101,6 +141,20 @@ function DiscussionIndex({
           </div>
           <DiscussionStart />
         </div>
+        <nav className="discussion-list-nav" aria-label="筛选讨论">
+          <a
+            href={discussionIndexLink()}
+            aria-current={!archived ? "page" : undefined}
+          >
+            当前讨论
+          </a>
+          <a
+            href={discussionIndexLink(true)}
+            aria-current={archived ? "page" : undefined}
+          >
+            已归档
+          </a>
+        </nav>
         {error ? (
           <p className="error" role="alert">
             {error}
@@ -108,9 +162,14 @@ function DiscussionIndex({
         ) : !rows ? (
           <p role="status">正在读取讨论…</p>
         ) : !rows.length ? (
-          <p className="discussion-empty">还没有讨论。</p>
+          <p className="discussion-empty">
+            {archived ? "还没有已归档的讨论。" : "还没有讨论。"}
+          </p>
         ) : (
-          <ul className="discussion-list" aria-label="讨论列表">
+          <ul
+            className="discussion-list"
+            aria-label={archived ? "已归档讨论" : "讨论列表"}
+          >
             {rows.map(({ chat_id, title, updated_at }) => (
               <li key={chat_id}>
                 <a href={discussionLink(chat_id)}>
@@ -140,15 +199,32 @@ function DiscussionView({
   const [refresh, setRefresh] = useState(0);
   const [title, setTitle] = useState<string | null>(null);
   const [savingTitle, setSavingTitle] = useState(false);
+  const [savingArchive, setSavingArchive] = useState(false);
   const [picker, setPicker] = useState(false);
   const [handoff, setHandoff] = useState(false);
+  const poll = useRef<AbortController | null>(null);
+  const previousArchived = useRef(false);
+  const archivalState = meta?.archived;
+
+  useEffect(() => {
+    if (
+      archivalState === undefined ||
+      archivalState === previousArchived.current
+    )
+      return;
+    previousArchived.current = archivalState;
+    window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
+  }, [archivalState]);
 
   useEffect(() => {
     const controller = new AbortController();
+    poll.current = controller;
     let timer: number | undefined;
     async function load() {
       try {
-        setMeta(await readDiscussion(chat, controller.signal));
+        const detail = await readDiscussion(chat, controller.signal);
+        if (controller.signal.aborted) return;
+        setMeta(detail);
         onReachable(true);
       } catch (error) {
         if (!controller.signal.aborted) {
@@ -160,10 +236,20 @@ function DiscussionView({
           timer = window.setTimeout(() => void load(), 12000);
       }
     }
+    function resume(event: PageTransitionEvent) {
+      if (!event.persisted) return;
+      controller.abort();
+      // A browser Back navigation can restore the page before React had
+      // committed the state update from a successful archive.
+      setSavingArchive(false);
+      setRefresh((value) => value + 1);
+    }
     void load();
+    window.addEventListener("pageshow", resume);
     return () => {
       controller.abort();
       window.clearTimeout(timer);
+      window.removeEventListener("pageshow", resume);
     };
   }, [chat, onReachable, refresh]);
 
@@ -211,7 +297,7 @@ function DiscussionView({
       await renameDiscussion(chat, title);
       setMeta((prev) => prev && { ...prev, title: title.trim() });
       setTitle(null);
-      window.dispatchEvent(new Event("tend-discussion-title"));
+      window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
       setRefresh((value) => value + 1);
     } catch (error) {
       setError(discussionError(error));
@@ -220,10 +306,27 @@ function DiscussionView({
     }
   }
 
+  async function changeArchive(archived: boolean) {
+    setSavingArchive(true);
+    setError("");
+    try {
+      await setDiscussionArchived(chat, archived);
+      poll.current?.abort();
+      setMeta((prev) => prev && { ...prev, archived });
+      setRefresh((value) => value + 1);
+    } catch (error) {
+      setError(discussionError(error));
+      return;
+    } finally {
+      setSavingArchive(false);
+    }
+    if (archived) window.location.assign(discussionIndexLink());
+  }
+
   if (!meta)
     return (
       <main className="lane discussion-index">
-        <a href="/discussions">返回讨论</a>
+        <a href={discussionIndexLink()}>返回讨论</a>
         <p role={error ? "alert" : "status"}>{error || "正在打开讨论…"}</p>
       </main>
     );
@@ -232,8 +335,11 @@ function DiscussionView({
       <section className="discussion-bar" aria-label="当前讨论">
         <div className="lane discussion-bar-inner">
           <div className="discussion-meta">
-            <a className="text-button" href="/discussions">
-              所有讨论
+            <a
+              className="text-button"
+              href={discussionIndexLink(meta.archived)}
+            >
+              {meta.archived ? "已归档列表" : "所有讨论"}
             </a>
             {meta.origin && (
               <a className="text-button" href={meta.origin.href}>
@@ -241,6 +347,9 @@ function DiscussionView({
               </a>
             )}
             <span className="discussion-mode">只读讨论</span>
+            {meta.archived && (
+              <span className="discussion-archive-label">已归档</span>
+            )}
           </div>
           {title !== null ? (
             <form
@@ -295,6 +404,14 @@ function DiscussionView({
               onClick={() => setHandoff(true)}
             >
               交给 Router
+            </button>
+            <button
+              className="discussion-secondary discussion-archive-action"
+              type="button"
+              disabled={savingArchive}
+              onClick={() => void changeArchive(!meta.archived)}
+            >
+              {meta.archived ? "恢复讨论" : "归档讨论"}
             </button>
             {meta.handoffs[0] && (
               <a className="text-button" href={meta.handoffs[0].href}>

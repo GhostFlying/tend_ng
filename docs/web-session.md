@@ -28,7 +28,7 @@ Server 原生监听 HTTP。远程 Web 由同机可信 TLS 入口终止 TLS 并�
 | GET / HEAD | 当前 Web Cookie，不发送 Authorization | 有效为 204，无效或缺失为 401。只读，不回收过期记录、不更新到期时间、不清 Cookie。 |
 | DELETE | 当前 Web Cookie、精确 Origin 和 `X-Tend-Web: 1`，不发送 Authorization | 撤销当前会话并清 Cookie，已失效同样返回 204。无同源证明返回 403。 |
 
-普通 API 先检查显式 Authorization。存在但不合法即 401，绝不回退 Cookie。Cookie 只允许显式列出的 Chat 消息、Attention 和通知、Issue 读写（看板、详情、讨论、普通 Attention 回复及历史、启动、取消或重开）、只读资源目录（Agents 和 Runner 列表）、交付下载及 Server 的 rollout 读取。Cookie 写请求必须有匹配入口的 Origin 和 `X-Tend-Web: 1`。同步、上传、升级、原 Runner inspect 等运维接口只接受 Bearer。GET 和 HEAD 不改变会话或业务状态。
+普通 API 先检查显式 Authorization。存在但不合法即 401，绝不回退 Cookie。Cookie 只允许显式列出的 Chat 消息、Attention 和通知、Issue 读写（看板、详情、讨论、普通 Attention 回复及历史、启动、取消或重开）、独立讨论（含通过详情 PATCH 归档与恢复）、只读资源目录（Agents 和 Runner 列表）、交付下载及 Server 的 rollout 读取。Cookie 写请求必须有匹配入口的 Origin 和 `X-Tend-Web: 1`。同步、上传、升级、原 Runner inspect 等运维接口只接受 Bearer。GET 和 HEAD 不改变会话或业务状态。
 
 前端引导先读取会话状态。已登录 API 的 401 会结束当前前端会话、停止旧轮询并保留 URL，迟到的旧请求不结束新会话。403、Server 错误和断网不退出。退出成功后以 BroadcastChannel 通知同源标签取消旧检查并复查，尚未完成初始检查的标签也处理该通知。在途的手动登录尝试会被取消，迟到的会话确认不恢复登录或清除旧 key。没有 Web Locks 时仍遵循相同的取消规则。退化时使用无凭据 storage 事件与恢复焦点复查。旧 `tend.token.v1` 不参与自动登录，只有手动换取并确认 Cookie 可用后才清理本标签的旧 key。浏览器拒绝存储时显示恢复方法。
 

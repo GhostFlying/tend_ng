@@ -19,6 +19,7 @@ export type Discussion = {
   chat_id: string;
   title: string;
   updated_at: number;
+  archived: boolean;
 };
 export type DiscussionDetail = Discussion & {
   origin: { label: string; href: string } | null;
@@ -59,6 +60,8 @@ export type SendDraft = Draft & {
 const root = "/api/v1/discussions";
 export const discussionLink = (chat: string) =>
   `/discussions?chat=${encodeURIComponent(chat)}`;
+export const discussionIndexLink = (archived = false) =>
+  archived ? "/discussions?archived=true" : "/discussions";
 
 export class DiscussionError extends Error {
   constructor(
@@ -91,8 +94,10 @@ async function request<T>(
   return response.json() as Promise<T>;
 }
 
-export const listDiscussions = (signal: AbortSignal) =>
-  request<{ discussions: Discussion[] }>("", { signal });
+export const listDiscussions = (archived: boolean, signal: AbortSignal) =>
+  request<{ discussions: Discussion[] }>(archived ? "?archived=true" : "", {
+    signal,
+  });
 export const createDiscussion = (operation_id: string, origin?: Origin) =>
   request<{ chat_id: string }>("", {
     method: "POST",
@@ -102,6 +107,11 @@ export const readDiscussion = (chat: string, signal: AbortSignal) =>
   request<DiscussionDetail>(`/${chat}`, { signal });
 export const renameDiscussion = (chat: string, title: string) =>
   request(`/${chat}`, { method: "PATCH", body: { title } });
+export const setDiscussionArchived = (chat: string, archived: boolean) =>
+  request<{ chat_id: string; archived: boolean }>(`/${chat}`, {
+    method: "PATCH",
+    body: { archived },
+  });
 export const attachReference = (chat: string, source: Source) =>
   request<Reference>(`/${chat}/references`, { method: "POST", body: source });
 export const detachReference = (chat: string, id: string) =>
