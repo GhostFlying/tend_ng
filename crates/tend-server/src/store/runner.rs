@@ -40,6 +40,16 @@ pub fn create_tables(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn migrate_auto_assignment_order(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS runner_auto_assignment_order (
+            runner_id TEXT PRIMARY KEY NOT NULL REFERENCES runners(id),
+            last_selected INTEGER NOT NULL
+         );",
+    )?;
+    Ok(())
+}
+
 struct AvailableRunner {
     profile: RunnerProfile,
     last_seen: i64,
@@ -77,6 +87,39 @@ fn available_runners(db: &Connection, include_full: bool) -> Result<Vec<Availabl
         })
     })
     .collect()
+}
+
+#[derive(Clone, Copy)]
+struct RunnerLoad {
+    occupied: u64,
+    limit: u64,
+    last_selected: Option<i64>,
+}
+
+impl RunnerLoad {
+    fn read(db: &Connection, profile: &RunnerProfile) -> Result<Self> {
+        let (pending, last_selected) = db.query_row(
+            "SELECT (SELECT COUNT(*) FROM runner_assignments a
+                      WHERE a.runner_id = ?1 AND a.state IN ('reserved', 'issued')),
+                    (SELECT last_selected FROM runner_auto_assignment_order WHERE runner_id = ?1)",
+            [&profile.runner_id],
+            |row| Ok((row.get::<_, u32>(0)?, row.get(1)?)),
+        )?;
+        // Ordinary candidates have pending < available <= limit, so both
+        // the occupied count and limit fit in u32 before cross multiplication.
+        Ok(Self {
+            occupied: u64::from(profile.slot_limit - profile.available_for_assignment + pending),
+            limit: u64::from(profile.slot_limit),
+            last_selected,
+        })
+    }
+
+    fn precedes(self, other: Self) -> bool {
+        (self.occupied * other.limit)
+            .cmp(&(other.occupied * self.limit))
+            .then_with(|| self.last_selected.cmp(&other.last_selected))
+            .is_lt()
+    }
 }
 
 pub(super) fn assign_task(db: &Connection, task: &str) -> Result<()> {
@@ -118,11 +161,20 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
         [&dispatch.task_id],
         |row| row.get::<_, bool>(0),
     )?;
+    // The effective pin includes any existing Issue-tree binding. Shared
+    // reviews use separate capacity eligibility and are not first dispatches.
+    let balance = dispatch.parent_issue_id.is_none()
+        && pinned.is_none()
+        && previous.is_none()
+        && continuation.is_none()
+        && review.is_none();
+    let mut selected = None;
+    let mut lowest_load: Option<RunnerLoad> = None;
     for available in available_runners(db, review.is_some())? {
         if available.protocol < 2 && (dispatch.category == "review" || bound_author) {
             continue;
         }
-        let profile = available.profile;
+        let profile = &available.profile;
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
             continue;
         }
@@ -169,7 +221,7 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             params![dispatch.task_id, profile.runner_id], |row| row.get::<_, bool>(0),
         )? { continue; }
         let Some(agent) = protocol::matching_task_agent(
-            &profile,
+            profile,
             &dispatch.category,
             &dispatch.work,
             named.as_deref(),
@@ -177,6 +229,20 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
         .cloned() else {
             continue;
         };
+        if balance {
+            let load = RunnerLoad::read(db, profile)?;
+            if lowest_load.is_some_and(|best| !load.precedes(best)) {
+                continue;
+            }
+            lowest_load = Some(load);
+        }
+        selected = Some((available, agent));
+        if !balance {
+            break;
+        }
+    }
+    if let Some((available, agent)) = selected {
+        let profile = available.profile;
         let placement = Placement {
             assignment_id: protocol::new_id(),
             runner_id: profile.runner_id,
@@ -239,7 +305,14 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             "UPDATE task_controls SET assignment_id = ?2 WHERE task_id = ?1 AND state = 'pending' AND run_id IS NULL",
             params![assignment.task_id, assignment.placement.assignment_id],
         )?;
-        break;
+        if balance {
+            db.execute(
+                "INSERT INTO runner_auto_assignment_order (runner_id, last_selected)
+                 VALUES (?1, (SELECT coalesce(max(last_selected), 0) + 1 FROM runner_auto_assignment_order))
+                 ON CONFLICT(runner_id) DO UPDATE SET last_selected = excluded.last_selected",
+                [&assignment.placement.runner_id],
+            )?;
+        }
     }
     Ok(())
 }
@@ -677,6 +750,9 @@ fn assignments_to_send(
         .map(|contract| Ok(serde_json::from_str(&contract?)?))
         .collect()
 }
+
+#[cfg(test)]
+mod scheduling_tests;
 
 #[cfg(test)]
 mod tests {

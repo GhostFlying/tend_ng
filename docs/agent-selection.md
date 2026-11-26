@@ -8,7 +8,7 @@
 
 1. **Runner 上报具体配置。** 本机保存执行与访问配置，Server 从 Runner 上报构建清单。顶层 Issue 首次选择时，多台 Runner 提供的合格配置可以共同参与匹配。同名配置有差异时按 Runner 和配置区分。
 2. **派发方提交任务要求。** 顶层 Issue 的协调派发携带目标、约束及已知的工作要求。实际使用 repo 或既有 workspace 的子 Issue 填写相应条件。用 `category` 表达用途和配置的默认选择，用 `required_capabilities` 提出实际必需的能力。用户明确指名时保留原选择及其来源。
-3. **Server 分配。** 在允许调度的 Runner 上，核对角色对应的 category、实际派发所需的 repo 或 workspace、必需能力、具名选择及可用容量。自动派发按配置的默认顺序在合格候选中选择。Server 持久记录实际分配与配置版本。Runner 接收时核对本机条件，无法满足时保留具体原因。
+3. **Server 分配。** 在允许调度的 Runner 上，核对角色对应的 category、实际派发所需的 repo 或 workspace、必需能力、具名选择及可用容量。选定 Runner 后，按配置的默认顺序选择合格的 Agent，或使用指名的 Agent。Server 持久记录实际分配与配置版本。Runner 接收时核对本机条件，无法满足时保留具体原因。
 
 候选查询可以按这项任务筛选，只提供会影响选择的名字、用途、模型、effort、能力及可用状态。派发方通过本机工具读取最近同步的清单，Server 落实分配时核对当前事实。执行端也可通过工具本地受理按要求派发，由 Server 应用时选择执行配置。Agent 的操作范围按实际角色和已领取的 Issue 校验。
 
@@ -17,6 +17,10 @@
 ## 顶层 Issue 首次选 Runner
 
 **已确认。** Router 在顶层派发时带上已经明确必需的 repo 和 capability。Server 在提供 `issue-router` 的 Runner 中筛选同时能访问全部所需 repo、且具备对应工作配置的候选。`image_gen` 等工作能力按该 Runner 上符合用途的具名 Agent 配置核对。例如工作需要 repo X 和 Y，Runner B 能同时访问两仓并有合适的配置，就可以成为候选。
+
+对于未显式指定 Runner、没有前序 Task 或既有 Runner 归属的顶层 Issue 首次派发，Server 在满足全部资格的候选中选占用比例最低的 Runner。占用数等于最新上报的 `slot_limit - available_for_assignment`，再加上 Server 尚未收到领取结论的 `reserved` 和 `issued` 分配数。以 `slot_limit` 为分母。预留数达到上报的可接单容量时，该 Runner 不参与首次派发。
+
+比例相同时，优先选择最久未获此类自动预分配的 Runner。没有这类记录时优先，仍并列才按 Runner ID。轮换顺序与预分配同一事务持久化，跨 Server 重启保留。显式指定 Runner、子 Issue、已绑定接续和交接不参与轮换，继续沿原选择和归属调度。
 
 尚未明确的要求在具体子 Issue 派发时核对。领取后新增工作能力要求时，仍在所属 Runner 上匹配。缺少合格工作配置时，保留原派发的待分配状态，并让派发方看到缺少的能力。 [绑定后新增能力的 TODO](design-questions.md#todo-绑定后缺少必需能力)
 
