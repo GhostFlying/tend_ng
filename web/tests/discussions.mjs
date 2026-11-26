@@ -45,6 +45,25 @@ async function shoot(page, name) {
   await page.screenshot({ path: join(output, `${name}.png`), scale: "css" });
 }
 
+async function createOne(page, activate) {
+  const before = new Set(cliList().map(({ chat_id }) => chat_id));
+  const previous = new URL(page.url()).searchParams.get("chat");
+  await activate();
+  await page.waitForURL(
+    (url) =>
+      url.pathname === "/discussions" &&
+      url.searchParams.has("chat") &&
+      url.searchParams.get("chat") !== previous,
+  );
+  const chat = new URL(page.url()).searchParams.get("chat");
+  assert.ok(chat && !before.has(chat));
+  assert.deepEqual(
+    new Set(cliList().map(({ chat_id }) => chat_id)),
+    new Set([...before, chat]),
+  );
+  return chat;
+}
+
 try {
   for (const [name, viewport] of Object.entries({
     desktop: { width: 1440, height: 960 },
@@ -86,8 +105,22 @@ try {
     const menu = page.getByRole("navigation", {
       name: name === "mobile" ? "手机导航" : "主导航",
     });
-    await menu.getByRole("link", { name: "讨论", exact: true }).click();
-    assert.equal(new URL(page.url()).pathname, "/discussions");
+    const directory = menu.getByRole("link", { name: "讨论", exact: true });
+    const navCreate = menu.getByRole("button", {
+      name: "新建讨论",
+      exact: true,
+    });
+    const beforeNavigation = cliList();
+    if (name === "desktop") {
+      // The shortcut works globally and doesn't wait for hover or the list.
+      await visible(navCreate);
+      await directory.click();
+    } else {
+      assert.equal(await navCreate.count(), 0);
+      await directory.tap();
+    }
+    await page.waitForURL(`${base}/discussions`);
+    assert.deepEqual(cliList(), beforeNavigation);
     assert.match(await page.title(), /Tend/i);
     const main = page.getByRole("main");
     const currentList = main.getByRole("list", {
@@ -120,12 +153,100 @@ try {
       await visible(sidebarList.locator(`a[href="${legacyHref}"]`));
       assert.equal(await sidebarList.getByRole("button").count(), 0);
       assert.equal(await sidebarList.locator("[aria-current]").count(), 0);
+      assert.equal(await directory.getAttribute("href"), "/discussions");
+      assert.equal(await directory.getAttribute("aria-current"), "page");
+      assert.equal(
+        await create.evaluate((button) => {
+          const link = button.previousElementSibling;
+          if (link?.tagName !== "A") return false;
+          const a = link.getBoundingClientRect();
+          const b = button.getBoundingClientRect();
+          return a.right <= b.left && a.top === b.top && a.height === b.height;
+        }),
+        true,
+        "the plus has its own target directly to the right of the link",
+      );
+      assert.equal(await create.textContent(), "+");
+      assert.equal(await create.getAttribute("aria-label"), "新建讨论");
+      await page.mouse.move(0, 0);
+      const bounds = await create.boundingBox();
+      assert.ok(bounds && bounds.width >= 40 && bounds.height >= 40);
+      const background = () =>
+        create.evaluate(
+          (button) => globalThis.getComputedStyle(button).backgroundColor,
+        );
+      assert.equal(await background(), "rgba(0, 0, 0, 0)");
+      assert.equal(
+        await create.evaluate(
+          (button) => globalThis.getComputedStyle(button).opacity,
+        ),
+        "1",
+      );
+      await create.hover();
+      assert.notEqual(await background(), "rgba(0, 0, 0, 0)");
+      await page.mouse.move(0, 0);
+      await directory.focus();
+      await page.keyboard.press("Tab");
+      assert.equal(
+        await create.evaluate((button) => {
+          const style = globalThis.getComputedStyle(button);
+          return (
+            button.matches(":focus-visible") &&
+            style.outlineStyle === "solid" &&
+            parseFloat(style.outlineWidth) >= 2
+          );
+        }),
+        true,
+      );
+      const keyboardChat = await createOne(page, () =>
+        page.keyboard.press("Enter"),
+      );
+      await visible(
+        sidebarList.locator(
+          `a[href="/discussions?chat=${keyboardChat}"][aria-current="page"]`,
+        ),
+      );
+      await create.focus();
+      await page.keyboard.press("Shift+Tab");
+      assert.equal(
+        await directory.evaluate((link) => link === document.activeElement),
+        true,
+      );
+      const beforeEnter = cliList();
+      await page.keyboard.press("Enter");
+      await page.waitForURL(`${base}/discussions`);
+      assert.deepEqual(cliList(), beforeEnter);
+      await visible(
+        sidebarList.locator(`a[href="/discussions?chat=${keyboardChat}"]`),
+      );
+      assert.ok(
+        (await sidebarList
+          .getByRole("link", { name: "未命名讨论", exact: true })
+          .count()) >= 2,
+      );
+      await shoot(page, "discussion-desktop-directory");
+
+      // The narrow icon rail keeps the existing directory action.
+      await page.setViewportSize({ width: 900, height: 844 });
+      assert.equal(await navCreate.count(), 0);
+      await visible(
+        main.getByRole("button", { name: "新建讨论", exact: true }),
+      );
+      await page.setViewportSize(viewport);
+
+      await directory.focus();
+      await page.keyboard.press("Tab");
+      assert.equal(
+        await create.evaluate((button) => button === document.activeElement),
+        true,
+      );
+      await createOne(page, () => page.keyboard.press("Space"));
     }
     if (name === "mobile") await shoot(page, "discussion-mobile-directory");
-    await create.click();
-    await page.waitForURL(/\/discussions\?chat=[a-zA-Z0-9_-]+$/);
+    const chat = await createOne(page, () =>
+      name === "mobile" ? create.tap() : create.click(),
+    );
     const discussion = page.url();
-    const chat = new URL(discussion).searchParams.get("chat");
     assert.notEqual(
       new URL(discussion).search,
       new URL(legacyHref, base).search,
@@ -143,6 +264,11 @@ try {
         new URL(discussion).pathname + new URL(discussion).search,
       );
       assert.equal(await menu.locator('[aria-current="page"]').count(), 1);
+      assert.ok(
+        (await sidebarList
+          .getByRole("link", { name: "未命名讨论", exact: true })
+          .count()) >= 2,
+      );
     }
     await shoot(page, `discussion-${name}-empty`);
     await page.getByRole("button", { name: "改标题" }).click();
@@ -250,6 +376,18 @@ try {
     assert.deepEqual((await archiveRequest).postDataJSON(), { archived: true });
     await page.waitForURL(`${base}/discussions`);
     await visible(legacyLink);
+    if (name === "desktop") {
+      await visible(sidebarList.locator(`a[href="${legacyHref}"]`));
+      assert.equal(
+        await sidebarList
+          .locator(`a[href="/discussions?chat=${chat}"]`)
+          .count(),
+        0,
+      );
+      assert.equal(await sidebarList.locator("[aria-current]").count(), 0);
+      assert.equal(await directory.getAttribute("aria-current"), "page");
+      await visible(navCreate);
+    }
     assert.equal(
       await currentList.getByRole("link", { name: new RegExp(title) }).count(),
       0,
@@ -363,7 +501,7 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS discussion desktop and mobile Chromium, separate create and selection, BFCache Back, live Web/CLI archive and restore, references, draft, explicit send and bidirectional links",
+    "PASS discussion desktop and mobile Chromium, separate navigation and creation with mouse, keyboard and touch, hover and focus, unique selection, BFCache Back, live Web/CLI archive and restore, references, draft, explicit send and bidirectional links",
   );
 } finally {
   await browser.close();

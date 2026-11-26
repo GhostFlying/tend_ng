@@ -158,6 +158,43 @@ a {
   height: 18px;
   flex: none;
 }
+.discussion-nav-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 4px;
+}
+.discussion-nav-create {
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 20px;
+  line-height: 1;
+}
+.discussion-nav-create:hover,
+.discussion-nav-create:focus-visible {
+  background: var(--active);
+  color: var(--label);
+}
+.discussion-nav-create:focus-visible {
+  outline-offset: -2px;
+}
+.discussion-nav-error {
+  grid-column: 1 / -1;
+  padding: 4px 12px;
+}
+
+@media (max-width: 1023px) {
+  .discussion-nav-create,
+  .discussion-nav-error {
+    display: none;
+  }
+}
 
 .content {
   display: flex;

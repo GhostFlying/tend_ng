@@ -5,6 +5,7 @@ import { allowsWebLogin } from "./webSession";
 import { useWebSession } from "./useWebSession";
 import { IssueBoard } from "./IssueBoard";
 import { Chat } from "./Chat";
+import { DiscussionStart } from "./DiscussionStart";
 import { Notifications } from "./Notifications";
 import { Agents, Hosts } from "./Resources";
 import {
@@ -171,14 +172,19 @@ function App() {
               <NavIcon name="chat" />
               <span>对话</span>
             </a>
-            <a
-              href="/discussions"
-              aria-current={discussions && !discussionChat ? "page" : undefined}
-              aria-label="讨论"
-            >
-              <NavIcon name="discussion" />
-              <span>讨论</span>
-            </a>
+            <div className="discussion-nav-row">
+              <a
+                href="/discussions"
+                aria-current={
+                  discussions && !discussionChat ? "page" : undefined
+                }
+                aria-label="讨论"
+              >
+                <NavIcon name="discussion" />
+                <span>讨论</span>
+              </a>
+              <DiscussionStart sidebar />
+            </div>
             {discussions && (
               <Suspense fallback={null}>
                 <DiscussionSidebar chat={discussionChat} />

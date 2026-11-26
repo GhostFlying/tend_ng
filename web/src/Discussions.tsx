@@ -84,7 +84,6 @@ export function DiscussionSidebar({ chat }: { chat: string | null }) {
   }
   return (
     <div className="discussion-sidebar-items">
-      <DiscussionStart compact />
       {!!recent.length && (
         <div className="discussion-sidebar-history">
           <h2>最近讨论</h2>

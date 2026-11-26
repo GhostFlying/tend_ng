@@ -6,9 +6,11 @@ import type { Origin } from "./discussionApi";
 export function DiscussionStart({
   origin,
   compact = false,
+  sidebar = false,
 }: {
   origin?: Origin;
   compact?: boolean;
+  sidebar?: boolean;
 }) {
   const id = useRef<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -26,22 +28,32 @@ export function DiscussionStart({
       setBusy(false);
     }
   }
-  return (
-    <span className="discussion-start">
+  const action = (
+    <>
       <button
         type="button"
-        className={`primary${compact ? " discussion-start-sidebar" : ""}`}
+        className={
+          sidebar
+            ? "discussion-nav-create"
+            : `primary${compact ? " discussion-start-sidebar" : ""}`
+        }
+        aria-label={sidebar ? "新建讨论" : undefined}
+        title={sidebar ? "新建讨论" : undefined}
         disabled={busy}
         onClick={() => void open()}
       >
         {!origin && <span aria-hidden="true">+</span>}
-        {busy ? "正在新建…" : origin ? "带入讨论" : "新建讨论"}
+        {!sidebar && (busy ? "正在新建…" : origin ? "带入讨论" : "新建讨论")}
       </button>
       {error && (
-        <small className="error" role="alert">
+        <small
+          className={sidebar ? "error discussion-nav-error" : "error"}
+          role="alert"
+        >
           {error}
         </small>
       )}
-    </span>
+    </>
   );
+  return sidebar ? action : <span className="discussion-start">{action}</span>;
 }

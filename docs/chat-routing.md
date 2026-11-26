@@ -128,7 +128,7 @@ Issue 详情也可逐项回答已在原 Chat 发布、仍待用户回答且原 T
 
 Web 的「讨论」入口打开 `/discussions`，单个讨论使用 `/discussions?chat=<id>`。可从空白创建，或从主 Chat 选一条原消息、从 Issue 选一个明确来源来创建。标题及来源属于讨论，历史、原生 thread 和输入回执独立绑定该 Chat ID。现有普通 Chat 和 Issue Chat 的历史、收件及派发范围不变。
 
-侧栏「+ 新建讨论」是独立操作，与最近讨论列表分开，仅当前未归档会话在侧栏标记选中。桌面及移动端都可从讨论首页新建，或切换到「已归档」列表（`/discussions?archived=true`）。未指定标题时显示「未命名讨论」，显式标题不按文字值改写。
+完整桌面侧栏在「讨论」导航右侧提供独立的「新建讨论」加号。窄窗和移动端从讨论首页新建。仅当前未归档会话在侧栏最近讨论中标记选中。讨论首页可切换到「已归档」列表（`/discussions?archived=true`）。未指定标题时显示「未命名讨论」，显式标题不按文字值改写。
 
 `GET /api/v1/discussions` 默认返回未归档讨论。使用 `?archived=true` 仅返回已归档讨论，`?archived=false` 等同默认。列表和详情返回布尔 `archived`。`PATCH /api/v1/discussions/<id>` 接受单独的 `{"archived":true}` 或 `{"archived":false}`，并返回 `chat_id` 和当前设置的 `archived`。改标题继续使用单独的 `{"title":"…"}`。同一设置可重试，不改变活动时间。Web 与 CLI 使用同一接口。
 

@@ -1,6 +1,4 @@
 .discussion-sidebar-items {
-  display: grid;
-  gap: 12px;
   padding: 6px 0 10px 12px;
   min-width: 0;
 }
