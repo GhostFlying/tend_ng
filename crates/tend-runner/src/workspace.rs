@@ -192,33 +192,59 @@ pub fn branches(run: &LocalRun, cwd: &Path) -> Vec<protocol::WorkBranch> {
             let path = cwd.join("repos").join(component(&repo.id));
             let branch = git(&path, &["symbolic-ref", "--quiet", "--short", "HEAD"]).ok()?;
             let origin = git(&path, &["config", "--get", "remote.origin.url"]).ok()?;
-            let repository = protocol::github_repository(&origin)?;
+            let (provider, repository) = [
+                protocol::PullProvider::GitHub,
+                protocol::PullProvider::Codebase,
+            ]
+            .into_iter()
+            .find_map(|provider| provider.repository(&origin).map(|repo| (provider, repo)))?;
             let branch_remote_key = format!("branch.{branch}.pushRemote");
             let branch_remote = format!("branch.{branch}.remote");
             let preferred = git(&path, &["config", "--get", &branch_remote_key])
                 .or_else(|_| git(&path, &["config", "--get", "remote.pushDefault"]))
                 .or_else(|_| git(&path, &["config", "--get", &branch_remote]))
                 .unwrap_or_else(|_| "origin".to_owned());
-            let push = git(
-                &path,
-                &["config", "--get", &format!("remote.{preferred}.pushurl")],
-            )
-            .or_else(|_| {
-                git(
+            let head_repository = if provider == protocol::PullProvider::Codebase {
+                codebase_push_repository(&path, &preferred)?
+            } else {
+                let push = git(
                     &path,
-                    &["config", "--get", &format!("remote.{preferred}.url")],
+                    &["config", "--get", &format!("remote.{preferred}.pushurl")],
                 )
-            })
-            .ok()?;
-            let head_repository = protocol::github_repository(&push)?;
+                .or_else(|_| {
+                    git(
+                        &path,
+                        &["config", "--get", &format!("remote.{preferred}.url")],
+                    )
+                })
+                .ok()?;
+                provider.repository(&push)?
+            };
             Some(protocol::WorkBranch {
                 repo_id: repo.id.clone(),
+                provider,
                 repository,
                 head_repository,
                 branch,
             })
         })
         .collect()
+}
+
+fn codebase_push_repository(path: &Path, remote: &str) -> Option<String> {
+    // Git expands insteadOf / pushInsteadOf and returns every effective
+    // destination. No single raw config value is sufficient for discovery.
+    let urls = git(
+        path,
+        &["remote", "get-url", "--push", "--all", "--", remote],
+    )
+    .ok()?;
+    let provider = protocol::PullProvider::Codebase;
+    let mut repositories = urls.lines().map(|url| provider.repository(url));
+    let first = repositories.next()??;
+    repositories
+        .all(|repo| repo.as_deref() == Some(first.as_str()))
+        .then_some(first)
 }
 
 fn prepare_repository(

@@ -196,7 +196,7 @@ if role == "parent":
             "category": "implementation", "required_capabilities": ["image_gen"]}
     if scenario == "issue-attention":
         args.update(title="撰写示例指南", objective="确认篇幅和语言后整理使用说明。")
-    if scenario == "pull-board":
+    if scenario in {"pull-board", "codebase-pull"}:
         args.update(title="核对安装步骤", objective="准备可用的安装说明。")
     if scenario == "native-review":
         found = tool("tend_agent_candidates", {"category": "implementation", "required_capabilities": ["image_gen"]},
@@ -256,12 +256,16 @@ elif role == "child":
         assert tool("tend_find_pull_request", {}, "repeat-find-pr", "find-pr") == requested
         (root / "find-pull.json").write_text(json.dumps(requested))
         gate("finish-work")
-    elif scenario == "pull-board":
+    elif scenario in {"pull-board", "codebase-pull"}:
         assert "tend_link_pull_request" in tools
-        args = {"url": "https://github.com/Example/Guide/pull/73/"}
+        url = ("https://code.byted.org/example/guide/merge_requests/73/?tab=changes"
+               if scenario == "codebase-pull" else "https://github.com/Example/Guide/pull/73/")
+        args = {"url": url}
         attached = tool("tend_link_pull_request", args, "attach-pr", "attach-pr")
         assert tool("tend_link_pull_request", args, "replay-pr", "attach-pr") == attached
         (root / "pull-link.json").write_text(json.dumps(attached))
+        if scenario == "codebase-pull":
+            gate("finish-work")
     elif scenario == "issue-attention":
         questions = [
             "示例指南要采用精简版还是完整版？",
@@ -317,7 +321,7 @@ elif role == "child":
         tool("tend_close_issue", {"summary": "The draft guide is ready."}, "close-child", "child-close")
         # Keep the only slot until both facts are queued for the original parent Task.
         gate("finish-stage-child")
-    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "native-review"}:
+    if scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "codebase-pull", "pull-discovery", "native-review"}:
         tool("tend_close_issue", {"summary": "The requested guide is ready."}, "close-child", "child-close")
 elif role == "other-work":
     if assignment["work"]["title"] == "Isolated B":
@@ -509,7 +513,7 @@ else:
             args["answer"] = "精简版"
         accepted = tool(name, args, "route-question", "route-question")
         assert tool(name, args, "replay-question", "route-question") == accepted
-    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "pull-discovery", "external-wait", "native-review"}:
+    elif attention or scenario in {"explicit-close", "late-close", "parent-failed", "delivery", "pull-board", "codebase-pull", "pull-discovery", "external-wait", "native-review"}:
         assert result["kind"] == "issue_closed"
         assert result["summary"] == "The requested guide is ready."
     elif scenario == "no-candidate":

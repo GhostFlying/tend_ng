@@ -63,8 +63,8 @@ def main():
             wait_for(lambda: sql("SELECT COUNT(*) FROM external_route_deliveries"), lambda rows: rows == [(2,)])
             [[batch, due]] = sql("SELECT id,due_at FROM external_route_batches WHERE released_at IS NULL")
             assert due > 0 and sql("SELECT COUNT(*) FROM router_inputs WHERE external_batch IS NOT NULL") == [(0,)]
-            sql("UPDATE github_pulls SET due_at = 0 WHERE number = 82")
-            wait_for(lambda: sql("SELECT due_at > unixepoch() FROM github_pulls WHERE number = 82"),
+            sql("UPDATE pulls SET due_at = 0 WHERE number = 82")
+            wait_for(lambda: sql("SELECT due_at > unixepoch() FROM pulls WHERE number = 82"),
                      lambda rows: rows == [(1,)])
             assert sql("SELECT COUNT(*) FROM external_route_deliveries") == [(2,)]
             assert sql("SELECT id,due_at FROM external_route_batches") == [(batch, due)]
@@ -84,8 +84,8 @@ def main():
             require(topic, 82, "ci", "success", "pinned-head", head_sha="b" * 40,
                     check="build-linux", run_id="13")
             (root / "wait-mode").write_text("advanced")
-            sql("UPDATE github_pulls SET due_at = 0 WHERE number = 82")
-            wait_for(lambda: sql("SELECT json_extract(facts, '$.head_sha') FROM github_pulls WHERE number = 82"),
+            sql("UPDATE pulls SET due_at = 0 WHERE number = 82")
+            wait_for(lambda: sql("SELECT json_extract(facts, '$.head_sha') FROM pulls WHERE number = 82"),
                      lambda rows: rows == [("c" * 40,)])
             routed = sql("SELECT d.route_id, f.fact FROM external_route_deliveries d "
                          "JOIN external_facts f ON f.id = d.fact_id WHERE d.batch_id != ?", batch)

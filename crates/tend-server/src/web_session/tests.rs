@@ -135,6 +135,7 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     drop(Store::initialize(&path)?);
     let sql = Connection::open(&path)?;
     // Roll back later schemas without recreating the v29 reply table.
+    crate::store::pull::restore_legacy_schema(&sql)?;
     sql.execute_batch(
         "DROP TABLE discussion_handoffs;
          DROP TABLE discussion_drafts;

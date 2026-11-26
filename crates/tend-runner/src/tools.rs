@@ -32,14 +32,14 @@ pub fn catalogue(category: &str, proposal_approval: bool) -> (&'static str, Vec<
     let link_pull = json!({
         "type": "function",
         "name": LINK_PULL,
-        "description": "Save a GitHub pull request URL against this Issue. The receipt means the Runner accepted the link for synchronization.",
+        "description": "Save a GitHub PR or Codebase MR URL against this Issue. The receipt means the Runner accepted the link for synchronization.",
         "inputSchema": {"type": "object", "properties": {"url": {"type": "string"}},
                         "required": ["url"], "additionalProperties": false}
     });
     let find_pull = json!({
         "type": "function",
         "name": FIND_PULL,
-        "description": "Queue a GitHub pull request lookup for a recorded work branch in this Issue tree. Defaults to the current Task.",
+        "description": "Queue a GitHub PR or Codebase MR lookup for a recorded work branch in this Issue tree. Defaults to the current Task.",
         "inputSchema": {"type": "object", "properties": {"task_id": {"type": "string"}},
                         "additionalProperties": false}
     });
@@ -493,8 +493,8 @@ pub fn action(
         LINK_PULL => {
             let pull = call.arguments["url"]
                 .as_str()
-                .and_then(protocol::GitHubPull::parse)
-                .ok_or_else(|| anyhow::anyhow!("Use a GitHub pull request URL"))?;
+                .and_then(protocol::PullRef::parse)
+                .ok_or_else(|| anyhow::anyhow!("Use a GitHub PR or Codebase MR URL"))?;
             Ok(WorkAction::LinkPull { url: pull.url() })
         }
         POST => {

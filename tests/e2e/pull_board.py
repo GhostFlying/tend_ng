@@ -100,7 +100,7 @@ def main():
                 # A new provider failure keeps the last verified state for both associations.
                 (root / "deny-73").touch()
                 with sqlite3.connect(root / "server.sqlite") as database:
-                    database.execute("UPDATE github_pulls SET due_at = 0 WHERE url = ?", [PULL])
+                    database.execute("UPDATE pulls SET due_at = 0 WHERE url = ?", [PULL])
                 observed = wait_for(lambda: links(child)[PULL], lambda link: link["observation_error"])
                 assert observed["facts"] == latest["facts"]
                 assert observed["observed_at"] == latest["observed_at"]

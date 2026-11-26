@@ -44,9 +44,9 @@ def main():
             log = root / "github-reads"
             before = len(log.read_text().splitlines()) if log.exists() else 0
             mode.write_text(observe)
-            sql("server", "UPDATE github_pulls SET due_at = 0 WHERE url = ?", PULL)
+            sql("server", "UPDATE pulls SET due_at = 0 WHERE url = ?", PULL)
             wait_for(lambda: len(log.read_text().splitlines()), lambda count: count > before)
-            wait_for(lambda: sql("server", "SELECT due_at > unixepoch() FROM github_pulls WHERE url = ?", PULL),
+            wait_for(lambda: sql("server", "SELECT due_at > unixepoch() FROM pulls WHERE url = ?", PULL),
                      lambda rows: rows == [(1,)])
 
         with server(server_bin, root, server_env, listen=addr, github_cli=TESTS / "fixtures/github_cli.py"):

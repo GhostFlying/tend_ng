@@ -1,6 +1,8 @@
 use super::Store;
 use anyhow::Result;
-use protocol::{BranchResult, FindPull, GitHubPull, PullDiscovery, RunObservation, WorkBranch};
+use protocol::{
+    BranchResult, FindPull, PullDiscovery, PullProvider, PullRef, RunObservation, WorkBranch,
+};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub enum Accepted {
@@ -94,10 +96,10 @@ pub fn queue_automatic(db: &Connection, observation: &RunObservation) -> Result<
     let Some(issue) = issue else { return Ok(()) };
     let mut pending = Vec::new();
     let mut known = db.prepare(
-        "SELECT EXISTS(SELECT 1 FROM issue_pulls link JOIN github_pulls p ON p.url = link.url
+        "SELECT EXISTS(SELECT 1 FROM issue_pulls link JOIN pulls p ON p.url = link.url
            WHERE link.issue_id = ?1 AND p.repository = ?2
              AND json_extract(p.facts, '$.head_repository') = ?3
-             AND json_extract(p.facts, '$.head_branch') = ?4)",
+             AND json_extract(p.facts, '$.head_branch') = ?4 AND p.provider = ?5)",
     )?;
     for branch in &observation.branches {
         if !known.query_row(
@@ -105,7 +107,8 @@ pub fn queue_automatic(db: &Connection, observation: &RunObservation) -> Result<
                 issue,
                 branch.repository,
                 branch.head_repository,
-                branch.branch
+                branch.branch,
+                branch.provider.as_str(),
             ],
             |row| row.get::<_, bool>(0),
         )? {
@@ -193,10 +196,16 @@ impl Store {
         Ok(Some(discoveries))
     }
 
-    pub fn pending_discovery(&self) -> Result<Option<Pending>> {
+    pub fn pending_discovery(&self, worker: PullProvider) -> Result<Option<Pending>> {
+        // Mixed jobs settle as one receipt on the Codebase worker. Legacy jobs
+        // omit provider and keep the same GitHub worker ordering.
         let row = self.db.query_row(
-            "SELECT operation_id, issue_id, branches FROM pull_discoveries WHERE state = 'pending' ORDER BY rowid LIMIT 1",
-            [],
+            "SELECT operation_id, issue_id, branches FROM pull_discoveries
+             WHERE state = 'pending' AND ?1 = EXISTS (
+                 SELECT 1 FROM json_each(branches) WHERE json_extract(value, '$.provider') = 'codebase'
+             )
+             ORDER BY rowid LIMIT 1",
+            [worker == PullProvider::Codebase],
             |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?)),
         ).optional()?;
         row.map(|(id, issue, branches)| {
@@ -214,7 +223,7 @@ impl Store {
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for result in results {
-            if let Some(pull) = result.url.as_deref().and_then(GitHubPull::parse) {
+            if let Some(pull) = result.url.as_deref().and_then(PullRef::parse) {
                 super::pull::bind(&tx, &request.issue, &pull)?;
             }
         }

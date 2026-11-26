@@ -17,6 +17,9 @@ const issue: BoardIssue = {
   pulls: [
     {
       number: 73,
+      provider: "github",
+      repository: "example/demo-web",
+      observed_at: 1234,
       url: "https://github.com/example/demo-web/pull/73",
       facts: { state: "closed", draft: false, ci: "success" },
       observation_error: null,
@@ -29,7 +32,7 @@ describe("board card status", () => {
     const html = renderToStaticMarkup(<Card issue={issue} />);
 
     expect(html).not.toMatch(
-      /board-card-state|board-attention|board-pull-status|待你决定|2 项运行中|已关闭|CI 通过/,
+      /board-card-state|board-attention|pull-status|待你决定|2 项运行中|已关闭|CI 通过/,
     );
     expect(html).toContain('href="/issues/42">#42 示例卡片</a>');
     expect(html).toContain("demo-web · demo-api");

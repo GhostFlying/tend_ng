@@ -7,7 +7,7 @@
 - **调用和身份。** 注入工具声明可执行的业务动作与参数。运行 Agent 的实例根据原生调用和持久化的执行关联确认角色及责任归属，Server 应用时校验实际来源及目标。用户 CLI 提供帮助和结构化输出。
 - **短 Skill。** Router 读取相关工作、派发顶层 Issue，并代理主 Chat 的答复、回报和 Attention。Issue Agent 委派工作子 Issue，转交原输入、跟进交付和结案，并向 Router 上报。Work Agent 记录工作事实、提交产物、结算自己的子 Issue，对 PR / CI 使用带明确条件的 `subscribe` 或 `waitfor`。Review Agent 提交所审范围和发现。Skill 讲清怎样操作及怎样拿到回执。Runner 随原生回合载入对应的短指引。 [Issue Agent](roles/issue-agent.md) · [Work Agent](roles/work-agent.md) · [Review Agent](roles/review-agent.md)
 - **工作目录。** Issue Agent 在拆分时按需为子 Issue 指定独立 worktree。Work Agent 使用分配的目录，如需独立 worktree 先向上级提出，日常 Git 操作遵循项目约定。 [Workspace 分配](server-runner.md#workspace-分配)
-- **PR 关联。** Agent 可以登记本次工作的 PR URL，也可以引用已有 Task 或 worktree 发起分支补查。两种操作都沿目标 Issue 保存关联，并沿原操作 ID 查询结果。 [PR 与 Issue 关联](design.md#pr-与-issue-关联)
+- **PR 关联。** Agent 可以登记本次工作的 GitHub PR 或 Codebase MR URL，也可以引用已有 Task 或 worktree 发起分支补查。两种操作都沿目标 Issue 保存关联，并沿原操作 ID 查询结果。 [PR 与 Issue 关联](design.md#pr-与-issue-关联)
 - **信息来源。** Router 在 Server 本地查询 Issue 及其持久关联记录。Runner 上的 Agent 断线时可读随输入带来的工作快照和本地回执。若需要最新的 Server 事实，查询可以异步提交，并按原请求读取结果。工具结果标明事实的来源和待同步状态。
 - **逐级上报。** Agent 可以沿 Issue 的委派关系上报具体问题，附原 Issue、已有证据和影响。Issue Agent 用 `tend_answer_child_attention` 回答权限内的子问题。确需用户决定时，用 `tend_escalate_attention` 传原 `attention_id`，原问题保持未答，Router 沿原 ID 发布。只有 Issue Agent 自己的新问题才用 `tend_request_attention`。顶层交付仍由 Router 在原 Chat 回报。 [逐级上报与用户决策](chat-routing.md#逐级上报与用户决策)
 - **取消转达。** Agent 依据原取消范围向自己委派的子项传达取消，使用工具向明确的 Task 提交停止控制，并按原操作查询受理、送达及实际停妥证据。 [取消与逐级停止](task-lifecycle.md#取消与逐级停止)

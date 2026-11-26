@@ -6,10 +6,10 @@ import {
   issueStageLabels,
   issueTitle,
   markdownPreviewLimit,
-  pullLinkLabel,
   readArtifactMarkdown,
   readIssueOverview,
 } from "./api";
+import { PullAssociation, pullSectionTitle } from "./PullAssociation";
 import type {
   IssueDelivery,
   IssueDeliveryReport,
@@ -524,13 +524,11 @@ function IssueProperties({ data }: { data: IssueOverviewData }) {
       </dl>
       {data.pulls.length > 0 && (
         <section>
-          <h3>关联 PR</h3>
+          <h3>{pullSectionTitle(data.pulls)}</h3>
           <ul>
             {data.pulls.map((pull) => (
               <li key={pull.url}>
-                <a href={pull.url} target="_blank" rel="noreferrer">
-                  {pullLinkLabel(pull)}
-                </a>
+                <PullAssociation pull={pull} />
               </li>
             ))}
           </ul>

@@ -50,8 +50,11 @@ export type AgentDirectory = {
 
 export type PullLink = {
   url: string;
+  provider: "github" | "codebase";
+  repository: string;
   number: number;
   facts: { state: string; draft: boolean; ci: string | null } | null;
+  observed_at: number | null;
   observation_error: string | null;
 };
 
@@ -251,14 +254,6 @@ export function issueLink(id: string, number?: number) {
 
 export function issueTitle(title: string, number?: number) {
   return number === undefined ? title : `#${number} ${title}`;
-}
-
-export function pullLinkLabel(pull: PullLink) {
-  const repository = new URL(pull.url).pathname
-    .split("/")
-    .slice(1, 3)
-    .join("/");
-  return `${repository} #${pull.number}`;
 }
 
 function messagePath(issue?: string, chat = "main") {

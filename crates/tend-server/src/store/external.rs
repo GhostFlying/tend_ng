@@ -57,7 +57,7 @@ pub fn register(
     let Some(pull) = GitHubPull::parse(&condition.url) else {
         return Ok(());
     };
-    super::pull::ensure_observed(db, &pull)?;
+    super::pull::ensure_observed(db, &(&pull).into())?;
     let mode_name = match mode {
         WatchMode::Optional => "optional",
         WatchMode::Required => "required",
@@ -75,7 +75,7 @@ pub fn register(
     };
     let mut statement = db.prepare(
         "SELECT f.id, f.fact, f.error FROM external_latest l JOIN external_facts f ON f.id = l.fact_id
-         JOIN github_pulls p ON p.url = l.url AND l.url = ?1
+         JOIN pulls p ON p.url = l.url AND l.url = ?1
          WHERE f.error IS NOT NULL OR (p.observation_error IS NULL
            AND (?2 IS NOT NULL OR json_extract(f.fact, '$.head_sha') = json_extract(p.facts, '$.head_sha')))
          ORDER BY f.rowid DESC",
@@ -98,7 +98,7 @@ pub fn register(
     }
     // A watch on an older head or on a completed PR can still require an observation.
     db.execute(
-        "UPDATE github_pulls SET due_at = unixepoch() WHERE url = ?1
+        "UPDATE pulls SET due_at = unixepoch() WHERE url = ?1
          AND (due_at IS NULL OR due_at > unixepoch())",
         [&condition.url],
     )?;

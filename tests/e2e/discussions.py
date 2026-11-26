@@ -275,6 +275,13 @@ def main():
         sql(db, "CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id)")
         sql(db, "UPDATE discussions SET title='新讨论' WHERE chat_id=?", unnamed)
         sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
+        sql(db, "DROP INDEX pulls_due")
+        sql(db, "ALTER TABLE pulls DROP COLUMN provider")
+        sql(db, "ALTER TABLE pulls RENAME TO github_pulls")
+        sql(db, "CREATE INDEX github_pulls_due ON github_pulls(due_at) WHERE due_at IS NOT NULL")
+        sql(db, "DROP VIEW runner_handoff_limits")
+        sql(db, "ALTER TABLE runner_replacements DROP COLUMN occupied_slots")
+        sql(db, "ALTER TABLE runner_replacements DROP COLUMN slot_budget")
         sql(db, "PRAGMA user_version=32")
 
         with server(args.server, root, env, **options), runner_process(command, env, root):

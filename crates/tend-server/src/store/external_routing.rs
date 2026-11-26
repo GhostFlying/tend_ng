@@ -171,14 +171,14 @@ fn register(
     mode: &str,
 ) -> Result<()> {
     let pull = GitHubPull::parse(&condition.url).expect("validated condition URL");
-    pull::ensure_observed(db, &pull)?;
+    pull::ensure_observed(db, &(&pull).into())?;
     db.execute(
         "INSERT INTO external_routes(id, message_seq, url, condition, mode) VALUES (?1, ?2, ?3, ?4, ?5)",
         params![id, source, condition.url, serde_json::to_string(condition)?, mode],
     )?;
     let mut query = db.prepare(
         "SELECT f.id, f.fact FROM external_latest l JOIN external_facts f ON f.id = l.fact_id
-         JOIN github_pulls p ON p.url = l.url
+         JOIN pulls p ON p.url = l.url
          WHERE l.url = ?1 AND p.observation_error IS NULL AND f.error IS NULL
            AND (?2 IS NOT NULL OR json_extract(f.fact, '$.head_sha') = json_extract(p.facts, '$.head_sha'))
          ORDER BY f.rowid",
@@ -192,7 +192,7 @@ fn register(
         }
     }
     db.execute(
-        "UPDATE github_pulls SET due_at = unixepoch() WHERE url = ?1 AND due_at IS NULL",
+        "UPDATE pulls SET due_at = unixepoch() WHERE url = ?1 AND due_at IS NULL",
         [&condition.url],
     )?;
     Ok(())

@@ -3,8 +3,8 @@ mod discussion;
 use anyhow::{Context, Result, bail, ensure};
 use protocol::{
     ApiError, Attention, BackfillReportRevision, DEFAULT_LISTEN, FindPull, IssueDetail,
-    IssueMessagePage, LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLink,
-    PullLinkReceipt, REPORT_REVISIONS_PATH, Receipt, SendMessage, TOKEN_ENV,
+    IssueMessagePage, LinkPull, MessagePage, NotificationPage, PullDiscovery, PullLinkReceipt,
+    REPORT_REVISIONS_PATH, Receipt, SendMessage, TOKEN_ENV,
 };
 use std::{env, io, time::Duration};
 
@@ -296,14 +296,15 @@ fn main() -> Result<()> {
             let mut response = send(&http, &path, &auth, &requirements)?.into_reader();
             io::copy(&mut response, &mut io::stdout().lock())?;
         }
+        ("pr", "list", []) => {
+            // Keep both legacy and provider-aware Server responses lossless.
+            let links: serde_json::Value =
+                checked(http.get(&path).set("Authorization", &auth).call())?.into_json()?;
+            println!("{links}");
+        }
         ("pr", "watches", []) | ("issue", "reviews", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;
             io::copy(&mut response.into_reader(), &mut io::stdout().lock())?;
-        }
-        ("pr", "list", []) => {
-            let links: Vec<PullLink> =
-                checked(http.get(&path).set("Authorization", &auth).call())?.into_json()?;
-            println!("{}", serde_json::to_string(&links)?);
         }
         ("issue", "read", []) => {
             let response = checked(http.get(&path).set("Authorization", &auth).call())?;

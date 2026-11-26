@@ -335,6 +335,7 @@ mod tests {
         let original = Store::initialize(&path)?;
         // Restore the pre-feature schema and seed an existing v26 publication.
         super::super::board::remove_projection_schema(&original.db)?;
+        super::super::pull::restore_legacy_schema(&original.db)?;
         original.db.execute_batch(
             "DROP TABLE discussion_handoffs;
          DROP TABLE discussion_drafts;

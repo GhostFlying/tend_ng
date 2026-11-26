@@ -37,6 +37,115 @@ impl GitHubPull {
     }
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PullProvider {
+    #[default]
+    GitHub,
+    Codebase,
+}
+
+impl PullProvider {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::GitHub => "github",
+            Self::Codebase => "codebase",
+        }
+    }
+
+    pub fn repository(self, remote: &str) -> Option<String> {
+        match self {
+            Self::GitHub => github_repository(remote),
+            Self::Codebase => {
+                let remote = remote.trim();
+                let path = [
+                    "https://code.byted.org/",
+                    "git@code.byted.org:",
+                    "ssh://git@code.byted.org/",
+                    "ssh://git@code.byted.org:22/",
+                    "ssh://git@code.byted.org:29418/",
+                ]
+                .iter()
+                .find_map(|prefix| remote.strip_prefix(prefix))?
+                .trim_end_matches('/');
+                let path = path.strip_suffix(".git").unwrap_or(path);
+                codebase_repository(path).then(|| path.to_owned())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub struct PullRef {
+    pub provider: PullProvider,
+    pub repository: String,
+    pub number: i64,
+}
+
+impl PullRef {
+    pub fn parse(url: &str) -> Option<Self> {
+        if let Some(pull) = GitHubPull::parse(url) {
+            return Some(Self::from(&pull));
+        }
+        let path = url
+            .trim()
+            .strip_prefix("https://code.byted.org/")?
+            .split(['?', '#'])
+            .next()?
+            .trim_end_matches('/');
+        let (repository, number) = path.split_once("/merge_requests/")?;
+        if !codebase_repository(repository)
+            || number.is_empty()
+            || !number.bytes().all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        Some(Self {
+            provider: PullProvider::Codebase,
+            repository: repository.to_owned(),
+            number: number.parse().ok().filter(|number| *number > 0)?,
+        })
+    }
+
+    pub fn url(&self) -> String {
+        let base = match self.provider {
+            PullProvider::GitHub => "github.com",
+            PullProvider::Codebase => "code.byted.org",
+        };
+        let collection = match self.provider {
+            PullProvider::GitHub => "pull",
+            PullProvider::Codebase => "merge_requests",
+        };
+        format!(
+            "https://{base}/{}/{collection}/{}",
+            self.repository, self.number
+        )
+    }
+
+    pub fn github(&self) -> Option<GitHubPull> {
+        (self.provider == PullProvider::GitHub).then(|| GitHubPull {
+            repository: self.repository.clone(),
+            number: self.number,
+        })
+    }
+}
+
+impl From<&GitHubPull> for PullRef {
+    fn from(pull: &GitHubPull) -> Self {
+        Self {
+            provider: PullProvider::GitHub,
+            repository: pull.repository.clone(),
+            number: pull.number,
+        }
+    }
+}
+
+pub fn codebase_repository(value: &str) -> bool {
+    value.split_once('/').is_some_and(|(namespace, project)| {
+        !namespace.starts_with('-') && repository_part(namespace) && repository_part(project)
+    })
+}
+
 fn repository_part(value: &str) -> bool {
     !matches!(value, "" | "." | "..")
         && value
@@ -67,11 +176,15 @@ pub struct PullFacts {
     pub head_branch: Option<String>,
     #[serde(default)]
     pub head_repository: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_commit_sha: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct PullLink {
     pub url: String,
+    pub provider: PullProvider,
+    pub repository: String,
     pub number: i64,
     pub facts: Option<PullFacts>,
     pub observed_at: Option<i64>,
@@ -265,6 +378,8 @@ pub fn github_repository(remote: &str) -> Option<String> {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct WorkBranch {
     pub repo_id: String,
+    #[serde(default)]
+    pub provider: PullProvider,
     pub repository: String,
     pub head_repository: String,
     pub branch: String,
@@ -321,6 +436,57 @@ mod board_cursor_tests {
             "v1.9223372036854775808.id",
         ] {
             assert_eq!(IssueBoardCursor::decode(invalid), None, "{invalid}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod provider_tests {
+    use super::{GitHubPull, PullProvider, PullRef};
+
+    #[test]
+    fn provider_urls_are_canonical_and_distinct() {
+        let mr =
+            PullRef::parse(" https://code.byted.org/Example/Guide/merge_requests/007/?a=b#note ")
+                .unwrap();
+        assert_eq!(mr.provider, PullProvider::Codebase);
+        assert_eq!(mr.number, 7);
+        assert_eq!(
+            mr.url(),
+            "https://code.byted.org/Example/Guide/merge_requests/7"
+        );
+        assert!(GitHubPull::parse(&mr.url()).is_none());
+        let pr = PullRef::parse("https://github.com/Example/Guide/pull/7/").unwrap();
+        assert_eq!(pr.provider, PullProvider::GitHub);
+        assert_eq!(pr.url(), "https://github.com/example/guide/pull/7");
+        for invalid in [
+            "http://code.byted.org/x/y/merge_requests/2",
+            "https://code.byted.org.evil.test/x/y/merge_requests/2",
+            "https://code.byted.org/x/y/merge_requests/2/diffs",
+            "https://code.byted.org/x/../merge_requests/2",
+            "https://code.byted.org/-x/y/merge_requests/2",
+            "https://code.byted.org/x/y/merge_requests/+2",
+            "https://code.byted.org/x/y/merge_requests/0",
+            "https://code.byted.org/x/%2F/merge_requests/3",
+            "https://code.byted.org/x/y/merge_requests/9223372036854775808",
+        ] {
+            assert!(PullRef::parse(invalid).is_none(), "{invalid}");
+        }
+    }
+
+    #[test]
+    fn codebase_git_remotes_preserve_repository_case() {
+        for remote in [
+            "https://code.byted.org/Example/Guide.git/",
+            "git@code.byted.org:Example/Guide.git",
+            "ssh://git@code.byted.org/Example/Guide.git",
+            "ssh://git@code.byted.org:29418/Example/Guide.git",
+        ] {
+            assert_eq!(
+                PullProvider::Codebase.repository(remote).as_deref(),
+                Some("Example/Guide")
+            );
+            assert!(PullProvider::GitHub.repository(remote).is_none());
         }
     }
 }

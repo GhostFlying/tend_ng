@@ -169,6 +169,7 @@ fn equal_load_rotates_across_reopen_and_ignores_pinned_assignments() -> Result<(
     announce(&mut store, runner("a", 6, 6), 2)?;
     announce(&mut store, runner("b", 6, 6), 2)?;
     // Reconstruct a v34 fixture with intact runner registrations.
+    crate::store::pull::restore_legacy_schema(&store.db)?;
     store.db.execute_batch(
         "DROP TABLE runner_auto_assignment_order;
          DROP VIEW runner_handoff_limits;

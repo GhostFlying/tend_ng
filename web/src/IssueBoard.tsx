@@ -4,10 +4,10 @@ import {
   issueLink,
   issueStageLabels,
   issueTitle,
-  pullLinkLabel,
   readIssueBoard,
 } from "./api";
-import type { BoardIssue, BoardPage, BoardStage, PullLink } from "./api";
+import type { BoardIssue, BoardPage, BoardStage } from "./api";
+import { PullAssociation } from "./PullAssociation";
 
 const columns = Object.entries(issueStageLabels) as [BoardStage, string][];
 
@@ -37,55 +37,10 @@ const mobileOrder: BoardStage[] = [
   "cancelled",
 ];
 
-const pullLabels: Record<string, string> = {
-  open: "开启",
-  merged: "已合并",
-  closed: "已关闭",
-};
-
-const checkLabels: Record<string, string> = {
-  success: "CI 通过",
-  pending: "CI 进行中",
-  failure: "CI 失败",
-};
-
 function progress(issue: BoardIssue) {
   if (issue.running > 0) return `${issue.running} 项运行中`;
   if (issue.waiting_for) return waitLabels[issue.waiting_for];
   if (issue.stage === "todo") return queuedLabels[issue.task_state];
-}
-
-function Pull({ pull, showStatus }: { pull: PullLink; showStatus: boolean }) {
-  const facts = pull.facts;
-  return (
-    <li className="board-pull">
-      <a href={pull.url} target="_blank" rel="noreferrer">
-        {pullLinkLabel(pull)}
-      </a>
-      {showStatus && (
-        <div className="board-pull-status">
-          {facts && (
-            <span>
-              {facts.draft && facts.state === "open"
-                ? "草稿"
-                : pullLabels[facts.state]}
-            </span>
-          )}
-          {facts?.ci && (
-            <span data-check={facts.ci}>
-              {pull.observation_error ? "上次：" : ""}
-              {checkLabels[facts.ci]}
-            </span>
-          )}
-          {facts && !facts.ci && <span>CI 未确认</span>}
-          {pull.observation_error && (
-            <span data-check="failure">暂不可观测</span>
-          )}
-          {!facts && !pull.observation_error && <span>待观测</span>}
-        </div>
-      )}
-    </li>
-  );
 }
 
 export function Card({ issue }: { issue: BoardIssue }) {
@@ -120,7 +75,9 @@ export function Card({ issue }: { issue: BoardIssue }) {
       {issue.pulls.length > 0 && (
         <ul className="board-pulls">
           {issue.pulls.map((pull) => (
-            <Pull key={pull.url} pull={pull} showStatus={showStatus} />
+            <li className="board-pull" key={pull.url}>
+              <PullAssociation pull={pull} showStatus={showStatus} />
+            </li>
           ))}
         </ul>
       )}

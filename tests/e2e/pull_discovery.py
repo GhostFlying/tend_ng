@@ -68,9 +68,9 @@ def main():
                                 lambda issue: issue["status"] == "running")
                 branch = f"tend/{parent}/example"
                 assert work["run"]["branches"] == [{
-                    "repo_id": "example", "repository": "example/guide",
+                    "repo_id": "example", "provider": "github", "repository": "example/guide",
                     "head_repository": "example/guide", "branch": branch,
-                }]
+                }], work["run"]
                 accepted = json.loads((root / "find-pull.json").read_text())
                 result = wait_for(lambda: job(child, accepted["operation_id"]),
                                   lambda value: value and value["state"] == "completed")

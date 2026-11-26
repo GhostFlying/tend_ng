@@ -433,7 +433,7 @@ pub fn apply(db: &Connection, runner: &RunnerProfile, operation: &WorkOperation)
             )?;
         }
         WorkAction::LinkPull { url } => {
-            let Some(pull) = protocol::GitHubPull::parse(url) else {
+            let Some(pull) = protocol::PullRef::parse(url) else {
                 return Ok(false);
             };
             super::pull::bind(db, &source_issue, &pull)?;

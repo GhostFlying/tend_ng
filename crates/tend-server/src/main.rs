@@ -1,7 +1,9 @@
 mod artifacts;
+mod codebase;
 mod discussion;
 mod github;
 mod inspect;
+mod pull_worker;
 mod router;
 mod runner_api;
 mod store;
@@ -23,7 +25,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -39,6 +41,7 @@ fn main() -> Result<()> {
     let mut router_model = None;
     let mut program = OsString::from("codex");
     let mut github_cli = OsString::from("gh");
+    let mut codebase_cli = OsString::from("bytedcli");
     let mut app_args = ["app-server", "--listen", "stdio://"]
         .map(OsString::from)
         .to_vec();
@@ -104,6 +107,9 @@ fn main() -> Result<()> {
                         .context("--discussion-config needs a JSON file")?,
                 ));
             }
+            Some("--codebase-cli") => {
+                codebase_cli = args.next().context("--codebase-cli needs a program")?
+            }
             Some("--github-cli") => {
                 github_cli = args.next().context("--github-cli needs a program")?
             }
@@ -143,8 +149,28 @@ fn main() -> Result<()> {
     )?);
     let discussion_api = discussion.serve_api(&db)?;
     thread::spawn(move || schedule(placement));
-    github::spawn(Store::open(&db)?, github_cli.clone());
-    github::spawn_discovery(Store::open(&db)?, github_cli);
+    pull_worker::spawn(
+        Store::open(&db)?,
+        protocol::PullProvider::GitHub,
+        github_cli.clone(),
+    );
+    pull_worker::spawn(
+        Store::open(&db)?,
+        protocol::PullProvider::Codebase,
+        codebase_cli.clone(),
+    );
+    pull_worker::spawn_discovery(
+        Store::open(&db)?,
+        protocol::PullProvider::GitHub,
+        github_cli.clone(),
+        codebase_cli.clone(),
+    );
+    pull_worker::spawn_discovery(
+        Store::open(&db)?,
+        protocol::PullProvider::Codebase,
+        github_cli,
+        codebase_cli,
+    );
     let mut router_profile =
         json!({"id": "router", "model": &router_model, "reasoning_effort": &router_effort});
     if let Some(name) = &router_name {
@@ -889,8 +915,11 @@ fn link_pull(store: &mut Store, issue: &str, request: &mut Request) -> Result<(u
     if !protocol::valid_id(&link.operation_id) {
         return Ok(api_error(400, "valid operation ID required"));
     }
-    let Some(pull) = protocol::GitHubPull::parse(&link.url) else {
-        return Ok(api_error(400, "valid GitHub pull request URL required"));
+    let Some(pull) = protocol::PullRef::parse(&link.url) else {
+        return Ok(api_error(
+            400,
+            "valid GitHub PR or Codebase MR URL required",
+        ));
     };
     Ok(match store.link_pull(issue, &link, &pull)? {
         store::pull::Linked::Saved(receipt) => (200, serde_json::to_value(receipt)?),

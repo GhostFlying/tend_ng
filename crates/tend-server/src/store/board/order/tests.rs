@@ -1,7 +1,7 @@
 use super::*;
 use crate::store::{PAGE_SIZE, Store};
 use protocol::{
-    ExternalFact, ExternalKind, GitHubPull, IssueBoardCursor, IssueTransition, LinkPull, PullFacts,
+    ExternalFact, ExternalKind, IssueBoardCursor, IssueTransition, LinkPull, PullFacts, PullRef,
     SendMessage,
 };
 use rusqlite::TransactionBehavior::Immediate;
@@ -92,7 +92,7 @@ fn reentry_moves_the_card_but_messages_attention_and_pr_ci_do_not() -> Result<()
       UPDATE attentions SET question_seq = 2 WHERE id = 'attention';",
     )?;
 
-    let pull = GitHubPull::parse("https://github.com/example/guide/pull/12").unwrap();
+    let pull = PullRef::parse("https://github.com/example/guide/pull/12").unwrap();
     store.link_pull(
         "z",
         &LinkPull {
@@ -112,6 +112,7 @@ fn reentry_moves_the_card_but_messages_attention_and_pr_ci_do_not() -> Result<()
                 head_sha: sha.clone(),
                 ci: Some("success".into()),
                 head_branch: None,
+                merge_commit_sha: None,
                 head_repository: None,
             },
             vec![ExternalFact {

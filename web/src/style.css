@@ -860,13 +860,13 @@ a {
 }
 
 .board-card-state,
-.board-pull-status,
+.pull-status,
 .board-pages {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
   gap: 6px;
-  color: var(--board-tertiary);
+  color: var(--board-tertiary, var(--muted));
   font-size: 12px;
 }
 
@@ -893,11 +893,16 @@ a {
   font-size: 13px;
 }
 
-.board-pull-status {
+.pull-status {
   margin-top: 4px;
 }
 
-.board-pull-status [data-check="failure"] {
+.pull-link {
+  overflow-wrap: anywhere;
+}
+
+.pull-status [data-check="failure"],
+.pull-status [data-observation-error] {
   color: var(--warning);
 }
 

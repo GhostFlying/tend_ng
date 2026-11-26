@@ -1,5 +1,4 @@
-use crate::store::Store;
-use protocol::{BranchResult, ExternalFact, ExternalKind, GitHubPull, PullFacts, WorkBranch};
+use protocol::{ExternalFact, ExternalKind, GitHubPull, PullFacts, WorkBranch};
 use serde_json::Value;
 use std::{
     ffi::OsString,
@@ -32,27 +31,6 @@ const CHECKS_AT_COMMIT: &str = "query($owner:String!, $repo:String!, $sha:GitObj
   } } }
 }";
 
-pub fn spawn(store: Store, program: OsString) {
-    thread::spawn(move || {
-        loop {
-            let result = (|| {
-                if let Some(pull) = store.due_pull()? {
-                    let watched = store.watched_ci_heads(&pull)?;
-                    store.observe_pull(&pull, observe(&program, &pull, &watched))?;
-                    return Ok(true);
-                }
-                Ok::<_, anyhow::Error>(false)
-            })();
-            match result {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => eprintln!("GitHub observation: {error:#}"),
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
-}
-
 pub fn discussion_pull(program: &OsString, pull: &GitHubPull) -> Result<Value, &'static str> {
     let output = request(
         program,
@@ -75,7 +53,7 @@ pub fn discussion_pull(program: &OsString, pull: &GitHubPull) -> Result<Value, &
     }))
 }
 
-fn observe(
+pub fn observe(
     program: &OsString,
     pull: &GitHubPull,
     watched: &[String],
@@ -149,6 +127,7 @@ fn observe(
             ci: ci.map(str::to_owned),
             head_branch: pr["headRefName"].as_str().map(str::to_owned),
             head_repository,
+            merge_commit_sha: None,
         },
         check_facts,
     ))
@@ -244,43 +223,7 @@ fn checks(pull: &GitHubPull, head: &str, nodes: &Value) -> Vec<ExternalFact> {
         .collect()
 }
 
-pub fn spawn_discovery(mut store: Store, program: OsString) {
-    thread::spawn(move || {
-        loop {
-            let outcome = (|| {
-                let Some(request) = store.pending_discovery()? else {
-                    return Ok(false);
-                };
-                let results: Vec<_> = request
-                    .branches
-                    .iter()
-                    .map(|branch| {
-                        let (state, url) = match find(&program, branch) {
-                            Ok(Some(pull)) => ("linked", Some(pull.url())),
-                            Ok(None) => ("missing", None),
-                            Err(reason) => (reason, None),
-                        };
-                        BranchResult {
-                            branch: branch.clone(),
-                            state: state.to_owned(),
-                            url,
-                        }
-                    })
-                    .collect();
-                store.finish_discovery(&request, &results)?;
-                Ok::<_, anyhow::Error>(true)
-            })();
-            match outcome {
-                Ok(true) => continue,
-                Ok(false) => {}
-                Err(error) => eprintln!("GitHub branch discovery: {error:#}"),
-            }
-            thread::sleep(Duration::from_secs(1));
-        }
-    });
-}
-
-fn find(program: &OsString, branch: &WorkBranch) -> Result<Option<GitHubPull>, &'static str> {
+pub fn find(program: &OsString, branch: &WorkBranch) -> Result<Option<GitHubPull>, &'static str> {
     let (owner, _) = branch
         .head_repository
         .split_once('/')
