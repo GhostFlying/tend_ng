@@ -53,6 +53,157 @@ struct Cursor {
     total_tokens: i64,
 }
 
+impl NativeRecord {
+    fn valid(&self) -> bool {
+        let cursor = self.thread_token_usage.total_tokens;
+        !self.response_id.is_empty()
+            && self.response_id.len() <= 256
+            && cursor >= 0
+            && self.usage.valid()
+            && self.usage.total_tokens.is_none_or(|last| last <= cursor)
+    }
+}
+
+/// Read a fixed prefix. An incomplete trailing append is distinguishable from
+/// a corrupt completed line, and neither is evidence that a request was absent.
+pub(crate) fn native_snapshot(
+    file: File,
+    thread: &str,
+    turn: &str,
+    active: bool,
+) -> Result<Vec<protocol::NativeTokenRecord>, protocol::TokenSourceGap> {
+    use protocol::{NativeTokenRecord, TokenSourceGap::*};
+
+    let meta = file.metadata().map_err(|_| SourceUnreadable)?;
+    if !meta.is_file() {
+        return Err(SourceUnreadable);
+    }
+    let mut input = BufReader::new(file.take(meta.len()));
+    let mut records = BTreeMap::<String, NativeTokenRecord>::new();
+    let mut line = Vec::new();
+    loop {
+        line.clear();
+        let bytes = (&mut input)
+            .take(MAX_LINE)
+            .read_until(b'\n', &mut line)
+            .map_err(|_| SourceUnreadable)?;
+        if bytes == 0 {
+            break;
+        }
+        if line.last() != Some(&b'\n') {
+            if (bytes as u64) < MAX_LINE {
+                if active {
+                    break;
+                }
+                return Err(SourceCorrupt);
+            }
+            // Only deserialize the envelope tag. serde's IgnoredAny skips
+            // large strings and nested values in unrelated payloads without
+            // accumulating them in the spool or in a Value.
+            let mut tail = LineTail {
+                input: &mut input,
+                ended: false,
+            };
+            let source = io::Cursor::new(&line).chain(&mut tail);
+            let tag = serde_json::from_reader::<_, Tag>(source);
+            if tag.as_ref().is_err_and(|err| err.is_io()) {
+                return Err(SourceUnreadable);
+            }
+            if !tail.ended {
+                if active && tag.as_ref().err().is_none_or(|err| err.is_eof()) {
+                    break;
+                }
+                return Err(SourceCorrupt);
+            }
+            let tag = tag.map_err(|_| SourceCorrupt)?;
+            if tag.kind == RECORD {
+                return Err(OversizedNativeRecord);
+            }
+            continue;
+        }
+        let value: Value = serde_json::from_slice(&line).map_err(|_| SourceCorrupt)?;
+        let Some(kind) = value["type"].as_str() else {
+            return Err(SourceCorrupt);
+        };
+        if kind != RECORD {
+            continue;
+        }
+        let payload = &value["payload"];
+        let (Some(record_thread), Some(record_turn)) =
+            (payload["thread_id"].as_str(), payload["turn_id"].as_str())
+        else {
+            return Err(SourceCorrupt);
+        };
+        if record_thread != thread {
+            return Err(SourceCorrupt);
+        }
+        if record_turn != turn {
+            continue;
+        }
+        let response = payload["response_id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .ok_or(SourceCorrupt)?;
+        let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone()).ok();
+        let valid = serde_json::from_value::<NativeRecord>(payload.clone())
+            .is_ok_and(|record| record.valid());
+        let record = records
+            .entry(response.to_owned())
+            .or_insert_with(|| NativeTokenRecord {
+                response_id: response.to_owned(),
+                counts,
+                invalid: false,
+                variant: None,
+            });
+        record.invalid |= !valid;
+        if let Some(counts) = counts
+            && record.counts != Some(counts)
+        {
+            if record.counts.is_some() {
+                record.variant.get_or_insert(counts);
+            } else {
+                record.counts = Some(counts);
+            }
+        }
+    }
+    if records.is_empty() {
+        return Err(NoNativeRecords);
+    }
+    // A file truncated after metadata has an unscanned tail even if its
+    // replacement ends at a line boundary.
+    if !active && input.get_ref().limit() != 0 {
+        return Err(SourceChanged);
+    }
+    Ok(records.into_values().collect())
+}
+
+#[derive(Deserialize)]
+struct Tag {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+struct LineTail<'a, B> {
+    input: &'a mut B,
+    ended: bool,
+}
+
+impl<B: BufRead> Read for LineTail<'_, B> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if self.ended || out.is_empty() {
+            return Ok(0);
+        }
+        let bytes = self.input.fill_buf()?;
+        let limit = bytes.len().min(out.len());
+        let end = bytes[..limit].iter().position(|byte| *byte == b'\n');
+        self.ended = end.is_some();
+        let used = end.map_or(limit, |at| at + 1);
+        out[..used].copy_from_slice(&bytes[..used]);
+        self.input.consume(used);
+        Ok(used)
+    }
+}
+
 impl Collector {
     pub fn new(path: &Path, thread: &str, reused: bool) -> io::Result<Option<Self>> {
         if !path.is_absolute()
@@ -160,10 +311,7 @@ impl Collector {
                     && kind == RECORD
                     && payload.thread_id == thread
                     && payload.turn_id == turn
-                    && !payload.response_id.is_empty()
-                    && payload.response_id.len() <= 256
-                    && payload.thread_token_usage.total_tokens >= 0
-                    && payload.usage.valid()
+                    && payload.valid()
                 {
                     let cursor = payload.thread_token_usage.total_tokens;
                     self.evidence.entry(cursor).or_default().push(payload);
@@ -333,6 +481,69 @@ mod tests {
         writeln!(file, "{}", record("thread", "turn", "live", 16, 7))?;
         assert_eq!(live.matched("thread", "turn")?[0].0, "live");
         assert!(!live.has_unmatched());
+        Ok(())
+    }
+
+    #[test]
+    fn historical_snapshot_fences_turn_and_isolates_invalid_or_conflicting_keys()
+    -> anyhow::Result<()> {
+        use protocol::TokenSourceGap::*;
+        let dir = Fixture::new()?;
+        let path = dir.0.join("native.jsonl");
+        let mut file = File::create(&path)?;
+        writeln!(file, "{}", record("thread", "other-turn", "old", 8, 2))?;
+        for (id, cursor, last) in [
+            ("a", 1, 1),
+            ("a", 1, 1),
+            ("b", 3, 2),
+            ("b", 4, 3),
+            ("c", 4, 9),
+        ] {
+            writeln!(file, "{}", record("thread", "turn", id, cursor, last))?;
+        }
+        write!(file, "{{partial")?;
+        let records = native_snapshot(File::open(&path)?, "thread", "turn", true).unwrap();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0].response_id, "a");
+        assert!(records[0].variant.is_none());
+        assert_eq!(records[1].variant.unwrap().total_tokens, Some(3));
+        assert!(records[2].invalid);
+        assert_eq!(
+            native_snapshot(File::open(&path)?, "thread", "turn", false),
+            Err(SourceCorrupt)
+        );
+        writeln!(file)?;
+        assert_eq!(
+            native_snapshot(File::open(&path)?, "thread", "turn", true),
+            Err(SourceCorrupt)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_unrelated_payload_is_skipped_but_oversized_meter_has_explicit_gap()
+    -> anyhow::Result<()> {
+        use protocol::TokenSourceGap::OversizedNativeRecord;
+        let dir = Fixture::new()?;
+        let path = dir.0.join("long-lines.jsonl");
+        let mut file = File::create(&path)?;
+        let huge = "X".repeat(MAX_LINE as usize + 19);
+        // Place the type after the huge payload, so no prefix heuristic is enough.
+        writeln!(
+            file,
+            r#"{{"payload":{{"type":"token_usage_record","data":"{huge}"}},"type":"response_item"}}"#
+        )?;
+        writeln!(file, "{}", record("thread", "turn", "present", 6, 3))?;
+        let records = native_snapshot(File::open(&path)?, "thread", "turn", false).unwrap();
+        assert_eq!(records[0].response_id, "present");
+        writeln!(
+            file,
+            r#"{{"payload":"{huge}","type":"token_usage_record"}}"#
+        )?;
+        assert_eq!(
+            native_snapshot(File::open(&path)?, "thread", "turn", false),
+            Err(OversizedNativeRecord)
+        );
         Ok(())
     }
 

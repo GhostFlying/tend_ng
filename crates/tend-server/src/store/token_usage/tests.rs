@@ -3,15 +3,15 @@ use protocol::{RUNNER_SYNC_BATCH, RunOutcome};
 use serde_json::{Value, json, to_value};
 use std::{fs, path::PathBuf, time::Instant};
 
-struct Fixture(PathBuf);
+pub(super) struct Fixture(PathBuf);
 
 impl Fixture {
-    fn new() -> Result<Self> {
+    pub(super) fn new() -> Result<Self> {
         let dir = std::env::temp_dir().join(format!("tend-usage-{}", protocol::new_id()));
         fs::create_dir(&dir)?;
         Ok(Self(dir))
     }
-    fn file(&self) -> PathBuf {
+    pub(super) fn file(&self) -> PathBuf {
         self.0.join("fixture.sqlite")
     }
 }
@@ -22,7 +22,7 @@ impl Drop for Fixture {
     }
 }
 
-fn base(db: &Connection) -> Result<()> {
+pub(super) fn base(db: &Connection) -> Result<()> {
     db.execute_batch(
         "INSERT INTO chat_messages (seq, id, chat_id, text) VALUES (1, 'source', 'fixture', 'Synthetic');
          INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'local', '{}', 0), ('other', 'other', '{}', 0);",
@@ -30,13 +30,13 @@ fn base(db: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn issue(db: &Connection, id: &str, parent: Option<&str>) -> Result<()> {
+pub(super) fn issue(db: &Connection, id: &str, parent: Option<&str>) -> Result<()> {
     db.prepare_cached("INSERT INTO issues(id, source_seq, title, objective, parent_issue_id) VALUES(?1, 1, ?1, '', ?2)")?
         .execute(params![id, parent])?;
     Ok(())
 }
 
-fn assignment(db: &Connection, id: &str, issue: &str, runner: &str) -> Result<()> {
+pub(super) fn assignment(db: &Connection, id: &str, issue: &str, runner: &str) -> Result<()> {
     db.prepare_cached(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
          VALUES (?1, ?2, 'implementation', 'accepted', '[]', '[]')",
@@ -49,7 +49,7 @@ fn assignment(db: &Connection, id: &str, issue: &str, runner: &str) -> Result<()
     Ok(())
 }
 
-fn native_run(run: &str, task: &str) -> RunObservation {
+pub(super) fn native_run(run: &str, task: &str) -> RunObservation {
     RunObservation {
         event_id: format!("start-{run}"),
         assignment_id: task.into(),
@@ -64,7 +64,7 @@ fn native_run(run: &str, task: &str) -> RunObservation {
     }
 }
 
-fn observation(run: &RunObservation, cursor: i64, total: Option<i64>) -> RunTokenUsage {
+pub(super) fn observation(run: &RunObservation, cursor: i64, total: Option<i64>) -> RunTokenUsage {
     RunTokenUsage {
         event_id: format!("{}-request-{cursor}", run.run_id),
         assignment_id: run.assignment_id.clone(),
@@ -82,7 +82,7 @@ fn observation(run: &RunObservation, cursor: i64, total: Option<i64>) -> RunToke
     }
 }
 
-fn sync(
+pub(super) fn sync(
     store: &mut Store,
     runner: &str,
     runs: &[RunObservation],
@@ -104,7 +104,7 @@ fn sync(
     Ok(())
 }
 
-fn view(store: &Store, id: &str) -> Result<Value> {
+pub(super) fn view(store: &Store, id: &str) -> Result<Value> {
     Ok(to_value(store.issue_token_usage(id)?.unwrap())?)
 }
 
@@ -451,6 +451,486 @@ fn token_usage_scale() -> Result<()> {
             }
             if let Some(output) = std::env::var_os("TEND_TOKEN_USAGE_BENCH_DB") {
                 fs::copy(&db_path, output)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn backfill_job(
+    store: &mut Store,
+    id: &str,
+    scope: protocol::TokenUsageScope,
+    policy: protocol::TokenConflictPolicy,
+) -> Result<()> {
+    let job = protocol::StartTokenBackfill {
+        job_id: id.into(),
+        scope,
+        policy,
+    };
+    let result = store.start_token_backfill(&job)?.unwrap();
+    assert_eq!(
+        store.start_token_backfill(&job)?.unwrap()["selected_runs"],
+        result["selected_runs"]
+    );
+    Ok(())
+}
+
+fn page(item: i64, offset: i64, counts: &[(i64, i64)], done: bool) -> protocol::TokenBackfillPage {
+    protocol::TokenBackfillPage {
+        item,
+        offset,
+        content: protocol::TokenBackfillContent::Records {
+            snapshot: "0".repeat(64),
+            done,
+            prefix: false,
+            records: counts
+                .iter()
+                .map(|(key, count)| protocol::NativeTokenRecord {
+                    response_id: format!("resp-{key}"),
+                    counts: Some(TokenCounts {
+                        total_tokens: Some(*count),
+                        ..TokenCounts::default()
+                    }),
+                    invalid: false,
+                    variant: None,
+                })
+                .collect(),
+        },
+    }
+}
+
+fn deliver(store: &mut Store, reader: &str, page: &protocol::TokenBackfillPage) -> Result<()> {
+    assert!(page.valid());
+    let tx = store.db.transaction()?;
+    backfill::receive(&tx, reader, page)?;
+    tx.commit()?;
+    Ok(())
+}
+
+#[test]
+fn backfill_uses_original_run_and_retired_same_host_reader_after_a_lost_page_receipt() -> Result<()>
+{
+    use protocol::{TokenConflictPolicy::*, TokenUsageScope::*};
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "original", "root", "runner")?;
+    let started = native_run("original-run", "original");
+    sync(&mut store, "runner", std::slice::from_ref(&started), &[])?;
+    store.db.execute(
+        "INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('next', 'local', '{}', unixepoch())", [],
+    )?;
+    store.db.execute(
+        "INSERT INTO runner_replacements (predecessor, successor, drained_at)
+         VALUES ('runner', 'next', unixepoch())",
+        [],
+    )?;
+    backfill_job(&mut store, "job", Host("local".into()), Quarantine)?;
+    let work = backfill::pending(&store.db, "runner")?.unwrap();
+    let records = (10..42).map(|key| (key, 1)).collect::<Vec<_>>();
+    let first = page(work.item, 0, &records, false);
+    let tail = page(work.item, 32, &[(99, 2)], true);
+    deliver(&mut store, "runner", &tail)?; // out of order
+    deliver(&mut store, "other", &first)?; // another Host
+    deliver(&mut store, "next", &first)?; // same Host, before retirement
+    assert_eq!(view(&store, "root")?["direct"]["reported_requests"], 0);
+    deliver(&mut store, "runner", &first)?;
+    deliver(&mut store, "runner", &first)?;
+    assert_eq!(view(&store, "root")?["direct"]["reported_requests"], 32);
+    store.db.execute(
+        "UPDATE runner_replacements SET retired_at = unixepoch()",
+        [],
+    )?;
+    assert_eq!(backfill::pending(&store.db, "next")?.unwrap().offset, 32);
+    assert!(backfill::pending(&store.db, "runner")?.is_none());
+    deliver(&mut store, "runner", &tail)?;
+    deliver(&mut store, "next", &first)?;
+    deliver(&mut store, "next", &tail)?;
+    assert!(backfill::pending(&store.db, "next")?.is_none());
+    let rollup = view(&store, "root")?;
+    assert_eq!(rollup["direct"]["total_tokens"]["tokens"], "34");
+    assert_eq!(rollup["direct"]["reported_requests"], 33);
+    assert_eq!(
+        store.db.query_row(
+            "SELECT count(*) FROM token_requests WHERE run_id = 'original-run'",
+            [],
+            |r| r.get::<_, i64>(0)
+        )?,
+        33
+    );
+    backfill_job(&mut store, "repeat", Run("original-run".into()), Quarantine)?;
+    let work = backfill::pending(&store.db, "next")?.unwrap();
+    deliver(&mut store, "next", &page(work.item, 0, &records, false))?;
+    deliver(&mut store, "next", &page(work.item, 32, &[(99, 2)], true))?;
+    assert_eq!(view(&store, "root")?, rollup);
+    Ok(())
+}
+
+#[test]
+fn backfill_conflict_choices_survive_live_interleaving_and_rebuild_from_requests() -> Result<()> {
+    use protocol::{TokenConflictPolicy::*, TokenUsageScope::*};
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    issue(&store.db, "child", Some("root"))?;
+    assignment(&store.db, "task", "child", "runner")?;
+    let started = native_run("run", "task");
+    let mut before = observation(&started, 1, Some(8));
+    before.last.cached_input_tokens = None;
+    let mut after = observation(&started, 2, Some(8));
+    after.last.cached_input_tokens = None;
+    let untouched = observation(&started, 9, Some(4));
+    sync(
+        &mut store,
+        "runner",
+        &[started],
+        &[before.clone(), untouched],
+    )?;
+    let original = view(&store, "root")?;
+    let scope = Task("task".into());
+    backfill_job(&mut store, "quarantine", scope.clone(), Quarantine)?;
+    let work = backfill::pending(&store.db, "runner")?.unwrap();
+    deliver(
+        &mut store,
+        "runner",
+        &page(work.item, 0, &[(1, 10), (2, 10), (3, 0)], true),
+    )?;
+    sync(&mut store, "runner", &[], std::slice::from_ref(&after))?;
+    assert_eq!(
+        view(&store, "root")?["subtree"]["total_tokens"]["tokens"],
+        "4"
+    );
+    assert_eq!(view(&store, "root")?["subtree"]["reported_requests"], 2);
+    let findings = store.token_backfill_audit("quarantine", 0)?.unwrap();
+    let entries = findings["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 3);
+    for (index, source) in [(0, "rollout"), (1, "server"), (2, "live")] {
+        assert_eq!(entries[index]["source"], source);
+        assert_eq!(
+            entries[index]["evidence"]["server"]["total_tokens"],
+            if index == 1 { 4 } else { 8 }
+        );
+    }
+
+    for (job, policy, total) in [
+        ("server", PreferServer, "20"),
+        ("native", PreferNative, "24"),
+        ("repeat", Quarantine, "24"),
+    ] {
+        backfill_job(&mut store, job, scope.clone(), policy)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        deliver(
+            &mut store,
+            "runner",
+            &page(work.item, 0, &[(1, 10), (2, 10), (3, 0)], true),
+        )?;
+        sync(&mut store, "runner", &[], &[before.clone(), after.clone()])?;
+        assert_eq!(
+            view(&store, "root")?["subtree"]["total_tokens"]["tokens"],
+            total
+        );
+    }
+    assert_ne!(view(&store, "root")?, original);
+    let expected = view(&store, "root")?;
+    store.db.execute(
+        "UPDATE token_run_tallies SET tally = ?1, valid_records = 0",
+        [serde_json::to_string(&Tally::default())?],
+    )?;
+    store.db.execute("DELETE FROM token_issue_rollups", [])?;
+    store
+        .db
+        .execute("DELETE FROM token_run_tallies WHERE run_id = 'run'", [])?;
+    for scope in [Issue("root".into()), All] {
+        store.rebuild_token_usage(&scope)?;
+        assert_eq!(view(&store, "root")?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn backfill_gaps_and_ambiguous_native_keys_are_not_zero_or_destructive() -> Result<()> {
+    use protocol::{
+        TokenBackfillContent, TokenConflictPolicy::*, TokenSourceGap::*, TokenUsageScope::*,
+    };
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "legacy", None)?;
+    assignment(&store.db, "task", "legacy", "runner")?;
+    let started = native_run("run", "task");
+    sync(&mut store, "runner", std::slice::from_ref(&started), &[])?;
+    store.db.execute("UPDATE token_runs SET legacy = 1", [])?;
+    store.rebuild_token_usage(&All)?;
+    let expected = view(&store, "legacy")?;
+    assert_eq!(expected["direct"]["unobserved_before_collection"], 1);
+    assert_eq!(expected["direct"]["total_tokens"]["tokens"], Value::Null);
+    backfill_job(&mut store, "gap", All, PreferNative)?;
+    assert_eq!(
+        store.token_backfill_status("gap", 0)?.unwrap()["counts"]["reader_offline"],
+        1
+    );
+    let work = backfill::pending(&store.db, "runner")?.unwrap();
+    deliver(
+        &mut store,
+        "runner",
+        &protocol::TokenBackfillPage {
+            item: work.item,
+            offset: 0,
+            content: TokenBackfillContent::Gap {
+                reason: SourceMissing,
+            },
+        },
+    )?;
+    assert_eq!(
+        store.token_backfill_status("gap", 0)?.unwrap()["runs"][0]["gap"],
+        "source_missing"
+    );
+    assert_eq!(view(&store, "legacy")?, expected);
+
+    backfill_job(&mut store, "invalid", All, PreferNative)?;
+    let work = backfill::pending(&store.db, "runner")?.unwrap();
+    let mut invalid = page(work.item, 0, &[(1, 7), (2, 0)], true);
+    let TokenBackfillContent::Records { records, .. } = &mut invalid.content else {
+        unreachable!()
+    };
+    records[0].variant = Some(TokenCounts {
+        total_tokens: Some(8),
+        ..TokenCounts::default()
+    });
+    records[1].invalid = true;
+    deliver(&mut store, "runner", &invalid)?;
+    assert_eq!(view(&store, "legacy")?, expected);
+    assert_eq!(
+        store.token_backfill_audit("invalid", 0)?.unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let late = observation(&started, 1, Some(7));
+    sync(&mut store, "runner", &[], &[late])?;
+    assert_eq!(view(&store, "legacy")?, expected);
+    Ok(())
+}
+
+#[test]
+fn changed_native_evidence_requires_an_explicit_decision_even_without_a_server_copy() -> Result<()>
+{
+    use protocol::{TokenConflictPolicy::*, TokenUsageScope::*};
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "task", "root", "runner")?;
+    sync(&mut store, "runner", &[native_run("run", "task")], &[])?;
+    for (job, policy, value, expected) in [
+        ("first", Quarantine, 5, json!("5")),
+        ("changed", Quarantine, 8, Value::Null),
+        ("retry", Quarantine, 8, Value::Null),
+        ("confirmed", PreferNative, 8, json!("8")),
+        ("after", Quarantine, 8, json!("8")),
+    ] {
+        backfill_job(&mut store, job, All, policy)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        deliver(
+            &mut store,
+            "runner",
+            &page(work.item, 0, &[(1, value)], true),
+        )?;
+        assert_eq!(
+            view(&store, "root")?["direct"]["total_tokens"]["tokens"],
+            expected
+        );
+    }
+    let audit = store.token_backfill_audit("changed", 0)?.unwrap();
+    assert_eq!(
+        audit["entries"][0]["evidence"]["prior_native"]["counts"]["total_tokens"],
+        5
+    );
+    assert_eq!(audit["entries"][0]["evidence"]["native"]["total_tokens"], 8);
+    Ok(())
+}
+
+#[test]
+fn late_duplicate_started_retracts_only_backfill_before_during_and_after_scan() -> Result<()> {
+    use protocol::{TokenConflictPolicy::*, TokenUsageScope::*};
+    for when in ["same_sync", "between_pages", "after_completion"] {
+        let fixture = Fixture::new()?;
+        let mut store = Store::initialize(&fixture.file())?;
+        base(&store.db)?;
+        issue(&store.db, "a", None)?;
+        issue(&store.db, "b", Some("a"))?;
+        assignment(&store.db, "task-a", "a", "runner")?;
+        assignment(&store.db, "task-b", "b", "runner")?;
+        let a = native_run("a", "task-a");
+        let mut b = native_run("b", "task-b");
+        b.thread_id.clone_from(&a.thread_id);
+        b.turn_id.clone_from(&a.turn_id);
+        let mut server = observation(&a, 10, Some(2));
+        server.last.cached_input_tokens = None;
+        sync(
+            &mut store,
+            "runner",
+            std::slice::from_ref(&a),
+            std::slice::from_ref(&server),
+        )?;
+        backfill_job(&mut store, "scan", Run("a".into()), PreferNative)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        let batch = (10..42).map(|key| (key, 8)).collect::<Vec<_>>();
+        if when == "same_sync" {
+            let tx = store.db.transaction()?;
+            assert!(crate::store::run::apply(&tx, "runner", &b)?);
+            apply_batch(&tx, "runner", std::slice::from_ref(&b), &[])?;
+            backfill::receive(&tx, "runner", &page(work.item, 0, &batch, true))?;
+            tx.commit()?;
+        } else {
+            deliver(
+                &mut store,
+                "runner",
+                &page(work.item, 0, &batch, when == "after_completion"),
+            )?;
+            assert_eq!(view(&store, "a")?["direct"]["reported_requests"], 32);
+            sync(&mut store, "runner", &[b], &[])?;
+            deliver(&mut store, "runner", &page(work.item, 32, &[(99, 8)], true))?;
+            let audit = store.token_backfill_audit("scan", 0)?.unwrap();
+            assert!(audit["entries"].as_array().unwrap().iter().any(|row| {
+                row["source"] == "assignment" && row["evidence"]["decision"] == "ambiguous_turn"
+            }));
+        }
+        assert_eq!(
+            store.token_backfill_status("scan", 0)?.unwrap()["runs"][0]["gap"],
+            "ambiguous_turn"
+        );
+        let expected = view(&store, "a")?;
+        assert_eq!(expected["subtree"]["started_runs"], 2);
+        assert_eq!(expected["subtree"]["reported_requests"], 1);
+        assert_eq!(expected["subtree"]["total_tokens"]["tokens"], "2");
+        assert_eq!(
+            expected["subtree"]["cached_input_tokens"]["tokens"],
+            Value::Null
+        );
+        sync(&mut store, "runner", &[], &[server])?;
+        backfill_job(&mut store, "repeat", All, PreferNative)?;
+        assert!(backfill::pending(&store.db, "runner")?.is_none());
+        store.rebuild_token_usage(&All)?;
+        assert_eq!(view(&store, "a")?, expected);
+    }
+    Ok(())
+}
+
+#[test]
+fn complementary_live_fields_merge_only_when_every_known_value_agrees() -> Result<()> {
+    use protocol::{TokenBackfillContent, TokenConflictPolicy::*, TokenUsageScope::*};
+    for before in [true, false] {
+        let fixture = Fixture::new()?;
+        let mut store = Store::initialize(&fixture.file())?;
+        base(&store.db)?;
+        issue(&store.db, "root", None)?;
+        assignment(&store.db, "task", "root", "runner")?;
+        let run = native_run("run", "task");
+        sync(&mut store, "runner", std::slice::from_ref(&run), &[])?;
+        let mut total = observation(&run, 1, Some(10));
+        total.last.cached_input_tokens = None;
+        let mut input = total.clone();
+        input.last.input_tokens = Some(8);
+        let mut output = total.clone();
+        output.last.total_tokens = None;
+        output.last.output_tokens = Some(2);
+        let copies = [total, input.clone(), output];
+        if before {
+            sync(&mut store, "runner", &[], &copies)?;
+            assert_eq!(
+                view(&store, "root")?["direct"]["input_tokens"]["tokens"],
+                "8"
+            );
+        }
+        backfill_job(&mut store, "scan", All, Quarantine)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        let mut scan = page(work.item, 0, &[(1, 10)], true);
+        let TokenBackfillContent::Records { records, .. } = &mut scan.content else {
+            unreachable!()
+        };
+        let counts = records[0].counts.as_mut().unwrap();
+        counts.input_tokens = Some(8);
+        counts.output_tokens = Some(2);
+        counts.cached_input_tokens = Some(0);
+        deliver(&mut store, "runner", &scan)?;
+        if !before {
+            sync(&mut store, "runner", &[], &copies)?;
+        }
+        let view_after = view(&store, "root")?;
+        assert_eq!(view_after["direct"]["reported_requests"], 1);
+        assert_eq!(view_after["direct"]["total_tokens"]["tokens"], "10");
+        assert_eq!(view_after["direct"]["cached_input_tokens"]["tokens"], "0");
+        assert_eq!(view_after["direct"]["output_tokens"]["tokens"], "2");
+        input.last.input_tokens = Some(9);
+        sync(&mut store, "runner", &[], &[input])?;
+        assert_eq!(view(&store, "root")?["direct"]["reported_requests"], 0);
+    }
+    Ok(())
+}
+
+#[test]
+fn revoked_rollout_only_keys_do_not_choose_the_first_verified_live_owner() -> Result<()> {
+    use protocol::{TokenConflictPolicy::*, TokenUsageScope::*};
+    for historic in [false, true] {
+        for same_batch in [false, true] {
+            for b_first in [false, true] {
+                let fixture = Fixture::new()?;
+                let mut store = Store::initialize(&fixture.file())?;
+                base(&store.db)?;
+                issue(&store.db, "left", None)?;
+                issue(&store.db, "right", Some("left"))?;
+                assignment(&store.db, "task-a", "left", "runner")?;
+                assignment(&store.db, "task-b", "right", "runner")?;
+                let a = native_run("a", "task-a");
+                let mut b = native_run("b", "task-b");
+                b.thread_id.clone_from(&a.thread_id);
+                b.turn_id.clone_from(&a.turn_id);
+                let from_a = observation(&a, 10, Some(6));
+                let from_b = observation(&b, 10, Some(6));
+                sync(&mut store, "runner", &[a], &[])?;
+                if historic {
+                    backfill_job(&mut store, "scan", All, PreferNative)?;
+                    let work = backfill::pending(&store.db, "runner")?.unwrap();
+                    deliver(&mut store, "runner", &page(work.item, 0, &[(10, 25)], true))?;
+                }
+                let (first, second) = if b_first {
+                    (from_b, from_a)
+                } else {
+                    (from_a, from_b)
+                };
+                if same_batch {
+                    sync(&mut store, "runner", &[b], std::slice::from_ref(&first))?;
+                } else {
+                    sync(&mut store, "runner", &[b], &[])?;
+                    assert_eq!(view(&store, "left")?["subtree"]["reported_requests"], 0);
+                    sync(&mut store, "runner", &[], std::slice::from_ref(&first))?;
+                }
+                sync(&mut store, "runner", &[], &[second, first])?;
+                let expected = view(&store, "left")?;
+                assert_eq!(expected["subtree"]["reported_requests"], 1);
+                assert_eq!(expected["subtree"]["total_tokens"]["tokens"], "6");
+                assert_eq!(expected["direct"]["reported_requests"], i64::from(!b_first));
+                let owner: String =
+                    store
+                        .db
+                        .query_row("SELECT run_id FROM token_requests", [], |row| row.get(0))?;
+                assert_eq!(owner, if b_first { "b" } else { "a" });
+                if historic {
+                    let status = store.token_backfill_status("scan", 0)?.unwrap();
+                    assert_eq!(status["runs"][0]["gap"], "ambiguous_turn");
+                    assert_eq!(
+                        store.token_backfill_audit("scan", 0)?.unwrap()["entries"][0]["evidence"]["native"]
+                            ["total_tokens"],
+                        25
+                    );
+                }
+                store.rebuild_token_usage(&All)?;
+                assert_eq!(view(&store, "left")?, expected);
             }
         }
     }

@@ -1,3 +1,6 @@
+pub(super) mod backfill;
+pub(super) mod rebuild;
+
 use super::Store;
 use anyhow::Result;
 use protocol::{RunObservation, RunPhase, RunTokenUsage, TokenCounts};
@@ -96,10 +99,11 @@ struct VerifiedRun {
 
 fn verified_run(db: &Connection, id: &str) -> Result<Option<VerifiedRun>> {
     let row = db.prepare_cached(
-        "SELECT r.assignment_id, a.task_id, r.issue_id, a.runner_id, r.thread_id, r.turn_id, r.legacy, r.tally
-         FROM token_runs r JOIN runner_assignments a ON a.id = r.assignment_id WHERE r.run_id = ?1",
+        "SELECT r.assignment_id, a.task_id, r.issue_id, a.runner_id, r.thread_id, r.turn_id, r.legacy, p.tally
+         FROM token_runs r JOIN runner_assignments a ON a.id = r.assignment_id
+         LEFT JOIN token_run_tallies p ON p.run_id = r.run_id WHERE r.run_id = ?1",
     )?.query_row([id], |row| Ok((
-        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get::<_, String>(7)?,
+        row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get::<_, Option<String>>(7)?,
     ))).optional()?;
     row.map(
         |(assignment, task, issue, runner, thread, turn, legacy, tally)| {
@@ -111,7 +115,11 @@ fn verified_run(db: &Connection, id: &str) -> Result<Option<VerifiedRun>> {
                 thread,
                 turn,
                 legacy,
-                tally: serde_json::from_str(&tally)?,
+                tally: tally
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()?
+                    .unwrap_or_default(),
             })
         },
     )
@@ -125,12 +133,16 @@ fn start(db: &Connection, observation: &RunObservation) -> Result<bool> {
     if thread.is_empty() || turn.is_empty() {
         return Ok(false);
     }
-    Ok(db.prepare_cached(
+    let created = db.prepare_cached(
         "INSERT INTO token_runs (run_id, assignment_id, issue_id, thread_id, turn_id, legacy, tally)
          SELECT ?1, ?2, issue_id, ?3, ?4, 0, ?5 FROM tasks WHERE id = ?6
          ON CONFLICT(run_id) DO NOTHING",
     )?.execute(params![observation.run_id, observation.assignment_id, thread, turn,
-        serde_json::to_string(&Tally::default())?, observation.task_id])? == 1)
+        serde_json::to_string(&Tally::default())?, observation.task_id])? == 1;
+    if created {
+        save_run_tally(db, &observation.run_id, Tally::default())?;
+    }
+    Ok(created)
 }
 
 fn stage(db: &Connection, runner: &str, usage: &RunTokenUsage) -> Result<()> {
@@ -167,6 +179,9 @@ fn persist_request(
     {
         return Ok(());
     }
+    if backfill::live(db, usage, tally)? {
+        return Ok(());
+    }
     let last = serde_json::to_string(&usage.last)?;
     let key = params![usage.thread_id, usage.turn_id, usage.response_id];
     if db.prepare_cached(
@@ -182,10 +197,21 @@ fn persist_request(
     // A record asserting a different Run cannot invalidate the original Run's
     // evidence. For an identity conflict within the same Run, neither counts.
     if previous.0 == usage.run_id && previous.1 != last && previous.2.is_none() {
-        db.prepare_cached(
-            "UPDATE token_requests SET conflict = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
-        )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, last])?;
-        tally.count(serde_json::from_str(&previous.1)?, -1);
+        let old: TokenCounts = serde_json::from_str(&previous.1)?;
+        if let Some(merged) = old.merge_known(usage.last) {
+            if old != merged {
+                db.prepare_cached(
+                    "UPDATE token_requests SET last = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
+                )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, serde_json::to_string(&merged)?])?;
+                tally.count(old, -1);
+                tally.count(merged, 1);
+            }
+        } else {
+            db.prepare_cached(
+                "UPDATE token_requests SET conflict = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
+            )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, last])?;
+            tally.count(old, -1);
+        }
     }
     Ok(())
 }
@@ -194,6 +220,7 @@ fn persist_request(
 struct RunBatch<'a> {
     observation: Option<&'a RunObservation>,
     started: Option<&'a RunObservation>,
+    new_start: bool,
     usage: Vec<&'a RunTokenUsage>,
 }
 
@@ -217,12 +244,19 @@ pub(super) fn apply_batch(
         runs.entry(&record.run_id).or_default().usage.push(record);
     }
 
+    for batch in runs.values_mut() {
+        if let Some(observation) = batch.started {
+            batch.new_start = start(db, observation)?;
+            if batch.new_start
+                && let (Some(thread), Some(turn)) = (&observation.thread_id, &observation.turn_id)
+            {
+                backfill::note_turn_ambiguity(db, thread, turn)?;
+            }
+        }
+    }
     let mut direct: BTreeMap<String, Summary> = BTreeMap::new();
     for (id, records) in runs {
-        let new_start = match records.started {
-            Some(observation) => start(db, observation)?,
-            None => false,
-        };
+        let new_start = records.new_start;
         let Some(run) = verified_run(db, id)? else {
             if records.observation.is_some() {
                 db.prepare_cached("DELETE FROM token_usage_pending WHERE run_id = ?1")?
@@ -260,32 +294,63 @@ pub(super) fn apply_batch(
             persist_request(db, &run, runner, record, &mut after)?;
         }
         if after != before {
-            db.prepare_cached(
-                "UPDATE token_runs SET tally = ?2, valid_records = ?3 WHERE run_id = ?1",
-            )?
-            .execute(params![
-                id,
-                serde_json::to_string(&after)?,
-                after.valid_records
-            ])?;
+            save_run_tally(db, id, after)?;
         }
         if new_start || after != before {
-            let was_observed = i64::from(before.valid_records > 0);
-            let observed = i64::from(after.valid_records > 0);
-            let mut delta = Summary {
-                started_runs: i64::from(new_start),
-                observed_runs: observed - was_observed,
-                legacy_unobserved: if run.legacy {
-                    was_observed - observed
-                } else {
-                    0
-                },
-                tally: after,
-            };
-            delta.tally.merge(before, -1);
-            direct.entry(run.issue).or_default().merge(delta);
+            direct
+                .entry(run.issue.clone())
+                .or_default()
+                .merge(run_delta(&run, after, new_start));
         }
     }
+    update_rollups(db, direct)?;
+    // Confirm receipt independently from attribution. Malformed, conflicted
+    // and misattributed observations must not jam the Runner outbox.
+    Ok(usage.iter().map(|usage| usage.event_id.clone()).collect())
+}
+
+fn save_run_tally(db: &Connection, id: &str, tally: Tally) -> Result<()> {
+    db.prepare_cached(
+        "INSERT INTO token_run_tallies (run_id, tally, valid_records) VALUES (?1, ?2, ?3)
+         ON CONFLICT(run_id) DO UPDATE SET tally = excluded.tally, valid_records = excluded.valid_records"
+    )?
+        .execute(params![
+            id,
+            serde_json::to_string(&tally)?,
+            tally.valid_records
+        ])?;
+    Ok(())
+}
+
+fn save_delta(db: &Connection, id: &str, run: &VerifiedRun, after: Tally) -> Result<()> {
+    if after != run.tally {
+        save_run_tally(db, id, after)?;
+        update_rollups(
+            db,
+            BTreeMap::from([(run.issue.clone(), run_delta(run, after, false))]),
+        )?;
+    }
+    Ok(())
+}
+
+fn run_delta(run: &VerifiedRun, after: Tally, new_start: bool) -> Summary {
+    let was_observed = i64::from(run.tally.valid_records > 0);
+    let observed = i64::from(after.valid_records > 0);
+    let mut delta = Summary {
+        started_runs: i64::from(new_start),
+        observed_runs: observed - was_observed,
+        legacy_unobserved: if run.legacy {
+            was_observed - observed
+        } else {
+            0
+        },
+        tally: after,
+    };
+    delta.tally.merge(run.tally, -1);
+    delta
+}
+
+fn update_rollups(db: &Connection, direct: BTreeMap<String, Summary>) -> Result<()> {
     let mut subtree: BTreeMap<String, Summary> = BTreeMap::new();
     for (issue, delta) in direct {
         if delta == Summary::default() {
@@ -303,9 +368,7 @@ pub(super) fn apply_batch(
             update_issue(db, &issue, "subtree", delta)?;
         }
     }
-    // Confirm receipt independently from attribution. Malformed, conflicted
-    // and misattributed observations must not jam the Runner outbox.
-    Ok(usage.iter().map(|usage| usage.event_id.clone()).collect())
+    Ok(())
 }
 
 fn update_issue(db: &Connection, issue: &str, scope: &str, delta: Summary) -> Result<()> {
@@ -321,6 +384,10 @@ fn update_issue(db: &Connection, issue: &str, scope: &str, delta: Summary) -> Re
         .transpose()?
         .unwrap_or_default();
     Summary::merge(&mut summary, delta);
+    write_issue(db, issue, scope, summary)
+}
+
+fn write_issue(db: &Connection, issue: &str, scope: &str, summary: Summary) -> Result<()> {
     db.prepare_cached(
         "INSERT INTO token_issue_rollups (issue_id, scope, summary) VALUES (?1, ?2, ?3)
          ON CONFLICT(issue_id, scope) DO UPDATE SET summary = excluded.summary",

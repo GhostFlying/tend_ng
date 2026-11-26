@@ -28,6 +28,7 @@ pub use report::*;
 pub use review::*;
 
 pub const DEFAULT_LISTEN: &str = "127.0.0.1:8832";
+pub const MAX_REQUEST_BYTES: usize = 256 * 1024;
 pub const TOKEN_ENV: &str = "TEND_TOKEN";
 
 #[derive(Debug, Deserialize, Serialize)]

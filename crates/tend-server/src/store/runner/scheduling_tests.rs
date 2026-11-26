@@ -65,6 +65,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
                 runs: vec![],
                 records: vec![],
                 token_usage: vec![],
+                token_backfill: None,
             },
             None,
             None,

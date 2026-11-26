@@ -228,6 +228,14 @@ impl Store {
             .transpose()
     }
 
+    pub fn native_turn_active(&self, run: &str) -> Result<bool> {
+        Ok(self.0.query_row(
+            "SELECT state IN ('prepared', 'running') FROM local_runs WHERE id = ?1",
+            [run],
+            |row| row.get(0),
+        )?)
+    }
+
     pub fn active_runs(&self) -> Result<Vec<String>> {
         let mut query = self.0.prepare(
             "SELECT id FROM local_runs WHERE state IN ('prepared', 'running') ORDER BY rowid",

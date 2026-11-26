@@ -93,6 +93,9 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (Method::Get, "/api/v1/runs/fixture"),
         (Method::Head, "/api/v1/issues/42/state"),
         (Method::Post, protocol::REPORT_REVISIONS_PATH),
+        (Method::Post, protocol::TOKEN_BACKFILL_PATH),
+        (Method::Get, "/api/v1/token-usage/backfills/job/audit"),
+        (Method::Post, protocol::TOKEN_REBUILD_PATH),
     ] {
         assert!(!web_route(&method, path), "{method} {path}");
     }

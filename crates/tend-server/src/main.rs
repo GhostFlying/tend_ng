@@ -8,6 +8,7 @@ mod pull_worker;
 mod router;
 mod runner_api;
 mod store;
+mod token_usage_api;
 mod web;
 mod web_session;
 
@@ -27,7 +28,7 @@ use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
 const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
-const MAX_REQUEST_BYTES: u64 = 256 * 1024;
+const MAX_REQUEST_BYTES: u64 = protocol::MAX_REQUEST_BYTES as u64;
 
 fn main() -> Result<()> {
     let mut args = env::args_os().skip(1);
@@ -143,6 +144,7 @@ fn main() -> Result<()> {
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let synchronization = runner_api::serve(&db, codebase_cli.clone())?;
+    let token_usage_maintenance = token_usage_api::serve(&db)?;
     let pull_links = serve_pull_links(&db, codebase_cli.clone())?;
     let discussion = std::sync::Arc::new(discussion::Service::new(
         discussion_config.as_deref(),
@@ -234,6 +236,15 @@ fn main() -> Result<()> {
             ) = pull_links.try_send((request, issue))
             {
                 let (_, body) = api_error(503, "Pull association API is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
+        }
+        if token_usage_api::matches(route) {
+            if let Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) =
+                token_usage_maintenance.try_send(request)
+            {
+                let (_, body) = api_error(503, "Token history API is busy");
                 let _ = request.respond(json_response(503, &body)?);
             }
             continue;

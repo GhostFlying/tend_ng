@@ -48,6 +48,11 @@ jobs:
         run: python3 -B tests/e2e/review_transition.py target/release/tend-server target/release/tend target/release/tend-runner --scenario artifact-replacement
       - name: Check Issue token usage and Runner replay
         run: python3 -B tests/e2e/issue_token_usage.py target/release/tend-server target/release/tend target/release/tend-runner
+      - name: Check historical token usage backfill and rebuild
+        run: |
+          cargo test --release --locked -p tend-server store::token_usage
+          cargo test --release --locked -p tend-runner usage::
+          python3 -B tests/e2e/token_usage_backfill.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check Issue backlog, stop evidence and ordered input
         run: |
           python3 -B tests/e2e/issue_input_order.py target/release/tend-server

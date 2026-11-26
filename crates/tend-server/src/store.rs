@@ -32,6 +32,23 @@ mod work;
 pub(crate) fn remove_token_usage_schema(db: &Connection) -> Result<()> {
     db.execute_batch(
         "DROP TRIGGER token_issue_tree_insert;
+         DROP TRIGGER token_backfill_reroute;
+         DROP TRIGGER token_rebuild_track_start;
+         DROP TRIGGER token_rebuild_track_insert;
+         DROP TRIGGER token_rebuild_track_update;
+         DROP TRIGGER token_rebuild_track_delete;
+         DROP TABLE token_rebuild_dirty;
+         DROP TABLE token_rebuild_state;
+         DROP TABLE token_rebuild_runs;
+         DROP TABLE token_rebuild_issues;
+         DROP TABLE token_run_tallies;
+         DROP TABLE token_backfill_ambiguous;
+         DROP TABLE token_backfill_audit;
+         DROP TABLE token_backfill_keys;
+         DROP TABLE token_backfill_seen;
+         DROP TABLE token_backfill_items;
+         DROP TABLE token_backfill_readers;
+         DROP TABLE token_backfill_jobs;
          DROP TABLE token_usage_pending;
          DROP TABLE token_requests;
          DROP TABLE token_runs;
@@ -49,7 +66,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 40;
+pub(crate) const SCHEMA_VERSION: i64 = 41;
 
 pub struct Store {
     db: Connection,
@@ -276,6 +293,11 @@ impl Store {
         if version < 39 {
             codebase_comments::migrate(&tx)?;
         }
+        if version < 41 {
+            token_usage::backfill::migrate(&tx)?;
+            token_usage::rebuild::migrate(&tx)?;
+            token_usage::backfill::migrate_ambiguities(&tx)?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -287,6 +309,7 @@ impl Store {
              CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);
              CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",
         )?;
+        token_usage::rebuild::abandon(&tx)?;
         execution_hosts::install_index(&tx)?;
         tx.commit()?;
         board::install_tracking(&store.db)?;

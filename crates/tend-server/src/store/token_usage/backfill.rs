@@ -1,0 +1,748 @@
+use super::{Tally, VerifiedRun, verified_run};
+use crate::store::{Store, runner::FRESH_SECONDS, timing};
+use anyhow::Result;
+use protocol::{
+    NativeTokenRecord, StartTokenBackfill, TokenBackfillContent, TokenBackfillPage,
+    TokenBackfillWork, TokenConflictPolicy, TokenCounts, TokenUsageScope,
+};
+use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+const PAGE: i64 = 100;
+
+pub(in crate::store) fn migrate(db: &Connection) -> Result<()> {
+    db.execute_batch(include_str!("backfill.sql"))?;
+    Ok(())
+}
+
+pub(in crate::store) fn migrate_ambiguities(db: &Connection) -> Result<()> {
+    let mut sql = db.prepare(
+        "SELECT thread_id, turn_id FROM token_runs GROUP BY thread_id, turn_id HAVING count(*) > 1",
+    )?;
+    let ambiguous = sql
+        .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for (thread, turn) in ambiguous {
+        note_turn_ambiguity(db, &thread, &turn)?;
+    }
+    Ok(())
+}
+
+type Key<'a> = (&'a str, &'a str, &'a str);
+
+fn request(db: &Connection, key: Key<'_>) -> Result<Option<(String, TokenCounts, Option<String>)>> {
+    db.prepare_cached(
+        "SELECT run_id, last, conflict FROM token_requests
+         WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
+    )?
+    .query_row(key, |row| {
+        Ok((row.get(0)?, row.get::<_, String>(1)?, row.get(2)?))
+    })
+    .optional()?
+    .map(|(run, last, conflict)| Ok((run, serde_json::from_str(&last)?, conflict)))
+    .transpose()
+}
+
+#[derive(Deserialize, Serialize)]
+struct Evidence {
+    native: NativeTokenRecord,
+    prior_native: Option<NativeTokenRecord>,
+    server: Option<TokenCounts>,
+    server_conflict: Option<TokenCounts>,
+    policy: TokenConflictPolicy,
+}
+
+fn compatible(server: TokenCounts, native: TokenCounts) -> bool {
+    server
+        .fields()
+        .into_iter()
+        .zip(native.fields())
+        .all(|(server, native)| server.is_none() || server == native)
+}
+
+impl Evidence {
+    fn verified_server(&self) -> Option<TokenCounts> {
+        self.server
+            .filter(|counts| counts.valid() && self.server_conflict.is_none())
+    }
+
+    fn decision(&self) -> (&'static str, Option<TokenCounts>) {
+        use TokenConflictPolicy::*;
+        let native = self.native.counts.filter(|counts| {
+            counts.valid() && !self.native.invalid && self.native.variant.is_none()
+        });
+        let server = self.verified_server();
+        match (native, self.server, server, self.policy) {
+            (Some(native), None, _, _) if self.prior_native.is_none() => {
+                ("native_only", Some(native))
+            }
+            (Some(native), _, Some(server), _)
+                if self.prior_native.is_none() && compatible(server, native) =>
+            {
+                (
+                    if server == native {
+                        "compatible"
+                    } else {
+                        "enriched"
+                    },
+                    Some(native),
+                )
+            }
+            (Some(native), _, _, PreferNative) => ("chose_native", Some(native)),
+            (_, _, Some(server), PreferServer) => ("chose_server", Some(server)),
+            _ => ("quarantined", None),
+        }
+    }
+
+    fn audit(&self, decision: &str) -> Value {
+        json!({"server":self.server,"server_conflict":self.server_conflict,
+            "native":self.native.counts,"native_variant":self.native.variant,
+            "native_invalid":self.native.invalid,"prior_native":self.prior_native,
+            "policy":self.policy,"decision":decision})
+    }
+}
+
+fn binding(db: &Connection, key: Key<'_>) -> Result<Option<(String, String, Evidence)>> {
+    db.prepare_cached(
+        "SELECT run_id, job_id, evidence FROM token_backfill_keys
+         WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
+    )?
+    .query_row(key, |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get::<_, String>(2)?))
+    })
+    .optional()?
+    .map(|(run, job, text)| Ok((run, job, serde_json::from_str(&text)?)))
+    .transpose()
+}
+
+fn save_binding(
+    db: &Connection,
+    key: Key<'_>,
+    run: &str,
+    job: &str,
+    evidence: &Evidence,
+) -> Result<()> {
+    db.prepare_cached(
+        "INSERT INTO token_backfill_keys (thread_id, turn_id, response_id, run_id, job_id, evidence)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+         ON CONFLICT(thread_id, turn_id, response_id) DO UPDATE SET job_id = excluded.job_id, evidence = excluded.evidence",
+    )?.execute(params![key.0, key.1, key.2, run, job, serde_json::to_string(evidence)?])?;
+    Ok(())
+}
+
+fn audit(
+    db: &Connection,
+    job: &str,
+    run: &str,
+    response: &str,
+    source: &str,
+    evidence: Value,
+) -> Result<()> {
+    db.prepare_cached(
+        "INSERT INTO token_backfill_audit (job_id, run_id, response_id, source, evidence)
+         VALUES (?1, ?2, ?3, ?4, ?5) ON CONFLICT DO NOTHING",
+    )?
+    .execute(params![
+        job,
+        run,
+        response,
+        source,
+        serde_json::to_string(&evidence)?
+    ])?;
+    Ok(())
+}
+
+/// For managed keys both source variants are retained, so choosing authority
+/// gives the same result whether a live observation arrives first or last.
+fn project(
+    db: &Connection,
+    key: Key<'_>,
+    run: &str,
+    previous: Option<(String, TokenCounts, Option<String>)>,
+    chosen: Option<TokenCounts>,
+    evidence: &Evidence,
+    tally: &mut Tally,
+) -> Result<()> {
+    let before = previous
+        .as_ref()
+        .and_then(|(_, last, conflict)| conflict.is_none().then_some(*last));
+    if before == chosen {
+        return Ok(());
+    }
+    if let Some(before) = before {
+        tally.count(before, -1);
+    }
+    if let Some(chosen) = chosen {
+        tally.count(chosen, 1);
+        db.prepare_cached(
+            "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
+             ON CONFLICT(thread_id, turn_id, response_id) DO UPDATE SET last = excluded.last, conflict = NULL",
+        )?.execute(params![key.0, key.1, key.2, run, serde_json::to_string(&chosen)?])?;
+    } else if let Some((_, last, _)) = previous {
+        db.prepare_cached(
+            "UPDATE token_requests SET conflict = ?4
+             WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
+        )?
+        .execute(params![
+            key.0,
+            key.1,
+            key.2,
+            serde_json::to_string(&evidence.native.counts.unwrap_or(last))?
+        ])?;
+    }
+    Ok(())
+}
+
+/// Called only after ordinary sync verified the original assignment and turn.
+/// A successor never submits observations on the original Runner's behalf.
+pub(super) fn live(
+    db: &Connection,
+    usage: &protocol::RunTokenUsage,
+    tally: &mut Tally,
+) -> Result<bool> {
+    let key = (&*usage.thread_id, &*usage.turn_id, &*usage.response_id);
+    let Some((run, job, mut evidence)) = binding(db, key)? else {
+        return Ok(false);
+    };
+    // Revoked historical bindings are evidence, not realtime ownership.
+    // The canonical request was restored (or removed) when ambiguity was
+    // recorded, so just use the ordinary first verified realtime copy.
+    if ambiguous(db, key.0, key.1)? {
+        return Ok(false);
+    }
+    if run != usage.run_id {
+        audit(
+            db,
+            &job,
+            &usage.run_id,
+            key.2,
+            "live",
+            json!({
+                "decision":"wrong_run","owner_run_id":run,"server":usage.last
+            }),
+        )?;
+        return Ok(true);
+    }
+    match evidence.server {
+        None => evidence.server = Some(usage.last),
+        Some(last) if last == usage.last || evidence.server_conflict == Some(usage.last) => {
+            return Ok(true);
+        }
+        Some(first) => {
+            if evidence.server_conflict.is_none()
+                && let Some(merged) = first.merge_known(usage.last)
+            {
+                if merged == first {
+                    return Ok(true);
+                }
+                evidence.server = Some(merged);
+            } else {
+                evidence.server_conflict.get_or_insert(usage.last);
+            }
+        }
+    }
+    let (decision, chosen) = evidence.decision();
+    if decision != "compatible" {
+        let mut detail = evidence.audit(decision);
+        detail["incoming"] = json!(usage.last);
+        audit(db, &job, &run, key.2, "live", detail)?;
+    }
+    project(db, key, &run, request(db, key)?, chosen, &evidence, tally)?;
+    save_binding(db, key, &run, &job, &evidence)?;
+    Ok(true)
+}
+
+fn historical(
+    db: &Connection,
+    run: &VerifiedRun,
+    run_id: &str,
+    job: &StartTokenBackfill,
+    reader: &str,
+    native: &NativeTokenRecord,
+    tally: &mut Tally,
+) -> Result<&'static str> {
+    let key = (&*run.thread, &*run.turn, &*native.response_id);
+    let original = request(db, key)?;
+    let binding = binding(db, key)?;
+    if let Some(owner) = binding
+        .as_ref()
+        .map(|(id, _, _)| id)
+        .or(original.as_ref().map(|row| &row.0))
+        && owner != run_id
+    {
+        audit(
+            db,
+            &job.job_id,
+            run_id,
+            key.2,
+            "rollout",
+            json!({
+                "decision":"wrong_run","owner_run_id":owner,"reader_id":reader,"native":native
+            }),
+        )?;
+        return Ok("wrong_run");
+    }
+    let old = binding.as_ref().map(|(_, _, old)| old);
+    let evidence = match old {
+        Some(old) => Evidence {
+            native: native.clone(),
+            prior_native: if old.native == *native {
+                old.prior_native.clone()
+            } else {
+                Some(old.native.clone())
+            },
+            server: old.server,
+            server_conflict: old.server_conflict,
+            policy: if job.policy == TokenConflictPolicy::Quarantine && old.native == *native {
+                old.policy
+            } else {
+                job.policy
+            },
+        },
+        None => Evidence {
+            native: native.clone(),
+            prior_native: None,
+            server: original.as_ref().map(|row| row.1),
+            server_conflict: original
+                .as_ref()
+                .and_then(|row| row.2.as_ref())
+                .map(|raw| serde_json::from_str(raw))
+                .transpose()?,
+            policy: job.policy,
+        },
+    };
+    let (decision, chosen) = evidence.decision();
+    if decision != "compatible" && decision != "native_only"
+        || old.is_some_and(|old| old.native != *native)
+    {
+        let mut detail = evidence.audit(decision);
+        detail["reader_id"] = json!(reader);
+        detail["previous_selected"] = json!(original.as_ref().map(|row| row.1));
+        detail["previous_native"] = json!(old.map(|old| &old.native));
+        audit(db, &job.job_id, run_id, key.2, "rollout", detail)?;
+    }
+    project(db, key, run_id, original, chosen, &evidence, tally)?;
+    save_binding(db, key, run_id, &job.job_id, &evidence)?;
+    Ok(decision)
+}
+
+fn ambiguous(db: &Connection, thread: &str, turn: &str) -> Result<bool> {
+    Ok(db.prepare_cached(
+        "SELECT EXISTS(SELECT 1 FROM token_backfill_ambiguous WHERE thread_id = ?1 AND turn_id = ?2)"
+    )?.query_row(params![thread, turn], |row| row.get(0))?)
+}
+
+fn restore_server_copy(
+    db: &Connection,
+    key: Key<'_>,
+    run: &str,
+    original: Option<(String, TokenCounts, Option<String>)>,
+    evidence: &Evidence,
+    tally: &mut Tally,
+) -> Result<()> {
+    if let Some((owner, last, conflict)) = original {
+        if owner != run {
+            return Ok(());
+        }
+        if conflict.is_none() {
+            tally.count(last, -1);
+        }
+    }
+    if let Some(server) = evidence.server {
+        // Keep even a conflicted realtime owner and its exact old evidence.
+        // Do not leave a rollout-origin conflict marker on an ordinary copy.
+        let conflict = evidence
+            .server_conflict
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        db.prepare_cached(
+            "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, conflict, observed_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
+             ON CONFLICT(thread_id, turn_id, response_id) DO UPDATE SET last = excluded.last, conflict = excluded.conflict",
+        )?.execute(params![key.0, key.1, key.2, run, serde_json::to_string(&server)?, conflict])?;
+        if let Some(server) = evidence.verified_server() {
+            tally.count(server, 1);
+        }
+    } else {
+        // The job audit and original binding retain the retracted evidence.
+        // A rollout-only row must not reserve the native key against a
+        // verified live receipt, even if the row had already been isolated.
+        db.prepare_cached(
+            "DELETE FROM token_requests
+             WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3 AND run_id = ?4",
+        )?
+        .execute(params![key.0, key.1, key.2, run])?;
+    }
+    Ok(())
+}
+
+/// The accepted Start can race a page or arrive after a completed job.
+/// Retract only rollout-derived contributions and preserve ordinary copies.
+pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> Result<bool> {
+    if !ambiguous(db, thread, turn)? {
+        let count = db.prepare_cached(
+            "SELECT count(*) FROM (SELECT run_id FROM token_runs WHERE thread_id = ?1 AND turn_id = ?2 LIMIT 2)"
+        )?.query_row(params![thread, turn], |row| row.get::<_, i64>(0))?;
+        if count < 2 {
+            return Ok(false);
+        }
+        db.execute(
+            "INSERT INTO token_backfill_ambiguous VALUES (?1, ?2)",
+            params![thread, turn],
+        )?;
+        let mut keys = db.prepare_cached(
+            "SELECT run_id, job_id, response_id, evidence FROM token_backfill_keys
+             WHERE thread_id = ?1 AND turn_id = ?2",
+        )?;
+        let grouped = keys
+            .query_map(params![thread, turn], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut affected = std::collections::BTreeMap::new();
+        for (run_id, job, response, text) in grouped {
+            let (_, tally) = match affected.entry(run_id.clone()) {
+                std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
+                std::collections::btree_map::Entry::Vacant(entry) => {
+                    let run = verified_run(db, &run_id)?.expect("backfill key references a Run");
+                    let tally = run.tally;
+                    entry.insert((run, tally))
+                }
+            };
+            let evidence: Evidence = serde_json::from_str(&text)?;
+            let key = (thread, turn, response.as_str());
+            let original = request(db, key)?;
+            let mut detail = evidence.audit("ambiguous_turn");
+            detail["previous_selected"] = json!(original.as_ref().map(|row| row.1));
+            audit(db, &job, &run_id, &response, "assignment", detail)?;
+            restore_server_copy(db, key, &run_id, original, &evidence, tally)?;
+        }
+        for (id, (run, tally)) in affected {
+            super::save_delta(db, &id, &run, tally)?;
+        }
+    }
+    db.prepare_cached(
+        "UPDATE token_backfill_items SET state = 'gap', gap = 'ambiguous_turn'
+         WHERE run_id IN (SELECT run_id FROM token_runs WHERE thread_id = ?1 AND turn_id = ?2)
+           AND gap IS NOT 'ambiguous_turn'",
+    )?
+    .execute(params![thread, turn])?;
+    Ok(true)
+}
+
+pub(in crate::store) fn pending(
+    db: &Connection,
+    reader: &str,
+) -> Result<Option<TokenBackfillWork>> {
+    Ok(db
+        .prepare_cached(
+            "SELECT i.id, i.job_id, a.runner_id, r.run_id, r.thread_id, r.turn_id, i.offset
+         FROM token_backfill_items i JOIN token_runs r ON r.run_id = i.run_id
+         JOIN runner_assignments a ON a.id = r.assignment_id
+         WHERE i.reader_id = ?1 AND i.state = 'pending' ORDER BY i.id LIMIT 1",
+        )?
+        .query_row([reader], |row| {
+            Ok(TokenBackfillWork {
+                item: row.get(0)?,
+                job_id: row.get(1)?,
+                runner_id: row.get(2)?,
+                run_id: row.get(3)?,
+                thread_id: row.get(4)?,
+                turn_id: row.get(5)?,
+                offset: row.get(6)?,
+            })
+        })
+        .optional()?)
+}
+
+pub(in crate::store) fn receive(
+    db: &Connection,
+    reader: &str,
+    page: &TokenBackfillPage,
+) -> Result<()> {
+    // The current pending item is the bound instruction. Delayed/duplicate
+    // pages, an old reader after retirement and out-of-order pages are no-ops.
+    let Some(work) =
+        pending(db, reader)?.filter(|work| work.item == page.item && work.offset == page.offset)
+    else {
+        return Ok(());
+    };
+    let Some(run) = verified_run(db, &work.run_id)? else {
+        return Ok(());
+    };
+    if run.runner != work.runner_id || run.thread != work.thread_id || run.turn != work.turn_id {
+        return Ok(());
+    }
+    if note_turn_ambiguity(db, &run.thread, &run.turn)? {
+        return Ok(());
+    }
+    if let TokenBackfillContent::Gap { reason } = page.content {
+        db.execute(
+            "UPDATE token_backfill_items SET state = 'gap', gap = ?2 WHERE id = ?1",
+            params![work.item, serde_json::to_value(reason)?.as_str()],
+        )?;
+        return Ok(());
+    }
+    let TokenBackfillContent::Records {
+        snapshot,
+        records,
+        done,
+        prefix,
+    } = &page.content
+    else {
+        unreachable!();
+    };
+    let (previous, last, raw) = db.query_row(
+        "SELECT i.snapshot, i.last_response, j.request FROM token_backfill_items i
+         JOIN token_backfill_jobs j ON j.id = i.job_id WHERE i.id = ?1",
+        [work.item],
+        |row| {
+            Ok((
+                row.get::<_, Option<String>>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
+    )?;
+    if previous.as_ref().is_some_and(|old| old != snapshot)
+        || last.as_ref().is_some_and(|old| {
+            records
+                .first()
+                .is_some_and(|first| *old >= first.response_id)
+        })
+    {
+        db.execute(
+            "UPDATE token_backfill_items SET state = 'gap', gap = 'source_changed' WHERE id = ?1",
+            [work.item],
+        )?;
+        return Ok(());
+    }
+    let job: StartTokenBackfill = serde_json::from_str(&raw)?;
+    let mut tally = run.tally;
+    for native in records {
+        let decision = historical(db, &run, &work.run_id, &job, reader, native, &mut tally)?;
+        db.prepare_cached(
+            "INSERT INTO token_backfill_seen (item, response_id, result) VALUES (?1, ?2, ?3)",
+        )?
+        .execute(params![work.item, native.response_id, decision])?;
+    }
+    super::save_delta(db, &work.run_id, &run, tally)?;
+    if *done {
+        // An unmatched copied fact is reported but never subtracted. Even a
+        // sealed scan does not certify absence (e.g. pre-record Codex versions).
+        db.execute(
+            "INSERT INTO token_backfill_audit (job_id, run_id, response_id, source, evidence)
+             SELECT ?2, q.run_id, q.response_id, 'server',
+                    json_object('decision', 'not_seen_in_rollout', 'server', json(q.last), 'server_conflict', json(q.conflict))
+             FROM token_requests q WHERE q.run_id = ?3
+             AND NOT EXISTS (SELECT 1 FROM token_backfill_seen s WHERE s.item = ?1 AND s.response_id = q.response_id)
+             ON CONFLICT DO NOTHING",
+            params![work.item, work.job_id, work.run_id],
+        )?;
+    }
+    db.execute(
+        "UPDATE token_backfill_items SET snapshot = ?2, offset = offset + ?3, last_response = ?4,
+         state = CASE WHEN NOT ?5 THEN 'pending' WHEN ?6 THEN 'active_prefix' ELSE 'scanned' END WHERE id = ?1",
+        params![work.item, snapshot, records.len() as i64, records.last().map(|r| &r.response_id), done, prefix],
+    )?;
+    Ok(())
+}
+
+/// Returns predicates made only of static SQL. The one selector argument is
+/// separately bound. The Run membership is captured in the job transaction.
+pub(super) fn scope_filter(scope: &TokenUsageScope) -> (&'static str, Option<&str>) {
+    match scope {
+        TokenUsageScope::All => ("?1 IS NULL", None),
+        TokenUsageScope::Run(id) => ("r.run_id = ?1", Some(id)),
+        TokenUsageScope::Task(id) => ("a.task_id = ?1", Some(id)),
+        TokenUsageScope::Issue(id) => (
+            "r.issue_id IN (SELECT descendant FROM token_issue_tree WHERE ancestor =
+                coalesce((SELECT issue_id FROM issue_short_numbers WHERE number = ?1), ?1))",
+            Some(id.strip_prefix('#').unwrap_or(id)),
+        ),
+        TokenUsageScope::Runner(id) => ("a.runner_id = ?1", Some(id)),
+        TokenUsageScope::Host(id) => ("o.host_id = ?1", Some(id)),
+    }
+}
+
+pub(super) const SCOPE_JOINS: &str =
+    "FROM token_runs r JOIN runner_assignments a ON a.id = r.assignment_id
+    JOIN runners o ON o.id = a.runner_id";
+
+impl Store {
+    pub fn start_token_backfill(&mut self, job: &StartTokenBackfill) -> Result<Option<Value>> {
+        let (tx, timing) = timing::begin(&mut self.db, "token_backfill_start")?;
+        let raw = serde_json::to_string(job)?;
+        let created = tx.execute(
+            "INSERT INTO token_backfill_jobs (id, request) VALUES (?1, ?2) ON CONFLICT DO NOTHING",
+            params![job.job_id, raw],
+        )? == 1;
+        if created {
+            let (filter, argument) = scope_filter(&job.scope);
+            tx.execute(&format!(
+                "WITH RECURSIVE readers(origin, reader, host) AS (
+                    SELECT id, id, host_id FROM runners UNION
+                    SELECT d.origin, s.id, d.host FROM readers d JOIN runner_replacements p
+                      ON p.predecessor = d.reader AND p.retired_at IS NOT NULL
+                    JOIN runners s ON s.id = p.successor AND s.host_id = d.host
+                 ), current_reader AS (
+                    SELECT origin, reader FROM readers
+                    WHERE NOT EXISTS(SELECT 1 FROM runner_replacements
+                        WHERE predecessor = reader AND retired_at IS NOT NULL)
+                 )
+                 INSERT INTO token_backfill_items (job_id, run_id, reader_id, state, gap)
+                 SELECT ?2, r.run_id, rd.reader,
+                    CASE WHEN am.thread_id IS NOT NULL OR rd.reader IS NULL THEN 'gap' ELSE 'pending' END,
+                    CASE WHEN am.thread_id IS NOT NULL THEN 'ambiguous_turn'
+                         WHEN rd.reader IS NULL THEN 'reader_missing' END
+                 {SCOPE_JOINS} LEFT JOIN current_reader rd ON rd.origin = a.runner_id
+                 LEFT JOIN token_backfill_ambiguous am ON am.thread_id = r.thread_id AND am.turn_id = r.turn_id
+                 WHERE {filter}"
+            ), params![argument, job.job_id])?;
+        } else if !tx.query_row(
+            "SELECT request = ?2 FROM token_backfill_jobs WHERE id = ?1",
+            params![job.job_id, raw],
+            |row| row.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
+        timing::commit(tx, timing)?;
+        self.token_backfill_status(&job.job_id, 0)
+    }
+
+    pub fn token_backfill_status(&self, job: &str, after: i64) -> Result<Option<Value>> {
+        let tx = self.db.unchecked_transaction()?;
+        let Some((request, created_at)) = tx
+            .query_row(
+                "SELECT request, created_at FROM token_backfill_jobs WHERE id = ?1",
+                [job],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut counts = serde_json::Map::new();
+        let mut count = tx.prepare(
+            "SELECT state, count(*) FROM (
+               SELECT CASE WHEN i.state != 'pending' THEN i.state
+                 WHEN r.last_seen <= unixepoch() - ?2 THEN 'reader_offline'
+                 WHEN b.runner_id IS NULL THEN 'reader_unsupported'
+                 ELSE 'pending' END AS state
+               FROM token_backfill_items i LEFT JOIN runners r ON r.id = i.reader_id
+               LEFT JOIN token_backfill_readers b ON b.runner_id = i.reader_id WHERE i.job_id = ?1
+             ) GROUP BY state",
+        )?;
+        for data in count.query_map(params![job, FRESH_SECONDS], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })? {
+            let (state, n) = data?;
+            counts.insert(state, json!(n));
+        }
+        let mut items = tx.prepare(
+            "SELECT i.id, i.run_id, r.issue_id, a.task_id, a.runner_id, o.host_id, i.reader_id,
+                CASE WHEN i.state != 'pending' THEN i.state
+                     WHEN rr.last_seen <= unixepoch() - ?3 THEN 'reader_offline'
+                     WHEN b.runner_id IS NULL THEN 'reader_unsupported'
+                     ELSE 'pending' END,
+                i.gap, i.offset,
+                (SELECT count(*) FROM token_backfill_audit WHERE job_id = i.job_id AND run_id = i.run_id AND source = 'server')
+             FROM token_backfill_items i JOIN token_runs r ON r.run_id = i.run_id
+             JOIN runner_assignments a ON a.id = r.assignment_id JOIN runners o ON o.id = a.runner_id
+             LEFT JOIN runners rr ON rr.id = i.reader_id LEFT JOIN token_backfill_readers b ON b.runner_id = i.reader_id
+             WHERE i.job_id = ?1 AND i.id > ?2 ORDER BY i.id LIMIT ?4",
+        )?;
+        let mut seen = tx.prepare(
+            "SELECT result, count(*) FROM token_backfill_seen WHERE item = ?1 GROUP BY result",
+        )?;
+        let mut rows = items.query(params![job, after, FRESH_SECONDS, PAGE + 1])?;
+        let mut runs = Vec::new();
+        let mut next_after = None;
+        while let Some(row) = rows.next()? {
+            if runs.len() == PAGE as usize {
+                next_after = runs
+                    .last()
+                    .and_then(|value: &Value| value["cursor"].as_i64());
+                break;
+            }
+            let id: i64 = row.get(0)?;
+            let mut results = serde_json::Map::new();
+            for data in seen.query_map([id], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+            })? {
+                let (result, n) = data?;
+                results.insert(result, json!(n));
+            }
+            runs.push(json!({
+                "cursor": id, "run_id": row.get::<_, String>(1)?, "issue_id": row.get::<_, String>(2)?,
+                "task_id": row.get::<_, String>(3)?, "runner_id": row.get::<_, String>(4)?,
+                "host_id": row.get::<_, String>(5)?, "reader_id": row.get::<_, Option<String>>(6)?,
+                "state": row.get::<_, String>(7)?, "gap": row.get::<_, Option<String>>(8)?,
+                "native_keys": row.get::<_, i64>(9)?, "server_only_at_scan": row.get::<_, i64>(10)?, "results_at_scan": results,
+            }));
+        }
+        let total: i64 = counts.values().filter_map(Value::as_i64).sum();
+        let waiting = ["pending", "reader_offline", "reader_unsupported"]
+            .into_iter()
+            .any(|status| counts.contains_key(status));
+        let anomalies = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM token_backfill_audit WHERE job_id = ?1)",
+            [job],
+            |row| row.get::<_, bool>(0),
+        )?;
+        let state = if waiting {
+            "waiting"
+        } else if counts.contains_key("gap") || counts.contains_key("active_prefix") || anomalies {
+            "finished_with_findings"
+        } else {
+            "finished"
+        };
+        Ok(Some(
+            json!({"job": serde_json::from_str::<StartTokenBackfill>(&request)?,
+            "created_at":created_at,"state": state,"selected_runs":total,"counts":counts,"runs":runs,"next_after":next_after}),
+        ))
+    }
+
+    pub fn token_backfill_audit(&self, job: &str, after: i64) -> Result<Option<Value>> {
+        if !self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM token_backfill_jobs WHERE id = ?1)",
+            [job],
+            |r| r.get::<_, bool>(0),
+        )? {
+            return Ok(None);
+        }
+        let mut sql = self.db.prepare(
+            "SELECT l.id, l.run_id, r.thread_id, r.turn_id, a.runner_id, l.response_id, l.source, l.evidence
+             FROM token_backfill_audit l JOIN token_runs r ON r.run_id = l.run_id
+             JOIN runner_assignments a ON a.id = r.assignment_id
+             WHERE l.job_id = ?1 AND l.id > ?2 ORDER BY l.id LIMIT ?3",
+        )?;
+        let mut rows = sql.query(params![job, after, PAGE + 1])?;
+        let mut entries = Vec::new();
+        let mut next_after = None;
+        while let Some(row) = rows.next()? {
+            if entries.len() == PAGE as usize {
+                next_after = entries
+                    .last()
+                    .and_then(|value: &Value| value["cursor"].as_i64());
+                break;
+            }
+            entries.push(json!({"cursor":row.get::<_, i64>(0)?, "run_id":row.get::<_, String>(1)?,
+                "thread_id":row.get::<_, String>(2)?, "turn_id":row.get::<_, String>(3)?,
+                "runner_id":row.get::<_, String>(4)?, "response_id":row.get::<_, String>(5)?,
+                "source":row.get::<_, String>(6)?, "evidence":serde_json::from_str::<Value>(&row.get::<_, String>(7)?)?,
+            }));
+        }
+        Ok(Some(
+            json!({"job_id":job,"entries":entries,"next_after":next_after}),
+        ))
+    }
+}

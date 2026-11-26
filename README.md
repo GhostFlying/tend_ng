@@ -161,6 +161,19 @@ See the [Web session contract](docs/web-session.md) for API and verification det
 
 `tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]` explicitly links two ordinary reports already published in the same Issue's original Chat. Supply a publication message ID for each report without a saved mapping. Keep the operation ID for a retry. Check the result with `tend issue read '#123'` without changing Chat or the Issue's execution state. See the [API, idempotency and read-only verification commands](docs/plans/report-version-backfill.md#implemented-contract).
 
+## Historical token usage
+
+With the existing `TEND_URL` and `TEND_TOKEN`, start with a narrow backfill and inspect its coverage and audit. Use `--all` explicitly to scan every verified Started Run.
+
+```sh
+tend token-usage backfill --issue '#123' --job usage-123
+tend token-usage status usage-123
+tend token-usage audit usage-123
+tend token-usage rebuild --issue '#123'
+```
+
+Backfill runs asynchronously where the original Codex rollout is stored. It fills missing request facts and quarantines disagreements by default. Missing or unavailable sources never authorize deletion or imply zero. Rebuild uses stored request facts without reading Rollout files. See the [historical token usage contract](docs/plans/token-usage-backfill.md) for the source, conflict policies, selectors and operational limits.
+
 ## Transport and verification
 
 Use a LAN address, the host Tailscale daemon, or the separately built tsnet process. These transports carry the same Tend HTTP API and token. Build the latter from its own Go module.

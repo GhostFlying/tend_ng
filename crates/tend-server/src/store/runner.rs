@@ -479,10 +479,12 @@ impl Store {
     ) -> Result<Option<RunnerSyncReply>> {
         let profile = &request.profile;
         let profile_json = serde_json::to_string(profile)?;
+        let backfill = request.token_backfill.as_ref().filter(|_| task.is_none());
         let stored = self
             .db
             .query_row(
-                "SELECT host_id, profile, last_seen + ?2 > unixepoch(), protocol FROM runners WHERE id = ?1",
+                "SELECT host_id, profile, last_seen + ?2 > unixepoch(), protocol,
+                 EXISTS(SELECT 1 FROM token_backfill_readers WHERE runner_id = ?1) FROM runners WHERE id = ?1",
                 params![profile.runner_id, HEARTBEAT_WRITE_SECONDS],
                 |row| {
                     Ok((
@@ -490,19 +492,23 @@ impl Store {
                         row.get::<_, String>(1)?,
                         row.get::<_, bool>(2)?,
                         row.get::<_, u32>(3)?,
+                        row.get::<_, bool>(4)?,
                     ))
                 },
             )
             .optional()?;
         if stored
             .as_ref()
-            .is_some_and(|(host, _, _, _)| host != &profile.host_id)
+            .is_some_and(|(host, _, _, _, _)| host != &profile.host_id)
         {
             return Ok(None);
         }
         let refresh = task.is_none()
-            && !stored.is_some_and(|(_, previous, recent, version)| {
-                recent && previous == profile_json && version == request.protocol
+            && !stored.is_some_and(|(_, previous, recent, version, supported)| {
+                recent
+                    && previous == profile_json
+                    && version == request.protocol
+                    && supported == backfill.is_some()
             });
         let reserved = task.is_none()
             && self.db.query_row(
@@ -534,6 +540,7 @@ impl Store {
             && request.token_usage.is_empty()
             && !request.drained
             && request.reclaim_receipts.is_empty()
+            && backfill.is_none_or(|feature| feature.page.is_none())
             && (!profile.codebase_review_comments
                 || !coordination::needs_serialized_wake(
                     &self.db,
@@ -574,6 +581,11 @@ impl Store {
                 confirmed_operations: Vec::new(),
                 confirmed_token_usage: Vec::new(),
                 token_usage_supported: true,
+                token_backfill: if backfill.is_some() {
+                    super::token_usage::backfill::pending(&self.db, &profile.runner_id)?
+                } else {
+                    None
+                },
                 inputs: coordination::pending_inputs_at(
                     &snapshot,
                     &profile.runner_id,
@@ -612,6 +624,19 @@ impl Store {
                    profile = excluded.profile, last_seen = excluded.last_seen, protocol = excluded.protocol",
                 params![profile.runner_id, profile.host_id, profile_json, request.protocol],
             )?;
+        }
+        if refresh {
+            if backfill.is_some() {
+                tx.execute(
+                    "INSERT INTO token_backfill_readers VALUES (?1) ON CONFLICT DO NOTHING",
+                    [&profile.runner_id],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM token_backfill_readers WHERE runner_id = ?1",
+                    [&profile.runner_id],
+                )?;
+            }
         }
         let mut confirmed_receipts = Vec::new();
         for receipt in request.receipts {
@@ -722,6 +747,15 @@ impl Store {
             &request.token_usage,
         )?;
 
+        let token_backfill = if let Some(feature) = backfill {
+            if let Some(page) = &feature.page {
+                super::token_usage::backfill::receive(&tx, &profile.runner_id, page)?;
+            }
+            super::token_usage::backfill::pending(&tx, &profile.runner_id)?
+        } else {
+            None
+        };
+
         let mut confirmed_reclaims = Vec::new();
         for receipt in request.reclaim_receipts {
             if !super::reclaim::accept(&tx, &profile.runner_id, &receipt)? {
@@ -803,6 +837,7 @@ impl Store {
             confirmed_operations,
             confirmed_token_usage,
             token_usage_supported: true,
+            token_backfill,
             inputs,
             controls,
             drain_to,
@@ -920,6 +955,7 @@ mod tests {
             runs: vec![],
             records: vec![],
             token_usage: vec![],
+            token_backfill: None,
         };
         let kinds = |store: &Store| -> Result<Vec<IssueMessageKind>> {
             Ok(store

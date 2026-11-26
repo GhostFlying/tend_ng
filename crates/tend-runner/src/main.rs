@@ -1,4 +1,5 @@
 mod artifacts;
+mod backfill;
 mod config;
 mod execution;
 mod inspect;
@@ -170,7 +171,7 @@ fn main() -> Result<()> {
         auth: auth.clone(),
     };
     if once {
-        return transfer.upload(sync(&config, &mut store, &server)?.0);
+        return transfer.upload(sync(&config, &mut store, &server, None)?.0);
     }
     if let Some(task) = task {
         reconcile::task(&config, &mut store, &server, &task)?;
@@ -216,6 +217,11 @@ fn main() -> Result<()> {
         Arc::clone(&config),
         runtime.root.clone(),
     );
+    let mut backfill = backfill::Worker::start(
+        Store::open(&database, &config)?,
+        Arc::clone(&config),
+        runtime.root.clone(),
+    );
     if config.slot_limit > 0 {
         let local = Store::open(&database, &config)?;
         let execution_config = Arc::clone(&config);
@@ -224,7 +230,7 @@ fn main() -> Result<()> {
 
     let mut reconnecting = true;
     loop {
-        match sync(&config, &mut store, &server) {
+        match sync(&config, &mut store, &server, Some(&mut backfill)) {
             Ok((files, drain_acknowledged)) => {
                 if drain_acknowledged
                     && files.is_empty()
@@ -257,19 +263,25 @@ fn main() -> Result<()> {
                 eprintln!("Runner {} sync: {error:#}", config.runner_id);
             }
         };
-        thread::sleep(Duration::from_secs(1));
+        backfill.wait(Duration::from_secs(1));
     }
 }
 
-fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<(Vec<String>, bool)> {
+fn sync(
+    config: &Config,
+    store: &mut Store,
+    server: &Server,
+    backfill: Option<&mut backfill::Worker>,
+) -> Result<(Vec<String>, bool)> {
     store.prepare_handoffs()?;
-    server.exchange(
+    server.exchange_inner(
         config,
         store,
         SyncScope::Runner,
         store.receipts()?,
         store.records()?,
         store.token_usage()?,
+        backfill,
     )
 }
 
@@ -297,6 +309,20 @@ impl Server {
         records: Vec<RunnerRecord>,
         token_usage: Vec<protocol::RunTokenUsage>,
     ) -> Result<(Vec<String>, bool)> {
+        self.exchange_inner(config, store, scope, receipts, records, token_usage, None)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exchange_inner(
+        &self,
+        config: &Config,
+        store: &mut Store,
+        scope: SyncScope<'_>,
+        receipts: Vec<ClaimReceipt>,
+        records: Vec<RunnerRecord>,
+        token_usage: Vec<protocol::RunTokenUsage>,
+        backfill: Option<&mut backfill::Worker>,
+    ) -> Result<(Vec<String>, bool)> {
         let running = store.running_slots()?;
         let mut profile = config.profile(store.unfinished()?);
         profile.running_slots = running;
@@ -305,7 +331,7 @@ impl Server {
         profile.available_for_assignment = profile
             .available_for_assignment
             .min(profile.slot_limit.saturating_sub(running));
-        let request = RunnerSync {
+        let mut request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
             repair_host_artifacts: true,
             drained: matches!(scope, SyncScope::Runner)
@@ -317,7 +343,17 @@ impl Server {
             runs: Vec::new(),
             records,
             token_usage,
+            token_backfill: backfill.as_ref().map(|worker| protocol::TokenBackfillSync {
+                page: worker.page.clone(),
+            }),
         };
+        let mut bytes = serde_json::to_vec(&request)?;
+        if bytes.len() > protocol::MAX_REQUEST_BYTES
+            && let Some(feature) = &mut request.token_backfill
+            && feature.page.take().is_some()
+        {
+            bytes = serde_json::to_vec(&request)?;
+        }
         let path = match scope {
             SyncScope::Runner => protocol::runner_sync_path(&config.runner_id),
             SyncScope::Task(id) => protocol::reconcile_path(&config.runner_id, id),
@@ -326,7 +362,8 @@ impl Server {
             .http
             .post(&format!("{}{path}", self.base))
             .set("Authorization", &self.auth)
-            .send_json(&request)
+            .set("Content-Type", "application/json")
+            .send_bytes(&bytes)
             .context("exchange Runner records")?
             .into_json()?;
         self.proposal_approval
@@ -342,7 +379,11 @@ impl Server {
             reply.execution_slot_limit = None;
         }
         let legacy = !reply.token_usage_supported;
+        let work = reply.token_backfill.take();
         store.apply_sync(config, reply)?;
+        if let Some(worker) = backfill {
+            worker.accept(work);
+        }
         if matches!(scope, SyncScope::Runner) {
             self.legacy_token_server.store(legacy, Ordering::Relaxed);
         }

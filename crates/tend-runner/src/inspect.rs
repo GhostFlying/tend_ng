@@ -177,7 +177,7 @@ fn read_turn(
     )
 }
 
-fn indexed_launch(index: &Path, thread: &str) -> Result<Option<AppServer>> {
+pub(crate) fn indexed_launch(index: &Path, thread: &str) -> Result<Option<AppServer>> {
     let db = Connection::open_with_flags(index, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let launch: Option<String> = db
         .query_row(
