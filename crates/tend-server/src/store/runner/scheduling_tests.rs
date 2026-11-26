@@ -54,6 +54,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
     store
         .sync_runner(
             RunnerSync {
+                repair_host_artifacts: false,
                 protocol,
                 profile,
                 drained: false,

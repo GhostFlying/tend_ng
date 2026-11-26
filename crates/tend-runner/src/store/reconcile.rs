@@ -1,5 +1,5 @@
 use super::{Store, run::decode_record};
-use anyhow::{Result, ensure};
+use anyhow::Result;
 use protocol::{ClaimReceipt, RUNNER_SYNC_BATCH, RunnerRecord};
 use rusqlite::params;
 
@@ -25,7 +25,8 @@ impl Store {
             [task],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        ensure!(bounds.0 != 0, "Task {task} is unknown to this Runner");
+        // A retired predecessor may own all the Task records. The Server
+        // checks the exact Task and replacement chain for artifact-only repair.
         Ok(bounds)
     }
 

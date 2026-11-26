@@ -44,8 +44,8 @@ pub struct Transfer {
 }
 
 impl Transfer {
-    // Same-generation reviews can read their local immutable copy even while
-    // offline. A successor fetches the same ID from the Server's durable copy.
+    // Reviews read the immutable host copy offline. A missing local copy
+    // can be restored under the same ID from the Server.
     pub fn review_file(&self, id: &str) -> Result<Option<PathBuf>> {
         ensure!(protocol::valid_id(id), "invalid review artifact");
         fs::create_dir_all(&self.root)?;

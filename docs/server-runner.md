@@ -18,7 +18,7 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 **同机并行接替的部署要求。** 前驱仍运行时，前驱和后继须能分别向同一 Server 鉴权和同步，各自保有可查询的 Runner 端点。两代可共用外置 tsnet 通道。禁止把新协议 Runner 接替到旧协议 Runner。接替期间的原执行和 workspace 占用沿原领取证据确认。
 
-**自然退役。** 前驱在原 Run 停妥、未完成 Task 的接续已交接、待回传记录收齐后自然退出。Server 持久确认 drain，升级入口在本机验证前驱进程实际退出及后继可用后调用 `runner retire`，移出其升代预检范围。手工调用 retire 时仍由操作者核对实际退出。原 Runner 的数据和 workspace 按既有保留规则保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
+**自然退役。** 前驱在原 Run 停妥、未完成 Task 的接续已交接、待回传记录收齐后自然退出。Server 持久确认 drain，升级入口在本机验证前驱进程实际退出及后继可用后调用 `runner retire`，移出其升代预检范围。手工调用 retire 时仍由操作者核对实际退出。常规升级在核对本地最终收件、Server 持久 drain 和原件可用性后迁入共享数据，经退役回读后清理私有执行库。workspace 和原 Codex home 保留。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
 
 ### Server 升级兼容窗口
 
@@ -175,13 +175,13 @@ Issue 及其关联记录是工作事实的 SoT。来自 Run 的记录按原 Run 
 
 **已确认。** 原 Runner 下一次与 Server 成功通信的后台同步登记待传文件的引用，并发起独立上传。Run 仍在执行或已经停妥时均适用。连接中断后的第一轮成功同步沿原文件身份继续，已完整保存的文件按原记录返回接收回执。
 
-全量对账按 Server 已登记的 Task 核对交付记录和文件的实际可用性。对账或读取时发现原件缺失，Server 将文件列入原 Runner 的待补清单。Runner 在下一次后台同步中取得缺项，从保留的副本补回同一文件。 [数据归属](storage.md#建议保存范围)
+全量对账按 Server 已登记的 Task 核对交付记录和文件的实际可用性。对账或读取时发现原件缺失，Server 将文件列入原 Runner 的待补清单。原 Runner 或登记在同一条同 Host 接替链上并声明支持共享补件的后继，在后台同步中取得缺项，从 Host 共享目录补回同一文件。全量对账使用相同规则，始终记录最初的产出者。 [数据归属](storage.md#建议保存范围)
 
 全量对账包含 Runner 仍保留的已确认记录。原回执供历史查证，本次补传范围以 Server 当前持有的原记录和文件为准。 [已确认交付的恢复 smoke](plans/full-reconcile-smoke.md#执行结果)
 
 ## 按需读取 rollout
 
-Codex rollout 等原生执行原件由实际执行实例保管。Router 原件在 Server 本机保存，工作 Run 原件保存在原 Runner。Server 记录实际执行归属和原件引用。Web 或 CLI 打开、刷新执行详情时，通过共用 API 发起当次读取。Router 详情由 Server 读取本机原件，工作 Run 详情按原 Run 向原 Runner 查询。详情显示实际读取状态，例如原 Runner 暂不可达或原件缺失。
+Codex rollout 等原生执行原件由实际执行实例保管。Router 原件在 Server 本机保存，工作 Run 原件保存在该 Host 上实际使用的 Codex home。Server 记录实际执行归属和原件引用。Web 或 CLI 打开、刷新执行详情时，通过共用 API 发起当次读取。Router 详情由 Server 读取本机原件，工作 Run 详情按原 Run 查询。前驱仍在收尾时由其本人读取。正式退役后，Server 沿已退役的同机接替链选择后继，把原执行者和持久保存的 thread/turn 交给它。后继查该原执行者的只读 thread 索引，按原 launcher、Codex home 读取该回合。未配置 inspection、不可达、没有绑定和原件缺失均按实返回。
 
 Issue Chat 消息页用已有的 Run 引用呈现折叠入口。用户点开或刷新某段执行过程时，才发起对应 Run 的读取请求。 [Issue Chat 的留言与执行过程](chat-routing.md#issue-chat-的留言与执行过程)
 

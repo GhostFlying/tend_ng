@@ -102,7 +102,7 @@ fn handle(
                 "Task is not registered for these Runner records",
             ));
         }
-        store.reconcile_artifacts(artifact_root, task, runner_id)?;
+        store.reconcile_artifacts(artifact_root, task, runner_id, sync.repair_host_artifacts)?;
     }
     Ok(match store.sync_runner(sync, endpoint.task.as_deref())? {
         Some(reply) => (200, serde_json::to_value(reply)?),

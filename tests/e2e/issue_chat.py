@@ -236,6 +236,58 @@ def main():
             ), posted
             assert cli("issue", "read", f"#{child_number}")["issue_id"] == child
             assert sql("server", "SELECT number, issue_id FROM issue_short_numbers ORDER BY number") == mapping
+
+            old_id = settings["runner_id"]
+            successor_id = "next-runner"
+            default_run = delegation["run_id"]
+            named_run = first["run_id"]
+            bindings = dict(sql("runner", "SELECT id, json_extract(app_server, '$.codex_home') FROM local_runs WHERE id IN (?, ?)",
+                                default_run, named_run))
+            assert bindings == {default_run: str(default_home), named_run: str(alternate_home)}
+            workspace_root = (root / "runner.sqlite").with_suffix(".runs")
+            # Old default-launch rows lacked a binding. Migrate with the original launcher and home.
+            with sqlite3.connect(root / "runner.sqlite") as db:
+                db.execute("UPDATE local_runs SET app_server=NULL WHERE id=?", (default_run,))
+            subprocess.run([TESTS.parent / "scripts/tend-runner-retire-files", "adopt",
+                            "--db", root / "runner.sqlite", "--config", config, "--runner", old_id,
+                            "--host", settings["host_id"], "--workspace-root", workspace_root,
+                            "--codex-home", default_home, "--app-server", sys.executable,
+                            TESTS / "fixtures/coordination_app_server.py", root, "issue-chat"], check=True, env=env)
+            adopted = subprocess.Popen([args.runner, "--config", config, "--db", root / "runner.sqlite",
+                                        "--app-server", "/bin/false"], env={**env, "CODEX_HOME": str(replacement_home)})
+            try:
+                cmd = [args.cli, "run", "rollout", default_run]
+                direct = wait_for(lambda: subprocess.run(cmd, env=env, capture_output=True, timeout=8),
+                                  lambda result: result.returncode == 0)
+                assert json.loads(direct.stdout)["turn"]["items"][1]["text"] == "协调指南的整理工作。"
+            finally:
+                adopted.terminate()
+                adopted.wait(timeout=8)
+            (root / "runner.sqlite").rename(root / "removed-original.sqlite")
+            successor_inspect = free_port()
+            settings.update(runner_id=successor_id, workspace_root=str(workspace_root), standby=True,
+                            inspect={"listen": successor_inspect, "url": f"http://{successor_inspect}"})
+            successor_config = root / "next.json"
+            successor_config.write_text(json.dumps(settings))
+            successor = subprocess.Popen([args.runner, "--config", successor_config, "--db", root / "next.sqlite",
+                                          "--app-server", "/bin/false"], env={**env, "CODEX_HOME": str(replacement_home)})
+            try:
+                wait_for(lambda: cli("runner", "list"), lambda members: any(
+                    m["profile"]["runner_id"] == successor_id for m in members))
+                # The successor exists but cannot read on behalf of a predecessor until retirement.
+                with sqlite3.connect(root / "server.sqlite") as db:
+                    db.execute("INSERT INTO runner_replacements(predecessor,successor,drained_at) VALUES(?,?,unixepoch())",
+                               (old_id, successor_id))
+                cli("run", "rollout", named_run, error="HTTP 503")
+                cli("runner", "retire", old_id)
+                for run_id, text in [(default_run, "协调指南的整理工作。"), (named_run, DETAIL)]:
+                    result = cli("run", "rollout", run_id)
+                    assert result["runner_id"] == old_id and result["reader_id"] == successor_id
+                    assert result["run_id"] == run_id and result["turn"]["items"][1]["text"] == text
+                assert not list(replacement_home.glob("fixture-*-thread.json"))
+            finally:
+                successor.terminate()
+                successor.wait(timeout=8)
     print("PASS Issue discussion with queued and late replies, Router relay, and opt-in original Runner history")
 
 

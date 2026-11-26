@@ -92,9 +92,9 @@ Register `inspect.listen` and `inspect.url` on a Runner to open its native Run h
 
 ## Runner 常规升级（默认同机新旧代交接）
 
-先让 Server 使用支持共享接替预算的版本，再把目标 [main-build](https://github.com/GhostFlying/tend_ng/releases/tag/main-build) 归档解压到本机版本目录。保留归档的 `bin/` 和 `REVISION`，不要覆盖前驱正在使用的文件。用与前驱相同的 Linux 用户、PID 命名空间和服务环境运行以下入口（需要 Python 3.9+）。保持前驱运行。若由服务管理器启动，确保它不会在前驱正常退出后重启旧代。
+先让 Server 使用支持共享接替预算和退役文件确认的版本（Runner 注册行含 `host_data_policy: 1`），再把目标 [main-build](https://github.com/GhostFlying/tend_ng/releases/tag/main-build) 归档解压到本机版本目录。保留归档的 `bin/` 和 `REVISION`，不要覆盖前驱正在使用的文件。用与前驱相同的 Linux 用户、PID 命名空间和服务环境运行以下入口（需要 Python 3.9+）。保持前驱运行。若由服务管理器启动，确保它不会在前驱正常退出后重启旧代。
 
-若前驱用 systemd 管理，升级前用 `systemctl edit <旧 unit>` 加以下 drop-in，再执行 `systemctl daemon-reload`。用户级 unit 在两条命令中都加 `--user`。不要因此重启正在运行的前驱。旧 unit 的 `Restart=always` 会在 drain 正常退出后再次拉起旧代。退役后将旧 unit 移出自动启动，避免主机重启时再启动旧代。
+若前驱用 systemd 管理，升级前用 `systemctl edit <旧 unit>` 加以下 drop-in，再执行 `systemctl daemon-reload`。用户级 unit 在两条命令中都加 `--user`。不要因此重启正在运行的前驱。旧 unit 的 `Restart=always` 会在 drain 正常退出后再次拉起旧代。旧用户 unit 退出后，升级脚本会核验其配置与库确属前驱，再移出自动启动并清理该 unit。系统级或自定义 supervisor 的启动规则由部署方维护。
 
 ```ini
 [Service]
@@ -114,7 +114,29 @@ export TEND_URL=http://127.0.0.1:8832
 
 前驱库旁的 `<原库文件名>.upgrade/` 保存目标 REVISION、接替状态和 `runner.log`，后继配置和库以新 ID 命名并放在前驱库同一目录。失败或中断后，按提示排查并用同一归档和前驱路径重跑；不要删除这些文件或手改生成的配置。后继启动失败且尚未登记接替时，可以用新参数修正 inspection 端点。等待默认一小时，活跃 Run 尚未停妥时可用 `--timeout <秒>` 调整。命令不会停止任一 Runner，已登记的接替会继续生效。
 
-成功回执给出后继配置、数据库、启动目录和记录启动参数的本机状态文件。后继配置和数据库是下一次常规升级的输入。主机重启或同一 Runner 故障恢复时，用该代的原二进制、原参数、同一 Runner ID 和数据库启动。原位重启只用于这种本机恢复。保留旧库和 Codex 历史可按原 Run 身份查证；旧进程退出后，其在线 inspect 端点不再提供原生 rollout。
+成功回执给出后继配置、数据库、启动目录和记录启动参数的本机状态文件。后继配置和数据库是下一次常规升级的输入。主机重启或同一 Runner 故障恢复时，用该代的原二进制、原参数、同一 Runner ID 和数据库启动。原位重启只用于这种本机恢复。收到旧代最终同步确认后，入口把原件、历史读取索引迁入 Host 共享存储，登记退役，复查原件与回执，再回收该代配置、SQLite 和已迁移的私有文件。Server 保留原 Runner 身份和 Run 归属。已退役的 Runner 从 Web 常用目录移出，CLI 的 `tend runner list` 仍可查看全部代际，`tend runner retirement <id>` 可查看确认时间和原件状态。
+
+### 从旧的每代私有目录迁入
+
+每个 Host 使用同一个 `workspace_root`，各代在 `.tend-host/<host_id>/artifacts/<file_id>` 保留不可变交付，在 `history/<origin_runner>.sqlite`（同一 Host 数据目录内）按原 thread 记录只读 launcher 和 Codex home。原生 rollout 仍在原 Codex home。共享仓库、workspace、Codex home、升级日志和独立备份均保留。版本目录可能同时供其他服务使用，独立管理。
+
+正在运行的旧格式前驱可直接走常规升级。需要原位保留同一 Runner ID、排队或等待中的 Task 时，在确认无运行中 Run 并停妥该实例后先执行 `adopt`，再用新二进制启动原实例。它也能在隔离的关停快照上演练。已经退役的旧格式实例使用 `prepare` 和 `cleanup`，其中 `--successor` 填当时登记的直接后继。两种入口均要给出**原服务**使用的默认 Codex home 和自定义 App Server 命令（如有）。使用升级辅助脚本的常规路径会从原进程保存这些设置。
+
+```sh
+# 使用当前主机的原始配置。避免从运行中的 SQLite 直接复制单个 db 文件。
+storage=/path/to/main-build/bin/tend-runner-retire-files
+"$storage" adopt --db "$RUNNER_DB" --config "$RUNNER_CONFIG" --runner "$RUNNER_ID" \
+  --host "$TEND_HOST_ID" --workspace-root "$WORKSPACE_ROOT" --codex-home "$ORIGINAL_CODEX_HOME"
+
+# 对已退役的旧实例，在两个步骤中传入相同的参数和私有 receipt 路径。
+for action in prepare cleanup; do
+  "$storage" "$action" --db "$OLD_DB" --config "$OLD_CONFIG" --runner "$OLD_ID" \
+    --host "$TEND_HOST_ID" --successor "$IMMEDIATE_SUCCESSOR_ID" --workspace-root "$WORKSPACE_ROOT" \
+    --receipt "$UPGRADE_STATE/retirement.json" --codex-home "$ORIGINAL_CODEX_HOME" || break
+done
+```
+
+自定义启动器在参数末尾加 `--app-server <program> <arg> ...`。已退出且确由前驱独占的用户 unit，可在该选项前加 `--unit <name>.service`。补传尚未完成时，运行中的后继会从已发布的共享目录继续补传，随后用相同路径重试。准备及清理都需要 Server 可达，单机 `adopt` 保留原库和旧副本。
 
 ## Web sign-in over HTTPS
 

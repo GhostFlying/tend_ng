@@ -33,6 +33,10 @@ fn default_workspace_root(database: &Path) -> PathBuf {
     database.with_extension("runs")
 }
 
+pub(crate) fn host_data_root(workspace: &Path, host_id: &str) -> PathBuf {
+    workspace.join(".tend-host").join(host_id)
+}
+
 fn canonical_database(path: &Path) -> Result<PathBuf> {
     let path = match path.canonicalize() {
         Ok(path) => path,
@@ -153,8 +157,12 @@ fn main() -> Result<()> {
             .timeout(Duration::from_secs(5))
             .build(),
     });
+    let workspace_root = config
+        .workspace_root
+        .clone()
+        .unwrap_or_else(|| default_workspace_root(&db_path));
     let transfer = artifacts::Transfer {
-        root: db_path.with_extension("artifacts"),
+        root: host_data_root(&workspace_root, &config.host_id).join("artifacts"),
         base: base.trim_end_matches('/').to_owned(),
         runner: config.runner_id.clone(),
         auth: auth.clone(),
@@ -181,10 +189,7 @@ fn main() -> Result<()> {
     );
     let runtime = execution::Runtime {
         proposal_approval: Arc::clone(&server.proposal_approval),
-        root: config
-            .workspace_root
-            .clone()
-            .unwrap_or_else(|| default_workspace_root(&db_path)),
+        root: workspace_root,
         artifacts: transfer,
         program,
         args: app_args,
@@ -287,6 +292,7 @@ impl Server {
             .min(profile.slot_limit.saturating_sub(running));
         let request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
+            repair_host_artifacts: true,
             drained: store.drain_finished()?,
             drain_active_slots: store.drain_active_slots()?,
             reclaim_receipts: store.reclaim_receipts()?,

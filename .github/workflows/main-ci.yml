@@ -38,7 +38,7 @@ jobs:
           bundle=$(mktemp -d)
           trap 'rm -rf "$bundle"' EXIT
           mkdir "$bundle/bin"
-          install target/release/{tend-server,tend-runner,tend} scripts/tend-runner-upgrade "$bundle/bin/"
+          install target/release/{tend-server,tend-runner,tend} scripts/tend-runner-{upgrade,retire-files} "$bundle/bin/"
           printf '%s\n' "$GITHUB_SHA" > "$bundle/REVISION"
           python3 -B tests/e2e/runner_upgrade.py "$bundle"
           python3 -B tests/e2e/runner_upgrade.py "$bundle" --trailing-dot-db

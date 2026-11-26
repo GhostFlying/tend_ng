@@ -70,8 +70,12 @@ type Entry = {
   running?: number;
 };
 
+function currentRunners(runners: RunnerInstance[]) {
+  return runners.filter((runner) => runner.retired_at == null);
+}
+
 function entries(data: AgentDirectory): Entry[] {
-  const work = data.runners.flatMap((runner) =>
+  const work = currentRunners(data.runners).flatMap((runner) =>
     runner.profile.agents.map((agent) => ({
       key: `${runner.profile.runner_id}:${agent.id}`,
       agent,
@@ -98,7 +102,6 @@ function runtimeName(entry: Entry) {
 }
 
 function runnerMode(runner: RunnerInstance) {
-  if (runner.retired_at) return "已退役";
   if (runner.drained_at) return "已排空";
   if (runner.successor) return "排空中";
   if (runner.profile.standby) return "待接替";
@@ -113,7 +116,6 @@ function activity(entry: Entry, failed: boolean) {
 
 function agentObservation(entry: Entry, failed: boolean) {
   if (!entry.runner) return "未接入运行观测";
-  if (entry.runner.retired_at) return "已退役";
   if (failed) return "上次观察";
   return entry.runner.online ? "在线" : "离线";
 }
@@ -548,19 +550,12 @@ function timestamp(seconds: number) {
 }
 
 function hostMetrics(runners: RunnerInstance[], failed: boolean) {
-  const current = runners.filter((runner) => !runner.retired_at);
-  const connected = current.filter((runner) => runner.online);
+  const connected = runners.filter((runner) => runner.online);
   const active = connected.length > 0 && !failed;
-  const observed = active ? connected : current;
+  const observed = active ? connected : runners;
   return {
     active,
-    state: failed
-      ? "上次观察"
-      : active
-        ? "在线"
-        : current.length
-          ? "离线"
-          : "已退役",
+    state: failed ? "上次观察" : active ? "在线" : "离线",
     running: observed.reduce(
       (total, runner) => total + runner.profile.running_slots,
       0,
@@ -660,7 +655,7 @@ export function Hosts(props: Props) {
   const [selected, setSelected] = useState("");
   const restore = useRef<HTMLButtonElement>(null);
   const hosts = new Map<string, RunnerInstance[]>();
-  for (const runner of data ?? []) {
+  for (const runner of currentRunners(data ?? [])) {
     const id = runner.profile.host_id;
     const prior = hosts.get(id) ?? [];
     hosts.set(id, [...prior, runner]);
@@ -684,9 +679,7 @@ export function Hosts(props: Props) {
       )}
       {[...hosts].map(([id, runners]) => {
         const host = hostMetrics(runners, failed);
-        const mode = runners.find(
-          (runner) => runner.successor && !runner.retired_at,
-        );
+        const mode = runners.find((runner) => runner.successor);
         return (
           <button
             className="host-row"

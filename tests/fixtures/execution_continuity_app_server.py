@@ -145,7 +145,7 @@ elif model == "fixture-reviewer":
         assert path.read_text() == candidate_text
         if artifact_handoff:
             assert assignment["placement"]["runner_id"] == "next-runner"
-            assert path.parent == root / "next.artifacts"
+            assert path.parent == root / "shared" / ".tend-host" / assignment["placement"]["host_id"] / "artifacts"
             assert Path("repos/example/guide.txt").read_text() == workspace_text
     else:
         assert inputs[0]["kind"] == "review_requested"

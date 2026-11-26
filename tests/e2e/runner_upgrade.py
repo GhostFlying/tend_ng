@@ -5,6 +5,7 @@ from contextlib import ExitStack, closing
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import sqlite3
@@ -35,8 +36,31 @@ def main():
         config = root / "runner.json"
         db = root / ("runner." if args.trailing_dot_db else "runner.sqlite")
         config.write_text(json.dumps({**json.loads(config.read_text()), "slot_limit": 2}))
+        home = root / "codex-home"
+        home.mkdir()
         env = {**os.environ, "TEND_TOKEN": "runner-upgrade-fixture", "TEND_URL": f"http://{address}",
-               "CODEX_HOME": str(root)}
+               "CODEX_HOME": str(home)}
+        # Simulate interruption between durable retirement and local cleanup,
+        # without modifying the bundle passed by CI or a previous release.
+        entry = root / "bundle" / "bin"
+        entry.mkdir(parents=True)
+        shutil.copy2(args.bundle / "REVISION", entry.parent / "REVISION")
+        shutil.copy2(binaries / "tend-runner-upgrade", entry / "tend-runner-upgrade")
+        for executable in ("tend", "tend-runner"):
+            (entry / executable).symlink_to(binaries / executable)
+        helper = entry / "tend-runner-retire-files"
+        interrupt = root / "interrupt-cleanup"
+        interrupt.touch()
+        helper.write_text(
+            f"#!{sys.executable}\nimport os, sys\nfrom pathlib import Path\n"
+            f"if sys.argv[1] == 'cleanup' and Path({str(interrupt)!r}).exists(): sys.exit(75)\n"
+            f"os.execv({str(binaries / helper.name)!r}, sys.argv)\n"
+        )
+        helper.chmod(0o700)
+        rollback = root / "previous" / "runner.json"
+        rollback.parent.mkdir()
+        shutil.copy2(config, rollback)
+        retained_config = rollback.read_bytes()
         generation = db.with_name(f"{db.name}.upgrade")
         next_db = None
 
@@ -131,11 +155,14 @@ def main():
         assert duplicate.returncode and "already using this database" in refused, refused
         assert not alias_ready.exists() and peer.poll() is None
 
+        # The operator may run the upgrade from a different Codex installation.
+        upgrade_env = {**env, "CODEX_HOME": str(root / "operator-home")}
+
         def refuse_mismatched_identity(command):
             original_config = config.read_text()
             try:
                 config.write_text(peer_config.read_text())
-                rejected = subprocess.run(command, env=env, capture_output=True, text=True, timeout=5)
+                rejected = subprocess.run(command, env=upgrade_env, capture_output=True, text=True, timeout=5)
                 assert rejected.returncode == 1 and "identity saved in its database" in rejected.stderr, rejected.stderr
             finally:
                 config.write_text(original_config)
@@ -152,12 +179,12 @@ def main():
             blocked.bind(("127.0.0.1", 0))
             blocked.listen()
             listen = f"127.0.0.1:{blocked.getsockname()[1]}"
-            command = [binaries / "tend-runner-upgrade", "--config", config, "--db", db,
+            command = [entry / "tend-runner-upgrade", "--config", config, "--db", db,
                        "--inspect-listen", listen, "--inspect-url", f"http://{listen}", "--timeout", "85"]
             refuse_mismatched_identity(command)
             assert not (generation / "upgrade.json").exists()
             assert set(roster()) == {"demo-runner", "unrelated"}
-            failed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=10)
+            failed = subprocess.run(command, env=upgrade_env, capture_output=True, text=True, timeout=10)
         assert failed.returncode == 1 and "Successor exited" in failed.stderr, failed.stderr
         ledger = json.loads((generation / "upgrade.json").read_text())
         successor = ledger["config"]["runner_id"]
@@ -165,18 +192,24 @@ def main():
         assert roster()["demo-runner"]["successor"] is None and successor not in roster()
         assert ledger["revision"] == (args.bundle / "REVISION").read_text().strip()
         assert ledger["config"]["workspace_root"] == str(root / "runner.runs")
+        assert ledger["runtime"]["codex_home"] == str(home)
         # Changing the failed standby listener needs no manual configuration
         # edit and keeps the same planned Runner identity.
         listen = free_port()
         command[command.index("--inspect-listen") + 1] = listen
         command[command.index("--inspect-url") + 1] = f"http://{listen}"
 
-        first = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        first = subprocess.Popen(command, env=upgrade_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stack.callback(terminate, first)
         [mapping] = wait_for(lambda: SQL(root / "server.sqlite",
                                         "SELECT predecessor, successor FROM runner_replacements"), bool)
         assert mapping == ("demo-runner", successor)
-        parallel = subprocess.run(command, env=env, capture_output=True, text=True, timeout=5)
+        fact = cli("runner", "retirement", "demo-runner")
+        assert fact == {"runner_id": "demo-runner", "host_id": ledger["config"]["host_id"],
+                        "successor": successor, "host_data_policy": 1,
+                        "drained_at": None, "retired_at": None, "artifacts": []}
+        assert roster()["unrelated"]["host_data_policy"] == 1
+        parallel = subprocess.run(command, env=upgrade_env, capture_output=True, text=True, timeout=5)
         assert parallel.returncode == 1 and "Another upgrade" in parallel.stderr, parallel.stderr
         too_early = subprocess.run([binaries / "tend", "runner", "retire", "demo-runner"],
                                    env=env, capture_output=True, text=True, timeout=5)
@@ -209,11 +242,13 @@ def main():
         assert roster()["demo-runner"]["successor"] == successor
         marker = next(generation.glob("ready-*"))
         next_pid = marker.read_text()
+        runtime_env = (Path("/proc") / next_pid.strip() / "environ").read_bytes().split(b"\0")
+        assert os.fsencode(f"CODEX_HOME={home}") in runtime_env
         server_context.close()
         start_server(server_context)
         assert roster()[successor]["execution_slot_limit"] == (0 if args.predecessor else 1)
         assert local_active(db) == 1 and local_active(next_db) == (0 if args.predecessor else 1)
-        retry = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        retry = subprocess.Popen(command, env=upgrade_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stack.callback(terminate, retry)
         # The original process has started its native turn and still owns it.
         assert old.poll() is None and not (root / "continued.started").exists()
@@ -221,10 +256,23 @@ def main():
         release("original")
         assert old.wait(timeout=15) == 0
         stdout, stderr = retry.communicate(timeout=15)
-        assert retry.returncode == 0, (stdout, stderr)
-        receipt = json.loads(stdout)
+        assert retry.returncode == 1 and "cleanup did not complete" in stderr, (stdout, stderr)
+        assert roster()["demo-runner"]["retired_at"] and db.is_file()
+        assert SQL(db, "SELECT state, thread_id FROM local_runs WHERE id = ?", old_run["run"]) == [
+            ("stopped", old_run["thread"])]
+        fact = cli("runner", "retirement", "demo-runner")
+        assert fact["drained_at"] and fact["retired_at"] and fact["successor"] == successor
+        assert (generation / "retirement.json").is_file()
+        interrupt.unlink()
+        completed = subprocess.run(command, env=upgrade_env, capture_output=True, check=True, text=True, timeout=15)
+        receipt = json.loads(completed.stdout)
         assert receipt["successor"] == successor and receipt["state"] == "retired"
-        assert Path(receipt["db"]) == next_db and not os.path.samefile(db, next_db)
+        assert Path(receipt["db"]) == next_db and next_db.is_file() and not db.exists()
+        assert Path(receipt["retirement"]) == generation / "retirement.json"
+        assert rollback.read_bytes() == retained_config and home.is_dir() and peer_db.is_file()
+        history = cli("run", "rollout", old_run["run"])
+        assert history["runner_id"] == "demo-runner" and history["reader_id"] == successor
+        assert history["turn"]["id"] == old_run["turn"]
         assert marker.read_text() == next_pid
         assert len(list(generation.glob("ready-*"))) == 1
         assert roster()["demo-runner"]["retired_at"] and roster()[successor]["execution_slot_limit"] == 2
@@ -246,14 +294,12 @@ def main():
             SELECT a.runner_id, json_extract(r.observation, '$.phase.outcome')
             FROM task_runs r JOIN runner_assignments a ON a.id = r.assignment_id WHERE r.id = ?
             """, old_run["run"]) == [("demo-runner", "completed")]
-        assert SQL(db, "SELECT state, thread_id FROM local_runs WHERE id = ?", old_run["run"]) == [
-            ("stopped", old_run["thread"])]
         assert (root / f"{old_run['thread']}.json").exists()
         assert SQL(root / "server.sqlite", "SELECT count(*) FROM task_controls") == [(0,)]
 
         wait_for(lambda: local_active(next_db), lambda count: count == 0)
-        repeated = subprocess.run(command, env=env, capture_output=True, check=True, text=True, timeout=10)
-        assert json.loads(repeated.stdout) == receipt
+        repeated = subprocess.run(command, env=upgrade_env, capture_output=True, check=True, text=True, timeout=10)
+        assert json.loads(repeated.stdout) == receipt and not db.exists()
         assert SQL(root / "server.sqlite", "SELECT predecessor, successor, slot_budget FROM runner_replacements") == [
             ("demo-runner", successor, 2)]
         print("PASS archive upgrade, natural exit, restart-safe shared capacity, original Task/workspace/input, and retries")

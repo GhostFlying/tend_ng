@@ -166,6 +166,9 @@ pub struct ClaimReceipt {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSync {
     pub protocol: u32,
+    /// The Runner can upload immutable files retained by its same-host predecessors.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub repair_host_artifacts: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drained: bool,
     // Present only after the local drain fence is installed. Counts prepared,

@@ -29,24 +29,36 @@ pub fn serve(store: Store, auth: String) -> SyncSender<(Request, String)> {
 }
 
 fn read(store: &Store, http: &ureq::Agent, auth: &str, run: &str) -> Result<(u16, Value)> {
-    let Some((runner, base)) = store.run_origin(run)? else {
+    let Some(source) = store.run_origin(run)? else {
         return Ok(api_error(404, "Run has no recorded native turn"));
     };
-    let Some(base) = base else {
-        return Ok(api_error(503, "Original Runner has no inspection address"));
+    let Some(base) = source.url else {
+        return Ok(api_error(503, "Runner has no inspection address"));
     };
-    let path = format!(
-        "{}{}",
-        base.trim_end_matches('/'),
-        protocol::rollout_path(run)
-    );
-    match http.get(&path).set("Authorization", auth).call() {
+    let base = base.trim_end_matches('/');
+    let historical = source.reader != source.origin;
+    let response = if historical {
+        let path = protocol::retired_rollout_path(&source.origin, run);
+        http.post(&format!("{base}{path}"))
+            .set("Authorization", auth)
+            .send_json(&source.native)
+    } else {
+        let path = protocol::rollout_path(run);
+        http.get(&format!("{base}{path}"))
+            .set("Authorization", auth)
+            .call()
+    };
+    match response {
         Ok(response) => {
             let data: Value = response.into_json()?;
-            if data["runner_id"] != runner || data["run_id"] != run {
+            if data["runner_id"] != source.origin
+                || data["run_id"] != run
+                || data["turn"]["id"] != source.native.turn_id
+                || (historical && data["reader_id"] != source.reader)
+            {
                 return Ok(api_error(
                     503,
-                    "Inspection response did not match the original Runner and Run",
+                    "Inspection response did not match the recorded Run and reader",
                 ));
             }
             Ok((200, data))

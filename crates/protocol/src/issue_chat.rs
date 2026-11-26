@@ -83,3 +83,21 @@ pub fn rollout_id(path: &str) -> Option<&str> {
         .strip_suffix("/rollout")
         .filter(|id| crate::valid_id(id))
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NativeTurnRef {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+pub fn retired_rollout_path(origin: &str, run: &str) -> String {
+    format!("/api/v1/history/{origin}/runs/{run}/rollout")
+}
+
+pub fn retired_rollout_ids(path: &str) -> Option<(&str, &str)> {
+    let (origin, run) = path
+        .strip_prefix("/api/v1/history/")?
+        .strip_suffix("/rollout")?
+        .split_once("/runs/")?;
+    (crate::valid_id(origin) && crate::valid_id(run)).then_some((origin, run))
+}

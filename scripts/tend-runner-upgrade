@@ -131,6 +131,27 @@ def check_predecessor_process(process, db, server):
     require(ticks(pid) == start, "Predecessor process changed during verification; retry")
 
 
+def capture_runtime(process):
+    pid, start, cwd, _, _ = process
+    proc = Path("/proc") / str(pid)
+    env = dict(entry.split(b"=", 1) for entry in (proc / "environ").read_bytes().split(b"\0") if b"=" in entry)
+    home = os.fsdecode(env.get(b"CODEX_HOME") or b"")
+    if not home:
+        require(env.get(b"HOME"), f"Cannot determine the default Codex home of Runner PID {pid}")
+        home = str(Path(os.fsdecode(env[b"HOME"])) / ".codex")
+    runtime = {"codex_home": str((cwd / home).resolve()),
+               "path": os.fsdecode(env.get(b"PATH", os.fsencode(os.defpath)))}
+    # A delegated service can have nested cgroups. Only designate its own unit.
+    for line in (proc / "cgroup").read_text().splitlines():
+        path = line.split(":", 2)[-1]
+        name = Path(path).name
+        if name.startswith("tend-") and name.endswith(".service"):
+            runtime["unit"] = name
+            break
+    require(ticks(pid) == start, "Predecessor process changed while reading its runtime settings")
+    return runtime
+
+
 def derive(runner, config, source, process, old, listen, url):
     pid, _, cwd, options, _ = process
     profile = old["profile"]
@@ -181,13 +202,22 @@ def upgrade(args, bundle, revision, config, db, state_dir):
             "state": "retired", "predecessor": old_id, "successor": new_id,
             "revision": revision, "config": str(next_config), "db": str(next_db),
             "log": str(log), "cwd": state["cwd"], "journal": str(manifest),
+            "retirement": str(state_dir / "retirement.json"),
         }))
 
     manifest = state_dir / "upgrade.json"
     log = state_dir / "runner.log"
     boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
-    source = json.loads(config.read_text())
-    old_id, old_host = predecessor_identity(db, source)
+    if manifest.exists():
+        state = json.loads(manifest.read_text())
+        require([revision, server, str(config)] ==
+                [state["revision"], state["server"], state["source_config"]],
+                f"Resume using the original bundle REVISION, Server and configuration recorded in {manifest}")
+        old_id, old_host = state["predecessor"], state["config"]["host_id"]
+    else:
+        state = None
+        source = json.loads(config.read_text())
+        old_id, old_host = predecessor_identity(db, source)
 
     def verify_predecessor(row):
         profile = row["profile"]
@@ -199,23 +229,21 @@ def upgrade(args, bundle, revision, config, db, state_dir):
     old = rows.get(old_id)
     require(old and "execution_slot_limit" in old,
             "Server must already support the shared handoff budget and know this Runner ID")
-    verify_predecessor(old)
-
-    if manifest.exists():
-        state = json.loads(manifest.read_text())
-        require([revision, server, str(config), old_id, old_host] ==
-                [state["revision"], state["server"], state["source_config"], state["predecessor"], state["config"]["host_id"]],
-                f"Resume using the original bundle REVISION, Server and configuration recorded in {manifest}")
-    else:
+    require(old["profile"]["host_id"] == old_host and old.get("host_data_policy") == 1,
+            "Upgrade the Server to support host data retirement before replacing this Runner")
+    if old["retired_at"] is None:
+        verify_predecessor(old)
+    if state is None:
         require(old["online"] and old["successor"] is None,
                 "Predecessor must be online and not already replaced before starting an upgrade")
         process = find_runner(db, config)
         require(process, "No live local tend-runner found with these --config and --db paths")
-        pid, start, cwd, _, native = process
+        pid, start, cwd, options, native = process
         check_predecessor_process(process, db, server)
         state = {
             "revision": revision, "server": server, "source_config": str(config), "predecessor": old_id,
             "original_process": [boot, pid, start], "cwd": str(cwd), "app_server_args": native,
+            "runtime": capture_runtime(process), "layout_db": str(cwd / options["--db"]),
             "config": derive(bundle / "bin/tend-runner", config, source.copy(), process, old,
                              args.inspect_listen, args.inspect_url),
         }
@@ -225,12 +253,34 @@ def upgrade(args, bundle, revision, config, db, state_dir):
     # Keep generations beside one another even after many upgrades.
     next_config, next_db = (db.parent / f"{new_id}.{suffix}" for suffix in ("json", "sqlite"))
     require(old["successor"] in (None, new_id), f"{old_id} already has a different successor")
-    if old["retired_at"] is not None:
-        require(old["successor"] == new_id, "Retired predecessor does not match the saved replacement")
+
+    def retire_files(action):
+        runtime = state["runtime"]
+        command = [bundle / "bin/tend-runner-retire-files", action, "--db", db, "--config", config,
+                   "--runner", old_id, "--successor", new_id, "--host", old_host, "--layout-db", state.get("layout_db", str(db)),
+                   "--workspace-root", settings["workspace_root"], "--receipt", state_dir / "retirement.json",
+                   "--codex-home", runtime["codex_home"]]
+        if runtime.get("unit"):
+            command.extend(["--unit", runtime["unit"]])
+        command.extend(state["app_server_args"])
+        # The helper may need to copy large artifacts. A partial attempt resumes
+        # from its durable receipt. Its output must not obscure the CLI receipt.
+        completed = subprocess.run(command, cwd=state["cwd"], stdout=sys.stderr,
+                                   env={**os.environ, "PATH": runtime.get("path", os.defpath)})
+        require(completed.returncode == 0, f"Predecessor file {action} did not complete")
+
+    def finish_retired(row):
+        require(row["successor"] == new_id, "Retired predecessor does not match the saved replacement")
+        if not (state_dir / "retirement.json").exists():
+            retire_files("prepare")
+        retire_files("cleanup")
         result(state)
+
+    if old["retired_at"] is not None:
+        finish_retired(old)
         return
     if args.inspect_listen or args.inspect_url:
-        inspect = inspection(source.get("inspect"), args.inspect_listen, args.inspect_url)
+        inspect = inspection(json.loads(config.read_text()).get("inspect"), args.inspect_listen, args.inspect_url)
         if settings.get("inspect") != inspect:
             require(old["successor"] is None and find_runner(next_db, next_config) is None,
                     "Inspection options can change only before replace and with the successor stopped")
@@ -247,8 +297,7 @@ def upgrade(args, bundle, revision, config, db, state_dir):
         old, new = rows[old_id], rows.get(new_id)
         require(old["successor"] in (None, new_id), f"{old_id} already has a different successor")
         if old["retired_at"] is not None:
-            require(old["successor"] == new_id, "Retired predecessor does not match the saved replacement")
-            result(state)
+            finish_retired(old)
             return
 
         prior = find_runner(db, config)
@@ -271,7 +320,9 @@ def upgrade(args, bundle, revision, config, db, state_dir):
                 launched = subprocess.Popen(
                     [bundle / "bin/tend-runner", "--config", next_config, "--db", next_db,
                      "--ready-file", ready_file, *state["app_server_args"]],
-                    cwd=state["cwd"], stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                    cwd=state["cwd"], env={**os.environ, "CODEX_HOME": state["runtime"]["codex_home"],
+                                            "PATH": state["runtime"].get("path", os.defpath)},
+                    stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                     start_new_session=True,
                 )
         if process is None and launched is not None and launched.poll() is not None:
@@ -307,8 +358,9 @@ def upgrade(args, bundle, revision, config, db, state_dir):
                   and prior is None and not original_alive
                   and new["execution_slot_limit"] == settings["slot_limit"]):
                 verify_predecessor(old)
+                retire_files("prepare")
                 cli("retire", old_id)
-                result(state)
+                finish_retired(old)
                 return
         time.sleep(0.5)
         rows = runners()
@@ -330,9 +382,12 @@ def main():
         revision = (bundle / "REVISION").read_text().strip()
         require(re.fullmatch(r"[0-9a-f]{40}", revision), "Run from an extracted main-build archive with a valid REVISION")
         require(args.timeout > 0, "--timeout must be positive")
-        config, db = args.config.resolve(strict=True), args.db.resolve(strict=True)
+        # A retired generation may already have been removed on a previous attempt.
+        config, db = args.config.resolve(), args.db.resolve()
         state_dir = db.with_name(db.name + ".upgrade")
         require(not state_dir.is_symlink(), "Upgrade state directory must not be a symlink")
+        require((state_dir / "upgrade.json").is_file() or (db.is_file() and config.is_file()),
+                "The predecessor DB and configuration are required to start an upgrade")
         state_dir.mkdir(mode=0o700, exist_ok=True)
         with (state_dir / "upgrade.lock").open("a") as lock:
             try:
@@ -342,7 +397,7 @@ def main():
             upgrade(args, bundle, revision, config, db, state_dir)
     except (UpgradeError, OSError, ValueError, KeyError, sqlite3.Error, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
         print(f"Runner upgrade paused: {error or 'interrupted'}. Fix the reported condition and rerun the same command. "
-              "Keep the upgrade directory and both Runner databases.", file=sys.stderr)
+              "Keep the upgrade journal and remaining Runner files.", file=sys.stderr)
         return 1
     return 0
 

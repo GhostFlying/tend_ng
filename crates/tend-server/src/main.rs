@@ -17,7 +17,7 @@ use std::{
     env,
     ffi::OsString,
     io::{Cursor, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::TrySendError,
     thread,
     time::Duration,
@@ -138,6 +138,7 @@ fn main() -> Result<()> {
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
     sessions.prepare(&store)?;
     let placement = Store::open(&db)?;
+    let artifact_root = db.with_extension("artifacts");
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let synchronization = runner_api::serve(&db)?;
@@ -261,10 +262,12 @@ fn main() -> Result<()> {
             }
             continue;
         } else {
-            handle(&mut store, &mut request, &router_profile).unwrap_or_else(|error| {
-                eprintln!("User API failed: {error:#}");
-                api_error(500, "Server could not process the request")
-            })
+            handle(&mut store, &mut request, &router_profile, &artifact_root).unwrap_or_else(
+                |error| {
+                    eprintln!("User API failed: {error:#}");
+                    api_error(500, "Server could not process the request")
+                },
+            )
         };
         let response = json_response(status, &body)?;
         if let Err(error) = request.respond(response) {
@@ -300,7 +303,12 @@ fn json_response(status: u16, body: &Value) -> Result<Response<Cursor<Vec<u8>>>>
         .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap()))
 }
 
-fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u16, Value)> {
+fn handle(
+    store: &mut Store,
+    request: &mut Request,
+    router: &Value,
+    artifact_root: &Path,
+) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     let normalized;
     let path = if let Some(rest) = path.strip_prefix("/api/v1/issues/") {
@@ -429,18 +437,27 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
         .strip_prefix("/api/v1/runners/")
         .and_then(|path| path.split_once('/'))
         .filter(|(id, operation)| {
-            protocol::valid_id(id) && matches!(*operation, "replace" | "retire")
+            protocol::valid_id(id) && matches!(*operation, "replace" | "retire" | "retirement")
         })
     {
-        if request.method() != &Method::Post {
+        if operation == "retirement" && request.method() == &Method::Get {
+            return Ok(match store.runner_retirement(runner, artifact_root)? {
+                Some(proof) => (200, serde_json::to_value(proof)?),
+                None => api_error(404, "Runner not found"),
+            });
+        }
+        if operation == "retirement" || request.method() != &Method::Post {
             return Ok(api_error(405, "method not allowed"));
         }
         let runner = runner.to_owned();
         if operation == "retire" {
-            return Ok(if store.retire_runner(&runner)? {
+            return Ok(if store.retire_runner(&runner, artifact_root)? {
                 (200, json!({"runner_id": runner, "state": "retired"}))
             } else {
-                api_error(409, "Runner has no acknowledged drain")
+                api_error(
+                    409,
+                    "Runner requires an acknowledged drain and all original deliveries",
+                )
             });
         }
         let Some(bytes) = request_bytes(request)? else {

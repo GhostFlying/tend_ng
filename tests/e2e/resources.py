@@ -50,20 +50,25 @@ def main():
 
             register("current-runner", "demo-host", 6)
             register("previous-runner", "demo-host", 2)
+            register("retired-runner", "demo-host", 4)
             register("offline-runner", "offline-host", 3)
             with sqlite3.connect(root / "server.sqlite") as ledger:
                 ledger.execute(
                     "UPDATE runners SET last_seen = unixepoch() - 60 WHERE id != 'current-runner'"
                 )
                 ledger.execute(
-                    "INSERT INTO runner_replacements VALUES ('previous-runner', 'current-runner', unixepoch(), unixepoch())"
+                    "INSERT INTO runner_replacements(predecessor, successor, drained_at, retired_at) "
+                    "VALUES ('retired-runner', 'previous-runner', unixepoch(), unixepoch()),"
+                    "       ('previous-runner', 'current-runner', NULL, NULL)"
                 )
             roster = cli("runner", "list")
-            assert [r["online"] for r in roster] == [True, False, False]
+            instances = {r["profile"]["runner_id"]: r for r in roster}
+            assert {rid for rid, r in instances.items() if r["online"]} == {"current-runner"}
             directory = cli("agent", "list")
             assert directory["router"] == {"id": "router", "model": None, "reasoning_effort": None}
             assert directory["runners"] == roster and directory["activity"] == []
-            assert roster[1]["retired_at"] is not None
+            assert instances["retired-runner"]["retired_at"] is not None
+            assert instances["previous-runner"]["successor"] == "current-runner"
             if args.web:
                 subprocess.run(["node", WEB / "tests/resources.mjs"], env=env, check=True, timeout=28)
 

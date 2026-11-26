@@ -89,7 +89,7 @@ fn handle(
 ) -> Result<ResponseBox> {
     match endpoint {
         Endpoint::Download(id) if request.method() == &Method::Get => {
-            let Some(artifact) = store.artifact(&id, None)? else {
+            let Some(artifact) = store.artifact(&id)? else {
                 return Ok(error_response(404, "Delivery file not found"));
             };
             if !artifact.available {
@@ -126,7 +126,7 @@ fn handle(
             }
         }
         Endpoint::Upload { runner, id } if request.method() == &Method::Put => {
-            let Some(artifact) = store.artifact(&id, Some(&runner))? else {
+            let Some(artifact) = store.artifact_for_upload(&runner, &id)? else {
                 return Ok(error_response(
                     404,
                     "Delivery is not registered for this Runner",

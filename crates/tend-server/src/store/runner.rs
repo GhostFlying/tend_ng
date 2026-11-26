@@ -377,20 +377,26 @@ impl Store {
                 row.get::<_, String>(0)
             })?
             .collect::<rusqlite::Result<std::collections::HashSet<_>>>()?;
+        if registered.is_empty() {
+            return Ok(request.repair_host_artifacts
+                && request.receipts.is_empty()
+                && request.runs.is_empty()
+                && request.records.is_empty()
+                && self.has_repairable_artifacts(task, &request.profile.runner_id)?);
+        }
         let records = request.records.iter().map(|record| match record {
             RunnerRecord::Run(run) => &run.assignment_id,
             RunnerRecord::Operation(op) => &op.assignment_id,
             RunnerRecord::Control(ack) => &ack.assignment_id,
             RunnerRecord::Handoff(proof) => &proof.assignment_id,
         });
-        Ok(!registered.is_empty()
-            && request
-                .receipts
-                .iter()
-                .map(|r| &r.assignment_id)
-                .chain(request.runs.iter().map(|run| &run.assignment_id))
-                .chain(records)
-                .all(|id| registered.contains(id)))
+        Ok(request
+            .receipts
+            .iter()
+            .map(|r| &r.assignment_id)
+            .chain(request.runs.iter().map(|run| &run.assignment_id))
+            .chain(records)
+            .all(|id| registered.contains(id)))
     }
 
     pub fn schedule_assignments(&mut self, after: &mut i64) -> Result<()> {
@@ -553,7 +559,12 @@ impl Store {
                 )?,
                 controls: super::control::pending(&self.db, &profile.runner_id, task)?,
                 drain_to: super::handoff::drain_target(&self.db, &profile.runner_id)?,
-                uploads: super::artifacts::pending(&self.db, &profile.runner_id, task)?,
+                uploads: super::artifacts::pending(
+                    &self.db,
+                    &profile.runner_id,
+                    request.repair_host_artifacts,
+                    task,
+                )?,
             }));
         }
 
@@ -706,7 +717,12 @@ impl Store {
             request.protocol,
             profile.shared_reviews,
         )?;
-        let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
+        let uploads = super::artifacts::pending(
+            &tx,
+            &profile.runner_id,
+            request.repair_host_artifacts,
+            task,
+        )?;
         let controls = super::control::pending(&tx, &profile.runner_id, task)?;
         let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;
         if let Some(slots) = drain_slots.filter(|_| release_slots) {
@@ -818,6 +834,7 @@ mod tests {
             None,
         )?;
         let request = |ids: &[&str]| RunnerSync {
+            repair_host_artifacts: false,
             drain_active_slots: None,
             protocol: protocol::RUNNER_PROTOCOL,
             profile: RunnerProfile {

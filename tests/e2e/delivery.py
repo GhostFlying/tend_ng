@@ -167,7 +167,7 @@ def main():
             wait_for(lambda: sql("runner", "SELECT state FROM local_runs ORDER BY rowid"),
                      lambda rows: rows == [("stopped",), ("stopped",)])
             file_id = json.loads((root / "submitted.json").read_text())["operation_id"]
-            assert (root / "runner.artifacts" / file_id).read_bytes() == CONTENTS
+            assert (root / "runner.runs" / ".tend-host" / "delivery-host" / "artifacts" / file_id).read_bytes() == CONTENTS
             original = root / "runner.runs" / "workspaces" / parent / "repos" / "example" / "guide.txt"
             assert original.read_text() == "A later edit to the workspace file.\n"
 

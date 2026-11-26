@@ -149,6 +149,60 @@ fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
     Ok(turn)
 }
 
+fn frozen_launch(
+    runtime: &Runtime,
+    configured: Option<&AppServer>,
+    cwd: &Path,
+) -> Result<AppServer> {
+    let mut launch = match configured {
+        Some(app) => app.clone(),
+        None => AppServer {
+            program: runtime
+                .program
+                .to_str()
+                .context("App Server program is not UTF-8")?
+                .to_owned(),
+            args: runtime
+                .args
+                .iter()
+                .map(|arg| {
+                    arg.to_str()
+                        .map(str::to_owned)
+                        .context("App Server argument is not UTF-8")
+                })
+                .collect::<Result<_>>()?,
+            codex_home: None,
+        },
+    };
+    let program = Path::new(&launch.program);
+    let executable = if program.components().count() > 1 {
+        Some(cwd.join(program))
+    } else {
+        use std::os::unix::fs::PermissionsExt;
+        std::env::var_os("PATH").and_then(|path| {
+            std::env::split_paths(&path)
+                .map(|dir| cwd.join(dir).join(program))
+                .find(|file| {
+                    file.metadata()
+                        .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+                })
+        })
+    }
+    .context("App Server executable was not found")?;
+    launch.program = executable
+        .to_str()
+        .context("App Server path is not UTF-8")?
+        .to_owned();
+    let home = launch
+        .codex_home
+        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
+        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".codex")))
+        .context("App Server has no Codex home")?;
+    let home = cwd.join(home);
+    launch.codex_home = Some(home.canonicalize().unwrap_or(home));
+    Ok(launch)
+}
+
 fn native_context(
     runtime: &Runtime,
     run: &LocalRun,
@@ -158,8 +212,8 @@ fn native_context(
     instructions: &str,
     tools: &[serde_json::Value],
 ) -> Result<String> {
-    // Compare the resolved execution configuration without adding cleartext
-    // invocation arguments to the Run ledger.
+    // Preserve the existing resume key. The separate historical launch profile
+    // captures the effective program and home used by this Run.
     let (program, args, home) = match app_server {
         Some(app) => (
             OsString::from(&app.program),
@@ -254,8 +308,12 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         // Configuration drift cannot clear an unresolved active-thread fence.
         return store.defer_active_resume(&run.id, guarded);
     }
-    let mut app = match client(runtime, &cwd, app_server) {
-        Ok(app) => app,
+    let started = frozen_launch(runtime, app_server, &cwd).and_then(|launch| {
+        let app = client(runtime, &cwd, Some(&launch))?;
+        Ok((app, launch))
+    });
+    let (mut app, launch) = match started {
+        Ok(pair) => pair,
         Err(error) if is_review && previous.is_some() => {
             eprintln!(
                 "Retry native App Server for Review Task {}: {error:#}",
@@ -265,6 +323,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         }
         Err(error) => return settle(store, run, &cwd, Err(error), false),
     };
+    let app_server = Some(&launch);
     let reused = if let Some(thread) = &previous {
         match app.resume_work_thread(
             thread,

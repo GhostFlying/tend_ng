@@ -188,9 +188,9 @@ def exercise(args, root):
                 wait_for(lambda: sql("server", "SELECT available FROM artifacts WHERE id = ?", file),
                          lambda rows: rows == [(1,)])
                 assert runs("runner", reviewer) == []
-                assert not (root / "next.artifacts" / file).exists()
                 author_cwd = Path((root / "author-cwd").read_text())
-                original = root / "runner.artifacts" / file
+                original = root / "shared" / ".tend-host" / settings["host_id"] / "artifacts" / file
+                saved_inode = original.stat().st_ino
                 assert original.stat().st_size > 32768
                 assert original.read_bytes() != (author_cwd / "repos/example/guide.txt").read_bytes()
 
@@ -205,15 +205,28 @@ def exercise(args, root):
                     mark("allow-author-stop-1")
                     gate("review-running-1")
                     assert runs("runner", reviewer) == []
-                    assert (root / "next.artifacts" / file).read_bytes() == original.read_bytes()
-                    assert not list((root / "next.artifacts").glob("*.part"))
+                    assert original.stat().st_ino == saved_inode
+                    assert not list(original.parent.glob("*.part"))
                     mark("deliver-review-1")
                     gate("result-1")
                     mark("allow-review-stop-1")
                     wait_for(lambda: sql("server", "SELECT status FROM tasks WHERE id = ?", reviewer),
                              lambda rows: rows == [("completed",)])
                     assert predecessor.wait(timeout=10) == 0
-            print("PASS artifact replacement: first queued Review reads the original snapshot on the successor")
+                    cli("runner", "retire", settings["runner_id"])
+                    stored = root / "server.artifacts" / file
+                    stored.unlink()
+                    wait_for(lambda: stored.is_file() and stored.read_bytes() == original.read_bytes(), bool)
+                    assert sql("server", "SELECT runner_id, available FROM artifacts WHERE id = ?", file) == [
+                        (settings["runner_id"], 1)]
+                    assert sql("server", "SELECT count(*) FROM issue_inputs WHERE id = ?", file) == [(1,)]
+                [(source_task,)] = sql("server", "SELECT task_id FROM artifacts WHERE id = ?", file)
+                stored.unlink()
+                subprocess.run([args.runner, "--config", successor_cfg, "--db", root / "next.sqlite",
+                                "--reconcile", source_task], env=env, check=True, timeout=12)
+                assert stored.read_bytes() == original.read_bytes()
+                assert sql("server", "SELECT count(*) FROM issue_inputs WHERE id = ?", file) == [(1,)]
+            print("PASS same-host review and incremental/full file restoration after its producer retires")
             return
 
         with runner(path, "runner", address, "replacement") as predecessor:

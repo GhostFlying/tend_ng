@@ -5,6 +5,26 @@ use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{ops::RangeInclusive, path::Path};
 
+const HOST_DATA_POLICY: u8 = 1;
+
+#[derive(serde::Serialize)]
+pub struct Retirement {
+    host_data_policy: u8,
+    runner_id: String,
+    host_id: String,
+    successor: Option<String>,
+    drained_at: Option<i64>,
+    retired_at: Option<i64>,
+    artifacts: Vec<DeliveryReceipt>,
+}
+
+#[derive(serde::Serialize)]
+struct DeliveryReceipt {
+    id: String,
+    bytes: u64,
+    available: bool,
+}
+
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
         "ALTER TABLE runners ADD COLUMN protocol INTEGER NOT NULL DEFAULT 1;
@@ -305,7 +325,7 @@ impl Store {
                     Some(_) => 0,
                     None => slot_limit,
                 };
-                Ok(json!({"profile":profile, "protocol":protocol,
+                Ok(json!({"profile":profile, "protocol":protocol, "host_data_policy":HOST_DATA_POLICY,
                           "last_seen":last_seen,"online":online,"successor":successor,"drained_at":drained_at,"retired_at":retired_at,
                           "execution_slot_limit":execution_slot_limit}))
             }).collect()
@@ -331,10 +351,69 @@ impl Store {
         Ok(json!({"router": router, "runners": runners, "activity": activity}))
     }
 
-    pub fn retire_runner(&self, runner: &str) -> Result<bool> {
+    pub fn runner_retirement(&self, runner: &str, root: &Path) -> Result<Option<Retirement>> {
+        let Some(mut fact) = self
+            .db
+            .query_row(
+                "SELECT r.host_id, p.successor, p.drained_at, p.retired_at FROM runners r
+             LEFT JOIN runner_replacements p ON p.predecessor = r.id WHERE r.id = ?1",
+                [runner],
+                |row| {
+                    Ok(Retirement {
+                        host_data_policy: HOST_DATA_POLICY,
+                        runner_id: runner.to_owned(),
+                        host_id: row.get(0)?,
+                        successor: row.get(1)?,
+                        drained_at: row.get(2)?,
+                        retired_at: row.get(3)?,
+                        artifacts: Vec::new(),
+                    })
+                },
+            )
+            .optional()?
+        else {
+            return Ok(None);
+        };
+        let mut query = self.db.prepare(
+            "SELECT id, bytes, available FROM artifacts WHERE runner_id = ?1 ORDER BY id",
+        )?;
+        fact.artifacts = query
+            .query_map([runner], |row| {
+                Ok(DeliveryReceipt {
+                    id: row.get(0)?,
+                    bytes: row.get(1)?,
+                    available: row.get(2)?,
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        for file in &mut fact.artifacts {
+            if file.available {
+                let path = root.join(&file.id);
+                if !super::artifacts::complete_file(&path, file.bytes)? {
+                    // Restore the durable upload request if a previously received file was lost.
+                    self.mark_artifact_missing(&file.id, &path)?;
+                    file.available = false;
+                }
+            }
+        }
+        Ok(Some(fact))
+    }
+
+    pub fn retire_runner(&self, runner: &str, root: &Path) -> Result<bool> {
+        let Some(fact) = self.runner_retirement(runner, root)? else {
+            return Ok(false);
+        };
+        if fact.retired_at.is_some() {
+            return Ok(true);
+        }
+        if fact.drained_at.is_none() || fact.artifacts.iter().any(|file| !file.available) {
+            return Ok(false);
+        }
         Ok(self.db.execute(
             "UPDATE runner_replacements SET retired_at = coalesce(retired_at, unixepoch())
-               WHERE predecessor = ?1 AND drained_at IS NOT NULL",
+               WHERE predecessor = ?1 AND drained_at IS NOT NULL AND NOT EXISTS (
+                   SELECT 1 FROM artifacts WHERE runner_id = ?1 AND available = 0
+               )",
             [runner],
         )? == 1)
     }
@@ -384,6 +463,45 @@ mod budget_tests {
     }
 
     #[test]
+    fn retirement_requires_the_producers_received_originals() -> Result<()> {
+        let store = Store {
+            db: Connection::open_in_memory()?,
+        };
+        store.db.execute_batch(
+            "CREATE TABLE runners(id TEXT PRIMARY KEY, host_id TEXT);
+             CREATE TABLE runner_replacements(predecessor TEXT, successor TEXT, drained_at INTEGER, retired_at INTEGER);
+             CREATE TABLE artifacts(id TEXT PRIMARY KEY, runner_id TEXT, bytes INTEGER, available INTEGER);
+             INSERT INTO runners VALUES ('old','host'), ('new','host');
+             INSERT INTO runner_replacements VALUES ('old','new',1,NULL);
+             INSERT INTO artifacts VALUES ('report','old',5,1), ('unrelated','new',20,0);",
+        )?;
+        let root = std::env::temp_dir().join(protocol::new_id());
+        std::fs::create_dir(&root)?;
+        std::fs::write(root.join("report"), b"bad")?;
+        assert!(store.runner_retirement("unknown", &root)?.is_none());
+        let fact = store.runner_retirement("old", &root)?.unwrap();
+        assert_eq!(fact.artifacts.len(), 1);
+        assert_eq!(fact.artifacts[0].id, "report");
+        assert!(!fact.artifacts[0].available);
+        assert!(!store.retire_runner("old", &root)?);
+        assert_eq!(
+            store.db.query_row(
+                "SELECT available FROM artifacts WHERE id='report'",
+                [],
+                |r| r.get::<_, i32>(0)
+            )?,
+            0
+        );
+        std::fs::write(root.join("report"), b"fixed")?;
+        store
+            .db
+            .execute("UPDATE artifacts SET available=1 WHERE id='report'", [])?;
+        assert!(store.retire_runner("old", &root)?);
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
     fn budget_is_frozen_and_released_monotonically_until_drain() -> Result<()> {
         let mut store = Store::initialize(Path::new(":memory:"))?;
         register(&store, "old", 3, false)?;
@@ -394,7 +512,7 @@ mod budget_tests {
         assert!(store.replace_runner("old", "third", None)?.is_none());
         assert!(store.replace_runner("new", "third", None)?.is_none());
         assert!(store.replace_runner("third", "new", None)?.is_none());
-        assert!(!store.retire_runner("old")?);
+        assert!(!store.retire_runner("old", Path::new("."))?);
         assert_eq!(execution_slot_limit(&store.db, &new)?, Some(0));
         store.db.execute(
             "UPDATE runners SET profile = json_set(profile,'$.slot_limit',12) WHERE id = 'old'",
@@ -410,8 +528,8 @@ mod budget_tests {
         note_drained(&store.db, "old")?;
         assert_eq!(execution_slot_limit(&store.db, &new)?, Some(5));
         assert!(drain_acknowledged(&store.db, "old")?);
-        assert!(store.retire_runner("old")?);
-        assert!(store.retire_runner("old")?);
+        assert!(store.retire_runner("old", Path::new("."))?);
+        assert!(store.retire_runner("old", Path::new("."))?);
         assert!(store.replace_runner("old", "new", None)?.is_some());
         assert!(store.replace_runner("new", "third", None)?.is_some());
         Ok(())

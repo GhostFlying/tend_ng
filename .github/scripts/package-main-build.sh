@@ -26,7 +26,7 @@ for binary in "$staging/bin/"*; do
     fi
 done
 
-install -m 755 scripts/tend-runner-upgrade "$staging/bin/"
+install -m 755 scripts/tend-runner-upgrade scripts/tend-runner-retire-files "$staging/bin/"
 test -x "$staging/bin/tend-runner-upgrade"
 
 tar -czf "$output/$name.tar.gz" -C "$staging" bin web REVISION

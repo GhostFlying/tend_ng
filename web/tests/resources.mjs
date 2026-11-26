@@ -1,7 +1,19 @@
 import assert from "node:assert/strict";
+import { mkdir } from "node:fs/promises";
+import { join } from "node:path";
 import { chromium } from "playwright";
 
-const { TEND_URL: url, TEND_TOKEN: token } = process.env;
+const {
+  TEND_URL: url,
+  TEND_TOKEN: token,
+  TEND_SCREENSHOTS: output,
+} = process.env;
+async function capture(page, name) {
+  if (output) {
+    await mkdir(output, { recursive: true });
+    await page.screenshot({ path: join(output, name) });
+  }
+}
 assert(url && token);
 const browser = await chromium.launch({ args: ["--no-proxy-server"] });
 try {
@@ -24,11 +36,20 @@ try {
     }
     await page.getByRole("link", { name: "Agents", exact: true }).click();
     await page.getByRole("heading", { name: "Agents", exact: true }).waitFor();
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
     const workers = page
       .locator("button.agent-row")
       .filter({ hasText: "fixture-worker" });
     await workers.first().waitFor();
     assert.equal(await workers.count(), 3);
+    assert.equal(
+      await workers.filter({ hasText: "retired-runner" }).count(),
+      0,
+    );
+    await workers.filter({ hasText: "previous-runner" }).waitFor();
+    await capture(page, `resource-agents-${width}.png`);
     const search = page.getByRole("searchbox", { name: "搜索名称或 ID" });
     if (width === 1440) {
       await search.fill("synthetic-filter");
@@ -80,6 +101,10 @@ try {
       .filter({ hasText: /^implementation-economy$/ })
       .waitFor();
     assert.equal(
+      await page.getByRole("button", { name: /retired-runner/ }).count(),
+      0,
+    );
+    assert.equal(
       await page.evaluate(() => document.documentElement.scrollWidth),
       width,
     );
@@ -88,7 +113,7 @@ try {
     await page.getByRole("link", { name: "主机", exact: true }).click();
     await page.getByText("执行主机 · 2 台", { exact: true }).waitFor();
     const host = page.getByRole("button", { name: "主机详情：demo-host" });
-    await host.getByText(/0 \/ 6 槽位/).waitFor();
+    await host.getByText(/0 \/ 6 槽位 · 2 个 Runner/).waitFor();
     await page
       .getByRole("button", { name: "主机详情：offline-host" })
       .getByText("离线")
@@ -101,7 +126,13 @@ try {
     await dialog
       .getByRole("heading", { name: "previous-runner", exact: true })
       .waitFor();
-    await dialog.getByText("已退役", { exact: true }).waitFor();
+    assert.equal(
+      await dialog.getByRole("heading", { name: "retired-runner" }).count(),
+      0,
+    );
+    await dialog.getByText("排空中", { exact: true }).waitFor();
+    assert.equal(await dialog.locator("section.host-runner").count(), 2);
+    await capture(page, `resource-host-${width}.png`);
     await page.keyboard.press("Escape");
     await dialog.waitFor({ state: "detached" });
     assert.ok(await host.evaluate((row) => row === document.activeElement));

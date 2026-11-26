@@ -1,0 +1,360 @@
+#!/usr/bin/env python3
+"""Migrate a stopped Runner's retained data and reclaim its retired private files."""
+
+import argparse
+from contextlib import closing, contextmanager
+import errno
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import shutil
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import urllib.request
+
+
+def require(condition, reason):
+    if not condition:
+        raise ValueError(reason)
+
+
+def identifier(value):
+    require(re.fullmatch(r"[a-zA-Z0-9_-]{1,128}", value), f"Invalid Tend ID: {value}")
+    return value
+
+
+def sibling(db, extension):
+    return Path(os.path.splitext(db)[0] + extension)
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_DIRECTORY | os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_receipt(path, receipt):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as out:
+        temporary = Path(out.name)
+        try:
+            json.dump(receipt, out, indent=2)
+            out.flush()
+            os.fsync(out.fileno())
+            os.replace(temporary, path)
+            sync_directory(path.parent)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def api(path):
+    token = os.environ.get("TEND_TOKEN")
+    require(token, "Set TEND_TOKEN and the original Server's TEND_URL")
+    url = os.environ.get("TEND_URL", "http://127.0.0.1:8832").rstrip("/")
+    return urllib.request.urlopen(urllib.request.Request(url + "/api/v1/" + path,
+                                  headers={"Authorization": "Bearer " + token}), timeout=60)
+
+
+def retirement(args):
+    with api(f"runners/{args.runner}/retirement") as response:
+        fact = json.load(response)
+    require(fact.get("host_data_policy") == 1 and fact["runner_id"] == args.runner
+            and fact["host_id"] == args.host and fact["successor"] == args.successor
+            and fact["drained_at"] is not None, "Server has not acknowledged this exact replacement's final sync")
+    if args.action == "cleanup":
+        require(fact["retired_at"] is not None, "Server has not retired this predecessor")
+    return ({identifier(row["id"]): row["bytes"] for row in fact["artifacts"]},
+            [row["id"] for row in fact["artifacts"] if not row["available"]])
+
+
+def file_identity(path):
+    stat = path.stat()
+    return [stat.st_dev, stat.st_ino]
+
+
+@contextmanager
+def stopped_ledger(db):
+    # New Runners hold this inode throughout execution. Legacy releases can
+    # still be identified by an actual open descriptor to this exact database.
+    with open(str(db) + ".lock", "a+b") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        if db.exists():
+            ident = file_identity(db)
+            for proc in Path("/proc").iterdir():
+                if not proc.name.isdecimal():
+                    continue
+                try:
+                    if proc.stat().st_uid != os.geteuid() or (proc / "comm").read_text().strip() != "tend-runner":
+                        continue
+                    for fd in (proc / "fd").iterdir():
+                        try:
+                            require(file_identity(fd) != ident, f"Runner PID {proc.name} still has the database open")
+                        except FileNotFoundError:
+                            pass
+                except (FileNotFoundError, ProcessLookupError):
+                    continue
+        yield
+
+
+def validate_config(args):
+    config = json.loads(args.config.read_text())
+    require((config["runner_id"], config["host_id"]) == (args.runner, args.host),
+            "Runner configuration has a different identity")
+    root = (args.config.parent / config["workspace_root"] if config.get("workspace_root")
+            else sibling(args.layout_db, ".runs"))
+    require(root.resolve() == args.workspace_root, "Workspace root differs from the original Runner configuration")
+
+
+def validate_ledger(ledger, args):
+    identity = ledger.execute("SELECT runner_id, host_id FROM runner_instance WHERE singleton=1").fetchone()
+    require(identity == (args.runner, args.host), "Database is owned by a different Runner")
+    require(not ledger.execute("SELECT 1 FROM local_runs WHERE state IN ('prepared','running') LIMIT 1").fetchone(),
+            "An original Run has no stop receipt")
+    if args.action != "adopt":
+        require(ledger.execute("SELECT successor FROM local_drain").fetchone() == (args.successor,),
+                "Local drain target differs from the Server's successor")
+        pending_records = [
+            ("received_assignments", "execution_state NOT IN ('handed_off','rejected') OR acknowledged=0"),
+            ("run_outbox", "acknowledged=0"), ("local_workspace_reclaims", "acknowledged=0"),
+        ]
+        # A mixed-version Server may not yet have acknowledged native usage.
+        if ledger.execute("SELECT 1 FROM sqlite_schema WHERE type='table' AND name='local_token_usage'").fetchone():
+            pending_records.append(("local_token_usage", "acknowledged=0"))
+        for table, pending in pending_records:
+            require(not ledger.execute(f"SELECT 1 FROM {table} WHERE {pending} LIMIT 1").fetchone(),
+                    f"Local {table} still contains work or receipts awaiting acknowledgement")
+
+
+def hash_file(path):
+    with path.open("rb") as stream:
+        digest = hashlib.sha256()
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+        return digest.hexdigest()
+
+
+def share_file(old, dest, size, can_download):
+    if old.exists():
+        require(old.is_file() and not old.is_symlink() and old.stat().st_size == size,
+                f"Unexpected legacy original {old.name}")
+        if not dest.exists():
+            try:
+                os.link(old, dest)
+            except FileExistsError:
+                pass
+            except OSError as error:
+                if error.errno != errno.EXDEV:
+                    raise
+    if not dest.exists():
+        require(old.is_file() or can_download, f"Missing immutable original {dest.name}")
+        with (old.open("rb") if old.is_file() else api(f"artifacts/{dest.name}")) as src:
+            with tempfile.NamedTemporaryFile(dir=dest.parent, delete=False) as tmp:
+                partial = Path(tmp.name)
+                try:
+                    shutil.copyfileobj(src, tmp)
+                    tmp.flush()
+                    os.fsync(tmp.fileno())
+                    require(tmp.tell() == size, f"Incomplete original {dest.name}")
+                    try:
+                        os.link(partial, dest)
+                    except FileExistsError:
+                        pass
+                finally:
+                    partial.unlink(missing_ok=True)
+    require(dest.is_file() and not dest.is_symlink() and dest.stat().st_size == size,
+            f"Shared original {dest.name} differs in length or type")
+    if old.exists() and not old.samefile(dest):
+        require(hash_file(old) == hash_file(dest), f"Different content under file ID {dest.name}")
+
+
+def migrate_artifacts(ledger, args, shared, server):
+    sizes = dict(ledger.execute("""
+        SELECT id, json_extract(operation,'$.action.bytes') FROM local_work_operations
+        WHERE json_extract(operation,'$.action.kind')='submit_artifact'"""))
+    if server is not None:
+        require(all(server.get(key) == size for key, size in sizes.items()),
+                "Server has not acknowledged all local artifact declarations")
+        sizes.update(server)
+    legacy = sibling(args.layout_db, ".artifacts")
+    if legacy.exists():
+        require(not legacy.is_symlink(), "Legacy artifact path is a symbolic link")
+        for entry in legacy.iterdir():
+            # Review materializations can belong to another producer. Only
+            # immutable file IDs participate; unrelated or partial files stay.
+            if entry.is_file() and re.fullmatch(r"[A-Za-z0-9_-]{1,128}", entry.name):
+                sizes.setdefault(entry.name, entry.stat().st_size)
+    shared.mkdir(exist_ok=True, parents=True)
+    for key, size in sizes.items():
+        identifier(key)
+        share_file(legacy / key, shared / key, size, server is not None and key in server)
+    sync_directory(shared)
+    return sizes
+
+
+def migrate_threads(ledger, args, path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with closing(sqlite3.connect(path)) as index, index:
+        index.execute("CREATE TABLE IF NOT EXISTS profiles(id INTEGER PRIMARY KEY, launch TEXT UNIQUE NOT NULL)")
+        index.execute("CREATE TABLE IF NOT EXISTS threads(id TEXT PRIMARY KEY, profile_id INTEGER NOT NULL REFERENCES profiles(id))")
+        for thread, settings in ledger.execute("""
+            SELECT DISTINCT r.thread_id, CASE WHEN r.native_context IS NULL THEN a.app_server ELSE r.app_server END
+            FROM local_runs r JOIN received_assignments a ON a.id=r.assignment_id
+            WHERE r.thread_id IS NOT NULL AND r.turn_id IS NOT NULL"""):
+            launch = json.loads(settings) if settings else {}
+            previous = index.execute("SELECT launch FROM threads JOIN profiles ON profiles.id=profile_id WHERE threads.id=?",
+                                     (thread,)).fetchone()
+            if previous and not launch:
+                continue  # An earlier offline adoption already captured this legacy default.
+            command = args.app_server or ["codex", "app-server", "--listen", "stdio://"]
+            program = launch.get("program", command[0])
+            if "/" not in program:
+                resolved = shutil.which(program)
+                require(resolved, f"Historical launcher {program} is absent from the original service PATH")
+                program = resolved
+            program = str(Path(program).absolute())
+            home = launch.get("codex_home") or str(args.codex_home)
+            require(Path(home).is_absolute(), "Historical Codex home must be absolute")
+            launch = json.dumps({"program": program, "args": launch.get("args", command[1:]),
+                                 "codex_home": str(Path(home).resolve())}, sort_keys=True)
+            require(not previous or previous[0] == launch, "A native thread has conflicting App Server bindings")
+            index.execute("INSERT OR IGNORE INTO profiles(launch) VALUES(?)", (launch,))
+            index.execute("INSERT OR IGNORE INTO threads SELECT ?, id FROM profiles WHERE launch=?", (thread, launch))
+        count = index.execute("SELECT count(*) FROM threads").fetchone()[0]
+    sync_directory(path.parent)
+    return count
+
+
+def remove_unit(args):
+    if not args.unit:
+        return
+    require(re.fullmatch(r"[A-Za-z0-9_@.-]+\.service", args.unit), "Invalid user service name")
+    path = Path.home() / ".config/systemd/user" / args.unit
+    if not path.exists():
+        return
+    show = subprocess.run(["systemctl", "--user", "show", args.unit, "-p", "ActiveState", "-p", "UnitFileState",
+                           "-p", "FragmentPath", "-p", "ExecStart"], check=True, text=True, capture_output=True)
+    facts = dict(line.split("=", 1) for line in show.stdout.splitlines() if "=" in line)
+    command = facts.get("ExecStart", "")
+    argv = shlex.split(command.partition("argv[]=")[2].partition(" ;")[0])
+    def option(name):
+        return Path(argv[argv.index(name) + 1]).resolve() if name in argv and argv.index(name) + 1 < len(argv) else None
+
+    require(facts.get("ActiveState") in {"inactive", "failed"}
+            and facts.get("UnitFileState") in {"disabled", "enabled"}
+            and Path(facts.get("FragmentPath", "")).resolve() == path.resolve()
+            and argv and Path(argv[0]).name == "tend-runner"
+            and option("--db") == args.db and option("--config") == args.config,
+            "Old user service still live or shared; verify its ownership before cleanup")
+    if facts["UnitFileState"] == "enabled":
+        subprocess.run(["systemctl", "--user", "disable", args.unit], check=True)
+    path.unlink()
+    sync_directory(path.parent)
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=True)
+
+
+def run(args):
+    for value in [args.runner, args.host]:
+        identifier(value)
+    # Legacy Runners derived data directory names from the original --db
+    # spelling, even when the database itself was opened through a symlink.
+    args.layout_db = (args.layout_db or args.db).absolute()
+    args.db, args.config = args.db.resolve(), args.config.resolve()
+    require(args.layout_db.resolve() == args.db, "Layout path must refer to the same database")
+    args.workspace_root = args.workspace_root.resolve()
+    require(args.codex_home.is_absolute(), "Pass the original absolute --codex-home")
+    shared = args.workspace_root / ".tend-host" / args.host
+    index = shared / "history" / (args.runner + ".sqlite")
+    retiring = args.action != "adopt"
+    if retiring:
+        require(args.receipt and args.successor and identifier(args.successor) != args.runner,
+                "Retirement requires a distinct --successor and --receipt")
+        args.receipt = args.receipt.resolve()
+    ownership = {"host_data_policy": 1, "runner": args.runner, "host": args.host, "successor": args.successor,
+                 "workspace_root": str(args.workspace_root), "db": str(args.db), "config": str(args.config),
+                 "layout_db": str(args.layout_db)}
+    server, missing = retirement(args) if retiring else (None, [])
+    prior = None
+    if retiring and args.receipt.exists():
+        prior = json.loads(args.receipt.read_text())
+        require(all(prior.get(k) == v for k, v in ownership.items()), "Retirement receipt is for another generation")
+    if args.action == "cleanup":
+        require(not missing, "Server is still missing an original delivery; retry after successor sync")
+        require(prior, "Run prepare and verify its receipt before cleanup")
+        if prior.get("cleaned") and not args.db.exists() and not args.config.exists():
+            return prior
+    with stopped_ledger(args.db):
+        if args.config.exists():
+            validate_config(args)
+        else:
+            require(args.action == "cleanup" and prior, "Original configuration unavailable")
+        if args.db.exists():
+            require(not prior or prior["db_inode"] == file_identity(args.db), "Database file changed after preparation")
+            with closing(sqlite3.connect(args.db.as_uri() + "?mode=ro", uri=True)) as ledger:
+                validate_ledger(ledger, args)
+                sizes = migrate_artifacts(ledger, args, shared / "artifacts", server)
+                count = migrate_threads(ledger, args, index)
+            result = {**ownership, "db_inode": file_identity(args.db), "threads": count, "artifacts": sizes}
+        else:
+            require(args.action == "cleanup" and prior, "Original database unavailable")
+            result = prior
+        if args.action == "prepare":
+            # First publish the retained bytes. A successor can now repair the
+            # Server even if the original Runner has already exited.
+            require(not missing, "Published local originals; retry after the successor repairs Server delivery")
+            write_receipt(args.receipt, result)
+        if args.action == "cleanup":
+            require(index.is_file(), "Missing shared native history index")
+            with closing(sqlite3.connect(index.as_uri() + "?mode=ro", uri=True)) as history:
+                require(history.execute("SELECT count(*) FROM threads").fetchone()[0] == result["threads"],
+                        "Incomplete native history index")
+            for key, size in {**result["artifacts"], **server}.items():
+                share_file(sibling(args.layout_db, ".artifacts") / identifier(key), shared / "artifacts" / key, size, key in server)
+            remove_unit(args)
+            legacy = sibling(args.layout_db, ".artifacts")
+            if legacy.exists():
+                for key in result["artifacts"]:
+                    (legacy / identifier(key)).unlink(missing_ok=True)
+                if not any(legacy.iterdir()):
+                    legacy.rmdir()
+            args.config.unlink(missing_ok=True)
+            for suffix in ["-wal", "-shm", ""]:
+                Path(str(args.db) + suffix).unlink(missing_ok=True)
+            sync_directory(args.db.parent)
+            sync_directory(args.config.parent)
+            result["cleaned"] = True
+            write_receipt(args.receipt, result)
+        return result
+
+
+def main():
+    os.umask(0o077)
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument("action", choices=["adopt", "prepare", "cleanup"])
+    for name in ["db", "config", "workspace-root", "codex-home"]:
+        p.add_argument("--" + name, required=True, type=Path)
+    for name in ["host", "runner"]:
+        p.add_argument("--" + name, required=True)
+    p.add_argument("--layout-db", type=Path, help="original --db spelling if the service used an alias")
+    p.add_argument("--successor")
+    p.add_argument("--receipt", type=Path)
+    p.add_argument("--unit")
+    p.add_argument("--app-server", nargs=argparse.REMAINDER)
+    args = p.parse_args()
+    result = run(args)
+    print(json.dumps({"runner": args.runner, "action": args.action, "threads": result["threads"],
+                      "files": len(result["artifacts"]), "cleaned": result.get("cleaned", False)}))
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except (ValueError, KeyError, OSError, sqlite3.Error, subprocess.SubprocessError) as exc:
+        sys.exit(f"Runner storage: {exc}")
