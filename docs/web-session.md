@@ -8,13 +8,13 @@ Server 原生监听 HTTP。远程 Web 由同机可信 TLS 入口终止 TLS 并�
 
 未配置 HTTPS 入口时，只有来源地址为回环、请求 Host 为规范的 `localhost`、`127.0.0.1` 或 `[::1]` 的本机 HTTP 可以登录。回环代理仅供本机开发使用，不应向远端转发未加密的 Web 登录。普通远端 HTTP 页面只提示打开已配置的 HTTPS 地址，不渲染令牌表单，不读取 Web 会话或发送 Bearer。原有 Bearer 仍可用于受信任网络内的 CLI 和 Runner。 [配置示例](../README.md#web-sign-in-over-https)
 
-| 模式 | Cookie | Server 绝对有效期 |
+| 新签发模式 | Cookie | Server 绝对有效期 |
 | --- | --- | --- |
-| HTTPS 默认 | `__Host-tend-session`，不设 Max-Age | 12 小时 |
-| HTTPS 记住 | `__Host-tend-session`，Max-Age=604800 | 7 天 |
-| HTTP 本机回环 | `tend-loopback-session`，不设 Secure 或 Max-Age | 12 小时 |
+| HTTPS 默认 | `__Host-tend-session`，不设 Max-Age | 12 小时（43200 秒） |
+| HTTPS 记住 | `__Host-tend-session`，Max-Age=2592000 | 30 天（2592000 秒） |
+| HTTP 本机回环 | `tend-loopback-session`，不设 Secure 或 Max-Age | 12 小时（43200 秒） |
 
-全部模式使用 HttpOnly、SameSite=Lax、Path=/，不设 Domain。HTTPS 两种模式都有 Secure。不滑动续期。浏览器可能恢复普通会话 Cookie，仍受 Server 上限约束。Server 在 SQLite 按 ID 摘要、凭据代次、origin 和到期时间检查，重启保留有效会话。Server 用新 `TEND_TOKEN` 启动时拒绝并删除旧代次会话，即使以后切回原值也不恢复已删除的记录。接口和运维日志不得记录凭据或原始请求头。 [存储边界](storage.md#建议保存范围)
+全部模式使用 HttpOnly、SameSite=Lax、Path=/，不设 Domain。HTTPS 两种模式都有 Secure。不滑动续期。已签发的会话（包括此前的 7 天记住会话）按原 `expires_at` 到期，不迁移、不延长。浏览器可能恢复普通会话 Cookie，仍受 Server 上限约束。Server 在 SQLite 按 ID 摘要、凭据代次、origin 和到期时间检查，重启保留有效会话。Server 用新 `TEND_TOKEN` 启动时拒绝并删除旧代次会话，即使以后切回原值也不恢复已删除的记录。接口和运维日志不得记录凭据或原始请求头。 [存储边界](storage.md#建议保存范围)
 
 升级前备份 Server SQLite。迁移 30 后，旧 Server 版本不会打开新版本的数据库。
 
@@ -41,6 +41,6 @@ cargo build --locked
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
 pnpm --dir web exec playwright install chromium
-python3 -B tests/e2e/web_session.py target/debug/tend-server target/debug/tend target/debug/tend-runner \\
+python3 -B tests/e2e/web_session.py target/debug/tend-server target/debug/tend target/debug/tend-runner \
   --web web/dist --screenshots /tmp/tend-web-session-screenshots
 ```

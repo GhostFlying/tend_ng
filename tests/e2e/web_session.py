@@ -57,7 +57,20 @@ def web_headers(origin):
     return {"Host": origin.split("://")[1], "Origin": origin, "X-Tend-Web": "1"}
 
 
-def check_loopback(address):
+def cookie_digest(cookie):
+    raw = base64.urlsafe_b64decode(cookie.split("=", 1)[1] + "=")
+    assert len(raw) == 32
+    return hashlib.sha256(raw).digest()
+
+
+def stored_session(ledger, cookie):
+    return ledger.execute(
+        "SELECT credential_generation, origin, expires_at FROM web_sessions WHERE id_digest = ?",
+        [cookie_digest(cookie)],
+    ).fetchone()
+
+
+def check_loopback(root, address):
     origin = f"http://{address}"
     headers = web_headers(origin)
     check(401, call(address, "GET"))
@@ -73,9 +86,14 @@ def check_loopback(address):
     ]:
         assert "Set-Cookie" not in check(403, login(address, unsafe, False))
 
+    start = int(time.time())
     cookie, flags = attributes(check(204, login(address, headers, False)))
+    end = int(time.time())
     assert cookie.startswith("tend-loopback-session=")
     assert flags == {"Path=/", "HttpOnly", "SameSite=Lax"}
+    with closing(sqlite3.connect(root / "server.sqlite")) as ledger:
+        _, bound_origin, expires = stored_session(ledger, cookie)
+        assert bound_origin == origin and start + 43_200 <= expires <= end + 43_200
     auth = {"Cookie": cookie}
     check(204, call(address, "GET", headers=auth))
     check(204, call(address, "HEAD", headers=auth))
@@ -103,7 +121,7 @@ def check_loopback(address):
     cleared, flags = attributes(check(204, call(address, "DELETE", headers={**headers, **auth})))
     assert cleared == "tend-loopback-session=" and "Max-Age=0" in flags
     check(401, call(address, "GET", headers=auth))
-    print("PASS loopback session, HTTPS requirement, exact Origin and request-header checks")
+    print("PASS loopback: 43200s, nonpersistent cookie, remember rejected, logout revoked")
 
 
 def check_https(args, root, address, origin, env):
@@ -111,7 +129,7 @@ def check_https(args, root, address, origin, env):
     host = {"Host": headers["Host"]}
     times = []
     cookies = []
-    for remember, ttl in [(False, 43200), (True, 604800), (True, 604800)]:
+    for remember, ttl in [(False, 43_200), (True, 2_592_000), (True, 2_592_000)]:
         start = int(time.time())
         cookie, flags = attributes(check(204, login(address, headers, remember)))
         end = int(time.time())
@@ -127,15 +145,10 @@ def check_https(args, root, address, origin, env):
     def read_stored(ledger, cookie):
         secret = cookie.split("=", 1)[1]
         raw = base64.urlsafe_b64decode(secret + "=")
-        assert len(raw) == 32
-        digest = hashlib.sha256(raw).digest()
         for db_file in root.glob("server.sqlite*"):
             data = db_file.read_bytes()
             assert raw not in data and secret.encode() not in data and TOKEN.encode() not in data
-        return ledger.execute(
-            "SELECT credential_generation, origin, expires_at FROM web_sessions WHERE id_digest = ?",
-            [digest],
-        ).fetchone()
+        return stored_session(ledger, cookie)
 
     auth = {**host, "Cookie": cookies[1]}
     check(204, call(address, "GET", headers=auth))
@@ -174,11 +187,27 @@ def check_https(args, root, address, origin, env):
         for cookie, (earliest, latest) in zip(cookies, times):
             generation, bound_origin, expires = read_stored(ledger, cookie)
             assert len(generation) == 32 and bound_origin == origin and earliest <= expires <= latest
+        # Simulate a remembered cookie issued six days ago under the old 7-day policy.
+        legacy_secret = base64.urlsafe_b64encode(os.urandom(32)).decode().rstrip("=")
+        legacy_cookie = f"__Host-tend-session={legacy_secret}"
+        legacy_issued_at = int(time.time()) - 6 * 86_400
+        legacy_row = (stored_session(ledger, cookies[1])[0], origin, legacy_issued_at + 604_800)
+        with ledger:
+            ledger.execute(
+                "INSERT INTO web_sessions(id_digest, credential_generation, origin, expires_at) "
+                "VALUES (?, ?, ?, ?)",
+                (cookie_digest(legacy_cookie), *legacy_row),
+            )
         replacement, _ = attributes(check(204, login(address, {**headers, "Cookie": cookies[0]}, False)))
         check(401, call(address, "GET", headers={**host, "Cookie": cookies[0]}))
+        assert stored_session(ledger, cookies[0]) is None
         check(204, call(address, "GET", headers={**host, "Cookie": replacement}))
-        check(204, call(address, "DELETE", headers={**headers, "Cookie": replacement}))
+        cleared, flags = attributes(check(204, call(address, "DELETE", headers={**headers, "Cookie": replacement})))
+        assert cleared == "__Host-tend-session="
+        assert flags == {"Path=/", "HttpOnly", "SameSite=Lax", "Secure", "Max-Age=0"}
         check(401, call(address, "GET", headers={**host, "Cookie": replacement}))
+        assert stored_session(ledger, replacement) is None
+        assert stored_session(ledger, legacy_cookie) == legacy_row
         check(204, call(address, "GET", headers=auth))
         with ledger:
             ledger.execute("UPDATE web_sessions SET expires_at = unixepoch() WHERE id_digest IN "
@@ -192,8 +221,9 @@ def check_https(args, root, address, origin, env):
         old_expiry = read_stored(ledger, remaining)[2]
         check(204, call(address, "GET", headers={**host, "Cookie": remaining}))
         assert read_stored(ledger, remaining)[2] == old_expiry
-    print("PASS SHA-256-only storage, cookie attributes, absolute TTLs, single revocation, and Bearer CLI/Runner")
-    return {**host, "Cookie": remaining}
+    print("PASS HTTPS: 2592000s remembered / 43200s default, cookie attributes, replacement and logout revocation")
+    print("PASS SHA-256-only storage, read-only expiry checks, and Bearer CLI/Runner")
+    return {**host, "Cookie": remaining}, {**host, "Cookie": legacy_cookie}, legacy_row
 
 
 @contextmanager
@@ -252,7 +282,7 @@ def main():
         root = Path(temp)
         env = {**os.environ, "TEND_TOKEN": TOKEN, "CODEX_HOME": str(root / "codex")}
         with server(args.server, root, env, web_dir=args.web) as loopback:
-            check_loopback(loopback)
+            check_loopback(root, loopback)
             tls_root = root / "tls"
             tls_root.mkdir()
             if not args.web:
@@ -270,9 +300,16 @@ def main():
 
 def verify(args, root, env, origin, browser=None):
     with server(args.server, root, env, web_dir=args.web, web_origin=origin) as address:
-        remaining = check_https(args, root, address, origin, {**env, "TEND_URL": f"http://{address}"})
+        remaining, legacy, legacy_row = check_https(
+            args, root, address, origin, {**env, "TEND_URL": f"http://{address}"},
+        )
     with server(args.server, root, env, web_dir=args.web, web_origin=origin) as address:
         check(204, call(address, "GET", headers=remaining))
+        for method, path, expected in [("GET", SESSION, 204), ("HEAD", SESSION, 204), ("GET", CHAT, 200)]:
+            assert "Set-Cookie" not in check(expected, call(address, method, path, legacy))
+        with closing(sqlite3.connect(root / "server.sqlite")) as ledger:
+            assert stored_session(ledger, legacy["Cookie"]) == legacy_row
+        print("PASS legacy 7-day row remains valid with its original expiry after restart and authentication")
     with server(args.server, root, {**env, "TEND_TOKEN": ROTATED}, web_dir=args.web,
                 web_origin=origin) as address:
         check(401, call(address, "GET", headers=remaining))

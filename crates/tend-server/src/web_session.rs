@@ -13,7 +13,7 @@ use url::Url;
 
 pub(crate) const PATH: &str = "/api/v1/web/session";
 const SESSION_TTL: i64 = 12 * 60 * 60;
-const REMEMBER_TTL: i64 = 7 * 24 * 60 * 60;
+const REMEMBER_TTL: i64 = 30 * 24 * 60 * 60;
 const HTTPS_COOKIE: &str = "__Host-tend-session";
 const LOOPBACK_COOKIE: &str = "tend-loopback-session";
 

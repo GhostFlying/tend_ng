@@ -107,7 +107,7 @@ function Connect({
             aria-describedby="remember-hint"
             onChange={(event) => setRemember(event.target.checked)}
           />
-          记住此浏览器（7 天）
+          记住此浏览器（30 天）
         </label>
         <p id="remember-hint" className="session-hint">
           {canRemember

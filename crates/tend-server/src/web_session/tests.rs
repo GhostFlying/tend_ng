@@ -26,7 +26,7 @@ fn cookie_policy_uses_only_explicit_https_or_canonical_loopback_authorities() ->
     assert_eq!(https.host, "tend.example:8443");
     assert_eq!(
         https.cookie("fixture", Some(REMEMBER_TTL)).value.as_str(),
-        "__Host-tend-session=fixture; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=604800"
+        "__Host-tend-session=fixture; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=2592000"
     );
     assert_eq!(
         https.cookie("fixture", None).value.as_str(),

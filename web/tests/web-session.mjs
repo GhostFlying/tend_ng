@@ -34,7 +34,8 @@ let context;
 const connect = (page) => page.getByRole("heading", { name: "连接 Tend" });
 const disconnect = (page) =>
   page.getByRole("button", { name: "断开连接", exact: true });
-const remember = (page) => page.getByRole("checkbox", { name: /记住此浏览器/ });
+const remember = (page) =>
+  page.getByRole("checkbox", { name: "记住此浏览器（30 天）", exact: true });
 
 async function launch(profile, viewport = options.viewport) {
   const ctx = await chromium.launchPersistentContext(join(root, profile), {
@@ -152,6 +153,7 @@ try {
     "legacy-fixture",
   );
   await remember(page).check();
+  const earliestExpiry = Math.floor(Date.now() / 1000) + 2_592_000;
   await submit(page, token);
   await disconnect(page).waitFor();
   assert.deepEqual(
@@ -170,7 +172,9 @@ try {
   assert.equal(remembered.httpOnly && remembered.secure, true);
   assert.equal(remembered.path, "/");
   assert.equal(remembered.sameSite, "Lax");
-  assert(remembered.expires > Date.now() / 1000 + 600_000);
+  const latestExpiry = Math.ceil(Date.now() / 1000) + 2_592_000;
+  assert(remembered.expires >= earliestExpiry);
+  assert(remembered.expires <= latestExpiry);
   await page.getByLabel("发消息给 Tend").waitFor();
   await screenshot(page, "web-session-connected.png");
 
