@@ -331,7 +331,7 @@ fn web_route(method: &Method, url: &str) -> bool {
         (Method::Get | Method::Post, ["discussions"]) => true,
         (Method::Get, ["discussions", "workspaces" | "candidates"]) => true,
         (Method::Get | Method::Patch, ["discussions", id])
-        | (Method::Get | Method::Post, ["discussions", id, "draft"])
+        | (Method::Get | Method::Post, ["discussions", id, "draft" | "handoff"])
         | (Method::Post | Method::Delete, ["discussions", id, "references"])
         | (Method::Post, ["discussions", id, "handoffs"]) => valid(id),
         (

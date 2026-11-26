@@ -309,6 +309,55 @@ impl Client {
         }
     }
 
+    pub fn discussion_tail_turn(&mut self, thread: &str) -> Result<Option<String>> {
+        let response = self.call(
+            "thread/turns/list",
+            json!({"threadId":thread,"itemsView":"full","limit":1}),
+        )?;
+        Ok(response["data"]
+            .as_array()
+            .context("App Server did not confirm the native turn list")?
+            .first()
+            .map(|turn| turn["id"].as_str().context("A native turn has no identity"))
+            .transpose()?
+            .map(str::to_owned))
+    }
+
+    /// Fork through the last native turn known settled at registration. A
+    /// prefix check is independent of any later turn being known to Tend.
+    pub fn fork_discussion_through(
+        &mut self,
+        thread: &str,
+        through_turn: &str,
+        scope: DiscussionScope<'_>,
+        model: Option<&str>,
+    ) -> Result<Option<String>> {
+        let mut params = json!({
+            "threadId": thread, "lastTurnId": through_turn, "excludeTurns": true,
+            "ephemeral": false, "model": model,
+        });
+        scope.apply(&mut params)?;
+        let response = match self.call("thread/fork", params) {
+            Ok(response) => response,
+            // Older App Servers or compacted rollouts may not support a
+            // bounded fork. The caller can use saved, bounded history.
+            Err(error) if error.downcast_ref::<RpcError>().is_some() => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        verify_discussion_permissions(&response, scope.roots)?;
+        let fork = response["thread"]["id"]
+            .as_str()
+            .context("thread/fork missing thread ID")?;
+        ensure!(
+            fork != thread,
+            "bounded Discussion fork reused its parent identity"
+        );
+        Ok(
+            (self.discussion_tail_turn(fork)?.as_deref() == Some(through_turn))
+                .then(|| fork.to_owned()),
+        )
+    }
+
     pub fn process_identity(&self) -> Result<ProcessIdentity> {
         ProcessIdentity::observe(self.child.id())
     }

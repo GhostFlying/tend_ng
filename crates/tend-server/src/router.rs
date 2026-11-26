@@ -202,15 +202,7 @@ fn dispatch(config: Config) -> Result<()> {
 }
 
 fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
-    let mut command = Command::new(&config.program);
-    command
-        .args(&config.args)
-        .current_dir(&config.cwd)
-        .env_remove(protocol::TOKEN_ENV)
-        .env_remove("GH_TOKEN")
-        .env_remove("GITHUB_TOKEN");
-    let mut client = Client::connect(&mut command)?;
-    let process = client.process_identity()?;
+    let mut ordinary_client = None;
     let mut loaded_thread = None;
     let mut tools = vec![
         dispatch_tool(
@@ -259,8 +251,19 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
     ];
     tools.extend(attention_tools());
     while let Some(input) = store.next_input(chat)? {
+        if input.quick_handoff {
+            config.discussion.receive_handoff(&mut store, &input)?;
+            continue;
+        }
+        if ordinary_client.is_none() {
+            ordinary_client = Some(open_router_app(config)?);
+        }
+        let client = ordinary_client
+            .as_mut()
+            .expect("initialized Router App Server");
+        let process = client.process_identity()?;
         let number = if let Some(attempt) = &input.attempt {
-            if let Some(turn) = recover(&mut client, &store, attempt)? {
+            if let Some(turn) = recover(client, &store, attempt)? {
                 finish(&mut store, &input, turn)?;
                 continue;
             }
@@ -291,8 +294,18 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
                 serde_json::to_string(&repo_ids)?
             ));
         }
-        let thread_id = match previous_thread {
-            Some(id) if loaded_thread.as_ref() == Some(&id) || client.resume_thread(&id)? => id,
+        let ordinary_input = input.report_id.is_none()
+            && input.attention_id.is_none()
+            && input.external_batch.is_none();
+        let before = if ordinary_input {
+            input.message_seq
+        } else {
+            i64::MAX
+        };
+        let (thread_id, new_thread) = match previous_thread {
+            Some(id) if loaded_thread.as_ref() == Some(&id) || client.resume_thread(&id)? => {
+                (id, false)
+            }
             _ => {
                 let id = client.start_thread(
                     &config.cwd,
@@ -301,20 +314,13 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
                     config.model.as_deref(),
                 )?;
                 store.save_thread(chat, &id, TOOL_REVISION, config.model.as_deref())?;
-                context.extend(store.recent_context(
-                    chat,
-                    if input.report_id.is_some()
-                        || input.attention_id.is_some()
-                        || input.external_batch.is_some()
-                    {
-                        i64::MAX
-                    } else {
-                        input.message_seq
-                    },
-                )?);
-                id
+                context.extend(store.recent_context(chat, before)?);
+                (id, true)
             }
         };
+        if new_thread || ordinary_input {
+            context.extend(store.handoff_exchange_context(chat, before, !new_thread)?);
+        }
         context.extend(input.reply_context.iter().cloned());
         if number > 1 {
             context.push(replay_context(&store, &input, number)?);
@@ -333,6 +339,7 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
             },
             &mut DispatchHandler {
                 store: &mut store,
+                quick_handoff: input.quick_handoff,
                 attempt_id: &attempt_id,
                 dispatcher_name: config.name.as_deref(),
             },
@@ -340,6 +347,17 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
         finish(&mut store, &input, turn)?;
     }
     Ok(())
+}
+
+fn open_router_app(config: &Config) -> Result<Client> {
+    let mut command = Command::new(&config.program);
+    command
+        .args(&config.args)
+        .current_dir(&config.cwd)
+        .env_remove(protocol::TOKEN_ENV)
+        .env_remove("GH_TOKEN")
+        .env_remove("GITHUB_TOKEN");
+    Client::connect(&mut command)
 }
 
 fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<String> {
@@ -367,6 +385,7 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
 }
 
 struct DispatchHandler<'a> {
+    quick_handoff: bool,
     store: &'a mut Store,
     attempt_id: &'a str,
     dispatcher_name: Option<&'a str>,
@@ -380,6 +399,22 @@ impl TurnHandler for DispatchHandler<'_> {
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
         if call.namespace.is_some() {
             return Ok(tool_error("Unknown Router tool"));
+        }
+        // Generated content can solicit advice but cannot carry the user's
+        // authority. New Router write tools are denied here by default.
+        if self.quick_handoff
+            && !matches!(
+                call.tool.as_str(),
+                "tend_list_issues"
+                    | "tend_read_issue"
+                    | "tend_read_dispatch"
+                    | "tend_agent_candidates"
+                    | "tend_read_attentions"
+            )
+        {
+            return Ok(tool_error(
+                "A generated Discussion handoff cannot authorize this action. Ask the user directly.",
+            ));
         }
         match call.tool.as_str() {
             "tend_read_dispatch" => {

@@ -18,7 +18,7 @@ from uuid import uuid4
 from chat import lose_first_response, server, wait_for
 from issue_chat import TESTS, WEB, free_port, prepare
 
-DRAFT_TEXT = "从独立讨论转交。"
+DRAFT_TEXT = "讨论转交 · 上下文摘要。"
 ROUTER_REPLY = "Router 已收到核对后的转交，先确认下一步。"
 FIRST_ANSWER = "可以。先区分要讨论的想法与之后可能交给 Router 的工作。"
 INTRO = "Fixture repository: quickstart command."
@@ -270,13 +270,25 @@ def main():
             assert cli("discussion", "read", unnamed)["title"] == "未命名讨论"
 
         # Model a database stored by v32, including its actual generated title.
+        sql(db, "DROP TABLE discussion_quick_handoffs")
+        sql(db, "ALTER TABLE discussion_drafts DROP COLUMN manual")
+        sql(db, "ALTER TABLE discussions DROP COLUMN title_source")
         sql(db, "DROP INDEX discussions_by_activity")
         sql(db, "ALTER TABLE discussions DROP COLUMN archived")
         sql(db, "CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id)")
         sql(db, "UPDATE discussions SET title='新讨论' WHERE chat_id=?", unnamed)
         sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
-        sql(db, "DROP TRIGGER token_issue_tree_insert")
+        for trigger in ("token_issue_tree_insert", "token_backfill_reroute", "token_rebuild_track_start",
+                        "token_rebuild_track_insert", "token_rebuild_track_update", "token_rebuild_track_delete"):
+            sql(db, f"DROP TRIGGER {trigger}")
+        for table in ("token_rebuild_dirty", "token_rebuild_state", "token_rebuild_runs", "token_rebuild_issues",
+                      "token_run_tallies", "token_backfill_ambiguous", "token_backfill_audit", "token_backfill_keys",
+                      "token_backfill_seen", "token_backfill_items", "token_backfill_readers", "token_backfill_jobs"):
+            sql(db, f"DROP TABLE {table}")
         for table in ("token_usage_pending", "token_requests", "token_runs", "token_issue_rollups", "token_issue_tree"):
+            sql(db, f"DROP TABLE {table}")
+        for table in ("codebase_comment_batches", "codebase_comment_sightings", "codebase_comment_facts",
+                      "codebase_comment_links", "codebase_comment_polls"):
             sql(db, f"DROP TABLE {table}")
         sql(db, "DROP INDEX pulls_due")
         sql(db, "ALTER TABLE pulls DROP COLUMN provider")
@@ -440,7 +452,7 @@ def main():
                              lambda row: row and row["status"] != "queued")
             assert draft["status"] == "completed" and draft["draft"]["goal"], draft
             assert all(not row["text"].startswith(DRAFT_TEXT) for row in messages("main"))
-            assert "Prepare the editable handoff" not in json.dumps(messages(chat))
+            assert "Prepare an editable handoff" not in json.dumps(messages(chat))
             assert sql(db,"SELECT count(*) FROM router_dispatches") == before_count
             body = {**draft["draft"],"goal":"核对后的编辑目标","draft_id":"draft-once",
                     "reference_ids":[issue["id"],pull["id"]],"target_issue_id":parent_id}

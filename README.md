@@ -219,11 +219,13 @@ Web 的「讨论」与 `tend discussion --help` 使用相同用户 API。要启�
 tend discussion create "整理想法"
 tend discussion attach "$DISCUSSION_ID" repo tend_ng
 tend chat send "$DISCUSSION_ID" "先梳理问题和可选方案"
-tend discussion draft "$DISCUSSION_ID"
-tend discussion draft-read "$DISCUSSION_ID"
+tend discussion handoff-now "$DISCUSSION_ID"
+tend discussion handoff-status "$DISCUSSION_ID"
+# If failed, retry using the recorded operation ID and failed generation.
+tend discussion handoff-retry "$DISCUSSION_ID" "$OPERATION_ID" "$FAILED_GENERATION"
 ```
 
-Web 通过独立的「+ 新建讨论」按钮创建讨论，未命名项显示「未命名讨论」。归档只改变列表归属，仍可使用原链接查看消息和引用，也可从「已归档」列表打开原讨论并恢复。CLI 使用同一接口：
+Web 通过独立的「+ 新建讨论」按钮创建讨论，空讨论显示「未命名讨论」，未手动命名时使用首条真实用户输入的完整空白归一化标题，界面只在渲染时截断。迁移 42 回填仍可识别为默认的旧标题，旧 Server 无法读取升级后的数据库。归档只改变列表归属，仍可使用原链接查看消息和引用，也可从「已归档」列表打开原讨论并恢复。CLI 使用同一接口：
 
 ```sh
 tend discussion list
@@ -232,4 +234,4 @@ tend discussion list --archived
 tend discussion restore "$DISCUSSION_ID"
 ```
 
-CLI 显式发送使用 `tend discussion handoff`，先按帮助审阅目标、约束和授权终点。丢失响应时用相同的操作 ID 和原 JSON 重试。
+Web 的「转交主 Chat」和 CLI `tend discussion handoff-now` 会用原讨论上下文写出下一步请求、最终结论或待决事项，再投递到主 Chat，不复述讨论过程。重复请求使用同一个操作 ID，失败不发送，可查证后重试。转交分享上下文，不是新的实施授权或命令。主 Chat 通过独立只读回合接收自动转交，不能代答 Attention 或启动工作。需要行动时请在主 Chat 直接确认。可从「预览 / 编辑」手动发送，CLI 保留 `draft`、`draft-read` 和 `handoff`，另有 `draft-manual` 不依赖模型。手动发送丢失响应时使用相同操作 ID 和原 JSON 重试。 [讨论 API 与迁移边界](docs/chat-routing.md#独立讨论与显式转交)

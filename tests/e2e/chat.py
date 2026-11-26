@@ -59,13 +59,16 @@ def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=Non
 
 
 @contextmanager
-def lose_first_response(upstream, drop_when=lambda _reply: True):
+def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_headers=False):
     posted = []
     dropped = []
 
     class Proxy(http.server.BaseHTTPRequestHandler):
         def log_message(self, *_):
             pass
+
+        def do_GET(self):
+            self.forward(drop=False)
 
         def do_POST(self):
             self.forward(drop=True)
@@ -74,27 +77,30 @@ def lose_first_response(upstream, drop_when=lambda _reply: True):
             self.forward(drop=False)
 
         def forward(self, drop):
-            request = self.rfile.read(int(self.headers["Content-Length"]))
+            request = self.rfile.read(int(self.headers.get("Content-Length", 0)))
             with_connection = http.client.HTTPConnection(upstream, timeout=5)
             try:
                 with_connection.request(self.command, self.path, request, {
                     "Authorization": self.headers["Authorization"],
-                    "Content-Type": self.headers["Content-Type"],
+                    "Content-Type": self.headers.get("Content-Type", "application/json"),
                 })
                 response = with_connection.getresponse()
                 body = response.read()
+                truncate = False
                 if drop:
                     reply = json.loads(body)
                     posted.append((json.loads(request), response.status, reply))
                     if not dropped and drop_when(reply):
                         dropped.append(reply)
                         self.close_connection = True
-                        return
+                        if not after_headers:
+                            return
+                        truncate = True
                 self.send_response(response.status)
                 self.send_header("Content-Type", response.getheader("Content-Type", "application/octet-stream"))
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
-                self.wfile.write(body)
+                self.wfile.write(body[:12] if truncate else body)
             except (ConnectionError, TimeoutError):
                 self.close_connection = True
             finally:

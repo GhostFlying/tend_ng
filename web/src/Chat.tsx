@@ -424,6 +424,7 @@ function MessageRow({
 }
 
 type Standalone = {
+  onPromptAccepted?: () => void;
   renderMention?: (query: string, done: () => void) => ReactNode;
 };
 
@@ -966,6 +967,7 @@ export function Chat({
           standalone={standalone}
           onCancelReply={() => setReplyId(null)}
           onSent={(sentReply) => {
+            standalone?.onPromptAccepted?.();
             follow.current = true;
             setReplyId((current) => (current === sentReply ? null : current));
             setRefresh((number) => number + 1);

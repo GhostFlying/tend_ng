@@ -1402,6 +1402,7 @@ mod tests {
             issues(&store.db)?;
             super::super::pull::bind(&store.db, "root", &mr, None)?;
             drop_schema(&store.db)?;
+            crate::store::discussion::remove_quick_handoff_and_title_schema(&store.db)?;
             store.db.pragma_update(None, "user_version", 38)?;
         }
         let mut store = Store::initialize(&dir.0)?;
@@ -1647,6 +1648,7 @@ mod tests {
                 .db
                 .execute_batch("UPDATE pulls SET facts='{}', observed_at=123, due_at=NULL")?;
             drop_schema(&store.db)?;
+            crate::store::discussion::remove_quick_handoff_and_title_schema(&store.db)?;
             store.db.pragma_update(None, "user_version", 38)?;
         }
         let mut store = Store::initialize(&dir.0)?;

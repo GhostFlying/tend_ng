@@ -90,10 +90,12 @@ pub struct DiscussionReference {
     pub href: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, Eq, PartialEq)]
 pub struct DiscussionDraft {
     pub goal: String,
     pub decisions: String,
+    #[serde(default)]
+    pub pending_items: String,
     pub constraints: String,
     pub authorization_end: String,
 }
@@ -108,4 +110,36 @@ pub struct DiscussionSend {
     pub reference_ids: Vec<String>,
     #[serde(default)]
     pub target_issue_id: Option<String>,
+}
+
+/// The Server returns the operation ID for the current discussion revision before
+/// any request exists. Reuse it after a lost response, even if the chat advances.
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct DiscussionQuickRequest {
+    pub operation_id: String,
+    #[serde(default)]
+    pub retry_generation: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DiscussionQuickHandoff {
+    pub operation_id: String,
+    pub request: Option<DiscussionQuickStatus>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DiscussionQuickStatus {
+    pub generation: i64,
+    pub status: DiscussionQuickState,
+    pub error: Option<String>,
+    pub message_id: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DiscussionQuickState {
+    Queued,
+    Failed,
+    Sent,
 }

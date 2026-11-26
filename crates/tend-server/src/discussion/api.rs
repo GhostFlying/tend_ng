@@ -8,8 +8,8 @@ use crate::{
 };
 use anyhow::Result;
 use protocol::{
-    CreateDiscussion, DISCUSSIONS_PATH, DiscussionReference, DiscussionSend, DiscussionSource,
-    UpdateDiscussion, valid_id,
+    CreateDiscussion, DISCUSSIONS_PATH, DiscussionQuickRequest, DiscussionReference,
+    DiscussionSend, DiscussionSource, UpdateDiscussion, valid_id,
 };
 use serde::de::DeserializeOwned;
 use serde_json::{Value, json};
@@ -207,10 +207,40 @@ fn handle(service: &Service, store: &mut Store, request: &mut Request) -> Result
                     return Ok(api_error(400, "Valid operation ID required"));
                 };
                 change(
-                    store.request_discussion_draft(chat, id)?,
+                    store.request_discussion_draft(
+                        chat,
+                        id,
+                        input["manual"].as_bool().unwrap_or(false),
+                    )?,
                     |_| json!({"id":id}),
                 )
             }
+            Err(reply) => Ok(reply),
+        },
+        ("handoff", Method::Get) => {
+            let operation = values.get("operation_id").map(String::as_str);
+            if operation.is_some_and(|id| !valid_id(id)) {
+                return Ok(api_error(400, "Valid handoff operation ID required"));
+            }
+            Ok(ok(json!(store.quick_handoff(chat, operation)?)))
+        }
+        ("handoff", Method::Post) => match input::<DiscussionQuickRequest>(request)? {
+            Ok(input)
+                if valid_id(&input.operation_id)
+                    && input.retry_generation.is_none_or(|n| n > 0) =>
+            {
+                match store.request_quick_handoff(chat, &input)? {
+                    Change::Conflict => Ok(api_error(
+                        409,
+                        "Handoff request is stale or conflicts with an existing operation",
+                    )),
+                    result => change(result, |receipt| json!(receipt)),
+                }
+            }
+            Ok(_) => Ok(api_error(
+                400,
+                "Valid handoff operation ID and retry generation required",
+            )),
             Err(reply) => Ok(reply),
         },
         ("handoffs", Method::Post) => match input::<DiscussionSend>(request)? {
@@ -230,7 +260,7 @@ fn handle(service: &Service, store: &mut Store, request: &mut Request) -> Result
             )),
             Err(reply) => Ok(reply),
         },
-        ("references" | "draft" | "handoffs" | "", _) => Ok(method_error()),
+        ("references" | "draft" | "handoff" | "handoffs" | "", _) => Ok(method_error()),
         _ => Ok(api_error(404, "Discussion endpoint not found")),
     }
 }

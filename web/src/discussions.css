@@ -10,6 +10,7 @@
 }
 .discussion-sidebar-history ul {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2px;
   margin: 0;
   padding: 0;
@@ -28,6 +29,7 @@
   font-weight: 700;
 }
 .discussion-sidebar-history a span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -106,6 +108,26 @@
 }
 .discussion-list strong,
 .discussion-title h2 {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.discussion-bar .discussion-title {
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.discussion-bar .discussion-title button {
+  flex-shrink: 0;
+}
+.discussion-quick-status {
+  order: 1;
+  flex-basis: 100%;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  font-size: 13px;
   overflow-wrap: anywhere;
 }
 .discussion-list time {
@@ -122,6 +144,7 @@
 }
 .discussion-bar-inner {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 8px;
   padding: 16px 24px 14px;
 }
@@ -380,7 +403,8 @@
   .discussion-archive-action {
     min-height: 44px;
   }
-  .discussion-actions .discussion-secondary {
+  .discussion-actions .discussion-secondary,
+  .discussion-actions .primary {
     min-height: 44px;
   }
   .discussion-bar-inner,

@@ -238,7 +238,9 @@ fn router_input(db: &Connection, attempt: &str, call: &ToolCall) -> Result<Optio
     Ok(db
         .query_row(
             "SELECT i.chat_id, m.id, m.seq, m.reply_to,
-                i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL, m.text
+                i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL
+                    AND NOT EXISTS(SELECT 1 FROM discussion_handoffs h
+                        JOIN discussion_quick_handoffs q ON q.draft_id=h.draft_id WHERE h.message_id=m.id), m.text
          FROM router_attempts r JOIN router_inputs i ON i.seq = r.seq
          JOIN chat_messages m ON m.seq = i.message_seq
          WHERE r.id = ?1 AND r.thread_id = ?2 AND r.turn_id = ?3 AND i.outcome IS NULL",
@@ -576,6 +578,53 @@ mod tests {
         };
         assert!(super::super::run::apply(&tx, "runner", &run)?);
         super::super::board::commit(tx)?;
+        // A regular delivery row with no reply_to is normally a candidate
+        // user decision. Its persisted quick-handoff origin must override that.
+        let discussion = store.create_discussion(&protocol::CreateDiscussion {
+            operation_id: "create-discussion".into(),
+            title: None,
+            origin: None,
+        })?;
+        let super::super::discussion::Change::Ok(chat) = discussion else {
+            panic!("fixture")
+        };
+        let operation_id = store.quick_handoff(&chat, None)?.operation_id;
+        store.request_quick_handoff(
+            &chat,
+            &protocol::DiscussionQuickRequest {
+                operation_id: operation_id.clone(),
+                retry_generation: None,
+            },
+        )?;
+        let (input_seq, input_message): (i64, String) = store.db.query_row(
+            "SELECT i.seq,m.id FROM router_inputs i JOIN chat_messages m ON m.seq=i.message_seq WHERE i.chat_id=?1",
+            [&chat], |row| Ok((row.get(0)?,row.get(1)?)),
+        )?;
+        let quick = store.quick_input(&input_message)?.unwrap();
+        store.finish_quick_handoff(input_seq, &quick, "The discussion draft said to continue.")?;
+        store.db.execute(
+            "INSERT INTO router_attempts (seq,number,id,thread_id,turn_id)
+             SELECT i.seq,1,'quick-attempt','router-thread','router-turn' FROM router_inputs i
+               JOIN chat_messages m ON m.seq=i.message_seq WHERE m.operation_id=?1",
+            [&operation_id],
+        )?;
+        let call = ToolCall {
+            tool: "tend_answer_attention".into(),
+            namespace: None,
+            thread_id: "router-thread".into(),
+            turn_id: "router-turn".into(),
+            call_id: "generated-decision".into(),
+            arguments: serde_json::json!({}),
+        };
+        assert!(
+            store
+                .answer_attention("quick-attempt", &call, "attention", "continue")?
+                .is_none()
+        );
+        let unanswered = store.attention("main", "attention")?.unwrap();
+        assert_eq!(unanswered.status.state, AttentionState::AwaitingUser);
+        assert!(unanswered.user_message_id.is_none());
+
         let request = AnswerIssueAttention {
             operation_id: "reply".into(),
             text: "  keep this text\n exactly  ".into(),

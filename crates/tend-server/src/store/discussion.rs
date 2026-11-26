@@ -1,9 +1,12 @@
+mod quick;
+
 use super::{Store, timing};
 use anyhow::{Result, ensure};
 use protocol::{
     CreateDiscussion, DiscussionDraft, DiscussionOrigin, DiscussionReference, DiscussionSend,
     DiscussionSource, Receipt, SendMessage,
 };
+pub use quick::QuickInput;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashSet;
@@ -62,6 +65,94 @@ pub fn migrate_archive(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// A real prompt has a user operation ID and is not an internal draft input.
+const REAL_PROMPT: &str = "m.operation_id IS NOT NULL
+    AND NOT EXISTS(SELECT 1 FROM discussion_drafts d WHERE d.message_id=m.id)";
+
+pub fn migrate_titles_and_handoffs(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE discussions ADD COLUMN title_source TEXT NOT NULL DEFAULT 'manual'
+           CHECK (title_source IN ('default','prompt','manual'));",
+    )?;
+    quick::migrate(db)?;
+    // Legacy builds recorded the create intent and last activity but not
+    // individual renames. Preserve all provably manual titles, including
+    // renames after the latest ordinary prompt, before backfilling defaults.
+    // The legacy message insert and activity update could straddle one second.
+    let mut candidates = db.prepare(&format!(
+        "SELECT d.chat_id,
+           (SELECT m.text FROM chat_messages m WHERE m.chat_id=d.chat_id AND {REAL_PROMPT}
+            ORDER BY m.seq LIMIT 1)
+           FROM discussions d WHERE d.chat_id>?2 AND d.title=?1 AND json_extract(d.creation, '$.title') IS NULL
+             AND d.updated_at<=COALESCE(
+               (SELECT m.created_at FROM chat_messages m WHERE m.chat_id=d.chat_id AND {REAL_PROMPT}
+                ORDER BY m.seq DESC LIMIT 1) + 1, d.created_at)
+           ORDER BY d.chat_id LIMIT 64"
+    ))?;
+    let mut after = String::new();
+    loop {
+        let rows = candidates
+            .query_map(params![UNTITLED_DISCUSSION, after], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        if rows.is_empty() {
+            break;
+        }
+        for (chat, prompt) in rows {
+            let (title, source) = match prompt {
+                Some(prompt) => (title_from_prompt(&prompt), "prompt"),
+                None => (UNTITLED_DISCUSSION.to_owned(), "default"),
+            };
+            db.execute(
+                "UPDATE discussions SET title=?2,title_source=?3 WHERE chat_id=?1",
+                params![chat, title, source],
+            )?;
+            after = chat;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+pub(crate) fn remove_quick_handoff_and_title_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "DROP TABLE discussion_quick_handoffs;
+         ALTER TABLE discussion_drafts DROP COLUMN manual;
+         ALTER TABLE discussions DROP COLUMN title_source;",
+    )?;
+    Ok(())
+}
+
+fn title_from_prompt(text: &str) -> String {
+    let normalized = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        UNTITLED_DISCUSSION.to_owned()
+    } else {
+        normalized
+    }
+}
+
+pub(super) fn accept_title(db: &Connection, chat: &str, prompt: &str) -> Result<()> {
+    // Avoid normalizing every message; only a still-default title can change.
+    if db.execute(
+        "UPDATE discussions SET updated_at=unixepoch() WHERE chat_id=?1 AND title_source='default'",
+        [chat],
+    )? == 1
+    {
+        db.execute(
+            "UPDATE discussions SET title=?2,title_source='prompt' WHERE chat_id=?1",
+            params![chat, title_from_prompt(prompt)],
+        )?;
+    } else {
+        db.execute(
+            "UPDATE discussions SET updated_at=unixepoch() WHERE chat_id=?1",
+            [chat],
+        )?;
+    }
+    Ok(())
+}
+
 pub fn valid_title(title: &str) -> bool {
     !title.trim().is_empty() && title.chars().count() <= 120
 }
@@ -71,6 +162,7 @@ pub fn valid_draft(draft: &DiscussionDraft) -> bool {
         && [
             &draft.goal,
             &draft.decisions,
+            &draft.pending_items,
             &draft.constraints,
             &draft.authorization_end,
         ]
@@ -157,10 +249,14 @@ impl Store {
             "SELECT a.thread_id, i.seq, a.number
                FROM router_inputs i JOIN router_attempts a ON a.seq = i.seq
               WHERE i.chat_id = ?1 AND i.outcome IS NULL
+                AND NOT EXISTS(SELECT 1 FROM chat_messages m JOIN discussion_drafts d ON d.message_id=m.id
+                   JOIN discussion_quick_handoffs q ON q.draft_id=d.id WHERE m.seq=i.message_seq)
              UNION ALL
              SELECT a.thread_id, i.seq, a.number
                FROM router_inputs i JOIN router_attempts a ON a.seq = i.seq
               WHERE i.chat_id = ?1 AND i.outcome IS NOT NULL
+                AND NOT EXISTS(SELECT 1 FROM chat_messages m JOIN discussion_drafts d ON d.message_id=m.id
+                   JOIN discussion_quick_handoffs q ON q.draft_id=d.id WHERE m.seq=i.message_seq)
              ORDER BY i.seq DESC, a.number DESC",
         )?;
         let mut threads = Vec::new();
@@ -257,8 +353,8 @@ impl Store {
         };
         let id = protocol::new_id();
         tx.execute(
-            "INSERT INTO discussions(chat_id,operation_id,creation,title,origin,quoted_text) VALUES(?1,?2,?3,?4,?5,?6)",
-            params![id,request.operation_id,intent,request.title.as_deref().unwrap_or(UNTITLED_DISCUSSION).trim(),origin.map(|v|v.to_string()),quoted],
+            "INSERT INTO discussions(chat_id,operation_id,creation,title,origin,quoted_text,title_source) VALUES(?1,?2,?3,?4,?5,?6,?7)",
+            params![id,request.operation_id,intent,request.title.as_deref().unwrap_or(UNTITLED_DISCUSSION).trim(),origin.map(|v|v.to_string()),quoted,if request.title.is_some() { "manual" } else { "default" }],
         )?;
         if let Some(reference) = reference {
             insert_ref(&tx, &id, &reference)?;
@@ -301,7 +397,7 @@ impl Store {
 
     pub fn rename_discussion(&self, chat: &str, title: &str) -> Result<bool> {
         Ok(self.db.execute(
-            "UPDATE discussions SET title=?2,updated_at=unixepoch() WHERE chat_id=?1",
+            "UPDATE discussions SET title=?2,title_source='manual',updated_at=unixepoch() WHERE chat_id=?1",
             [chat, title.trim()],
         )? == 1)
     }
@@ -323,12 +419,7 @@ impl Store {
     }
 
     pub fn discussion_refs(&self, chat: &str) -> Result<Vec<DiscussionReference>> {
-        let mut st = self.db.prepare(
-            "SELECT reference FROM discussion_references WHERE chat_id=?1 ORDER BY rowid",
-        )?;
-        st.query_map([chat], |r| r.get::<_, String>(0))?
-            .map(|r| Ok(serde_json::from_str(&r?)?))
-            .collect()
+        read_refs(&self.db, chat)
     }
 
     pub fn discussion_ref(&self, chat: &str, id: &str) -> Result<Option<DiscussionReference>> {
@@ -385,25 +476,29 @@ impl Store {
 
     pub fn discussion_history(&self, chat: &str, before: i64) -> Result<Value> {
         let mut st = self.db.prepare(
-            "SELECT seq,id,operation_id IS NOT NULL,substr(text,1,8192),created_at,reply_to,length(text)>8192
+            "SELECT seq,id,operation_id IS NOT NULL,text,created_at,reply_to
              FROM chat_messages m WHERE chat_id=?1 AND seq<?2
                AND NOT EXISTS(SELECT 1 FROM discussion_drafts d WHERE d.message_id=m.id)
              ORDER BY seq DESC LIMIT 13",
         )?;
-        let mut messages = st
-            .query_map(params![chat, before], |r| {
-                Ok(json!({"seq":r.get::<_,i64>(0)?,"id":r.get::<_,String>(1)?,
+        let mut rows = st.query(params![chat, before])?;
+        let mut messages = Vec::new();
+        let mut bytes = 0;
+        let mut next = None;
+        while let Some(r) = rows.next()? {
+            let text = r.get::<_, String>(3)?;
+            // Keep the normal page bounded without discarding the tail of a
+            // single long message needed after native history loss.
+            if messages.len() == 12 || (!messages.is_empty() && bytes + text.len() > 48 * 1024) {
+                next = messages.last().and_then(|v: &Value| v["seq"].as_i64());
+                break;
+            }
+            bytes += text.len();
+            messages.push(json!({"seq":r.get::<_,i64>(0)?,"id":r.get::<_,String>(1)?,
                 "role":if r.get::<_,bool>(2)? {"user"} else {"assistant"},
-                "text":r.get::<_,String>(3)?,"created_at":r.get::<_,i64>(4)?,
-                "reply_to":r.get::<_,Option<String>>(5)?,"truncated":r.get::<_,bool>(6)?}))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        let next = if messages.len() > 12 {
-            messages.pop();
-            messages.last().and_then(|v| v["seq"].as_i64())
-        } else {
-            None
-        };
+                "text":text,"created_at":r.get::<_,i64>(4)?,
+                "reply_to":r.get::<_,Option<String>>(5)?,"truncated":false}));
+        }
         messages.reverse();
         Ok(json!({"messages":messages,"next_before":next}))
     }
@@ -436,17 +531,21 @@ impl Store {
         ))
     }
 
-    pub fn request_discussion_draft(&mut self, chat: &str, id: &str) -> Result<Change<()>> {
+    pub fn request_discussion_draft(
+        &mut self,
+        chat: &str,
+        id: &str,
+        manual: bool,
+    ) -> Result<Change<()>> {
         let (tx, timing) = timing::begin(&mut self.db, "discussion_draft")?;
-        let original: Option<String> = tx
-            .query_row(
-                "SELECT chat_id FROM discussion_drafts WHERE id=?1",
-                [id],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(original) = original {
-            return Ok(if original == chat {
+        let original: Option<(String, bool, bool)> = tx.query_row(
+            "SELECT chat_id, manual, EXISTS(SELECT 1 FROM discussion_quick_handoffs q WHERE q.draft_id=d.id)
+               FROM discussion_drafts d WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        ).optional()?;
+        if let Some((original, was_manual, quick)) = original {
+            return Ok(if original == chat && was_manual == manual && !quick {
                 Change::Ok(())
             } else {
                 Change::Conflict
@@ -457,17 +556,10 @@ impl Store {
             [id],
             |r| r.get(0),
         )?;
-        if used {
+        if used || Self::reserved_chat_operation(&tx, id)? {
             return Ok(Change::Conflict);
         }
-        let request = SendMessage { operation_id:id.to_owned(),
-            text:"Prepare the editable handoff draft now from this discussion and the selected references. Output the four JSON string fields goal, decisions, constraints, authorization_end only. Do not infer authorization, select execution targets, or send anything.".to_owned(),
-            reply_to:None };
-        let receipt = super::insert_chat_input(&tx, chat, &request)?;
-        tx.execute(
-            "INSERT INTO discussion_drafts(id,chat_id,message_id) VALUES(?1,?2,?3)",
-            params![id, chat, receipt.message_id],
-        )?;
+        insert_draft_input(&tx, chat, id, manual, DRAFT_PROMPT)?;
         timing::commit(tx, timing)?;
         Ok(Change::Ok(()))
     }
@@ -479,7 +571,9 @@ impl Store {
                 "SELECT d.id, d.draft, i.outcome, i.error, h.message_id FROM discussion_drafts d
              JOIN chat_messages m ON m.id=d.message_id JOIN router_inputs i ON i.message_seq=m.seq
              LEFT JOIN discussion_handoffs h ON h.draft_id=d.id
-             WHERE d.chat_id=?1 AND (?2 IS NULL OR d.id=?2) ORDER BY d.rowid DESC LIMIT 1",
+             WHERE d.chat_id=?1 AND (?2 IS NULL OR d.id=?2)
+               AND NOT EXISTS(SELECT 1 FROM discussion_quick_handoffs q WHERE q.draft_id=d.id)
+             ORDER BY d.rowid DESC LIMIT 1",
                 params![chat, id],
                 |r| {
                     Ok((
@@ -540,19 +634,25 @@ impl Store {
     ) -> Result<Change<Receipt>> {
         let intent = serde_json::to_string(request)?;
         let (tx, timing) = timing::begin(&mut self.db, "discussion_handoff")?;
-        let original: Option<(String, String, String)> = tx
+        let original: Option<(String, String, String, bool)> = tx
             .query_row(
-                "SELECT chat_id,intent,message_id FROM discussion_handoffs WHERE operation_id=?1",
+                "SELECT h.chat_id,h.intent,h.message_id,q.operation_id IS NOT NULL FROM discussion_handoffs h
+                    LEFT JOIN discussion_quick_handoffs q ON q.draft_id=h.draft_id WHERE h.operation_id=?1",
                 [&request.operation_id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
             .optional()?;
-        if let Some((original_chat, original, message_id)) = original {
-            return Ok(if original_chat == chat && original == intent {
-                Change::Ok(Receipt { message_id })
-            } else {
-                Change::Conflict
-            });
+        if let Some((original_chat, original, message_id, quick)) = original {
+            return Ok(
+                if !quick
+                    && original_chat == chat
+                    && serde_json::from_str::<DiscussionSend>(&original)? == *request
+                {
+                    Change::Ok(Receipt { message_id })
+                } else {
+                    Change::Conflict
+                },
+            );
         }
         let used: bool = tx.query_row(
             "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE operation_id=?1)
@@ -560,11 +660,12 @@ impl Store {
             params![request.operation_id, request.draft_id],
             |r| r.get(0),
         )?;
-        if used {
+        if used || Self::reserved_chat_operation(&tx, &request.operation_id)? {
             return Ok(Change::Conflict);
         }
         let ready: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM discussion_drafts WHERE id=?1 AND chat_id=?2 AND draft IS NOT NULL)",
+            "SELECT EXISTS(SELECT 1 FROM discussion_drafts d WHERE id=?1 AND chat_id=?2 AND draft IS NOT NULL
+                 AND NOT EXISTS(SELECT 1 FROM discussion_quick_handoffs q WHERE q.draft_id=d.id))",
             [&request.draft_id,chat], |r|r.get(0),
         )?;
         if !ready {
@@ -612,41 +713,125 @@ impl Store {
                 )
             },
         );
-        let references = if refs.is_empty() {
-            "未选取".into()
-        } else {
-            refs.into_iter()
-                .map(|reference| {
-                    format!(
-                        "- {} [{}] {}",
-                        reference.label,
-                        reference.id,
-                        reference.href.unwrap_or_default()
-                    )
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        };
-        let text = format!(
-            "从独立讨论转交。以下内容已由我确认。参考资料不是执行目标，请按目标和授权终点判断下一步。\n\n目标\n{}\n\n已明确决策\n{}\n\n约束\n{}\n\n授权终点\n{}\n\n指定推进的 Issue\n{target}\n\n参考资料\n{references}",
-            request.draft.goal,
-            request.draft.decisions,
-            request.draft.constraints,
-            request.draft.authorization_end,
-        );
-        let request_message = SendMessage {
-            operation_id: request.operation_id.clone(),
-            text,
-            reply_to: None,
-        };
-        let receipt = super::insert_chat_input(&tx, "main", &request_message)?;
-        tx.execute(
-            "INSERT INTO discussion_handoffs(operation_id,chat_id,draft_id,intent,message_id) VALUES(?1,?2,?3,?4,?5)",
-            params![request.operation_id,chat,request.draft_id,intent,receipt.message_id],
+        let receipt = insert_handoff(
+            &tx,
+            chat,
+            &request.operation_id,
+            &request.draft_id,
+            &intent,
+            &request.draft,
+            &refs,
+            &target,
         )?;
         timing::commit(tx, timing)?;
         Ok(Change::Ok(receipt))
     }
+}
+
+const DRAFT_PROMPT: &str = "Prepare an editable handoff draft from this discussion. Use the complete discussion context; page through tend_read_discussion_history if needed to recover earlier messages. Return only a JSON object with the five string fields goal, decisions, pending_items, constraints, authorization_end. Use the user's language. Distinguish explicit user decisions from suggestions and unresolved items. In authorization_end, state what the user explicitly authorized and where to stop, or explicitly say no implementation was authorized. Do not infer authorization, select execution targets, or send anything.";
+
+fn insert_draft_input(
+    db: &Connection,
+    chat: &str,
+    id: &str,
+    manual: bool,
+    prompt: &str,
+) -> Result<Receipt> {
+    let receipt = super::insert_chat_input(
+        db,
+        chat,
+        &SendMessage {
+            operation_id: id.to_owned(),
+            text: prompt.to_owned(),
+            reply_to: None,
+        },
+    )?;
+    let draft = manual
+        .then(|| serde_json::to_string(&DiscussionDraft::default()))
+        .transpose()?;
+    db.execute(
+        "INSERT INTO discussion_drafts(id,chat_id,message_id,draft,manual) VALUES(?1,?2,?3,?4,?5)",
+        params![id, chat, receipt.message_id, draft, manual],
+    )?;
+    if manual {
+        db.execute(
+            "UPDATE router_inputs SET outcome='completed' WHERE message_seq=(SELECT seq FROM chat_messages WHERE id=?1)",
+            [&receipt.message_id],
+        )?;
+    }
+    Ok(receipt)
+}
+
+fn read_refs(db: &Connection, chat: &str) -> Result<Vec<DiscussionReference>> {
+    let mut st =
+        db.prepare("SELECT reference FROM discussion_references WHERE chat_id=?1 ORDER BY rowid")?;
+    st.query_map([chat], |r| r.get::<_, String>(0))?
+        .map(|r| Ok(serde_json::from_str(&r?)?))
+        .collect()
+}
+
+fn insert_handoff(
+    db: &Connection,
+    chat: &str,
+    operation_id: &str,
+    draft_id: &str,
+    intent: &str,
+    draft: &DiscussionDraft,
+    refs: &[DiscussionReference],
+    target: &str,
+) -> Result<Receipt> {
+    let references = reference_footer(refs);
+    let text = format!(
+        "讨论转交 · 上下文摘要。转交不是新的实施授权或命令。仅在原讨论中用户已明确授权的范围内推进；待定事项先与用户确认。参考资料不是执行目标。\n\n目标\n{}\n\n已明确决策\n{}\n\n待定事项\n{}\n\n约束\n{}\n\n授权终点\n{}\n\n指定推进的 Issue\n{target}\n\n参考资料\n{references}",
+        draft.goal,
+        draft.decisions,
+        draft.pending_items,
+        draft.constraints,
+        draft.authorization_end,
+    );
+    record_handoff(db, chat, operation_id, draft_id, intent, text)
+}
+
+fn reference_footer(refs: &[DiscussionReference]) -> String {
+    if refs.is_empty() {
+        "未选取".into()
+    } else {
+        refs.iter()
+            .map(|reference| {
+                format!(
+                    "- {} [{}] {}",
+                    reference.label,
+                    reference.id,
+                    reference.href.as_deref().unwrap_or_default()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+}
+
+fn record_handoff(
+    db: &Connection,
+    chat: &str,
+    operation_id: &str,
+    draft_id: &str,
+    intent: &str,
+    text: String,
+) -> Result<Receipt> {
+    let receipt = super::insert_chat_input(
+        db,
+        "main",
+        &SendMessage {
+            operation_id: operation_id.to_owned(),
+            text,
+            reply_to: None,
+        },
+    )?;
+    db.execute(
+        "INSERT INTO discussion_handoffs(operation_id,chat_id,draft_id,intent,message_id) VALUES(?1,?2,?3,?4,?5)",
+        params![operation_id,chat,draft_id,intent,receipt.message_id],
+    )?;
+    Ok(receipt)
 }
 
 fn discussion_header(r: &rusqlite::Row<'_>) -> rusqlite::Result<Value> {
@@ -691,6 +876,191 @@ mod tests {
             anyhow::bail!("fixture creation failed");
         };
         Ok(chat)
+    }
+
+    fn new_discussion(store: &mut Store, title: Option<&str>) -> Result<String> {
+        create(
+            store,
+            &CreateDiscussion {
+                operation_id: protocol::new_id(),
+                title: title.map(str::to_owned),
+                origin: None,
+            },
+        )
+    }
+
+    fn send(store: &mut Store, chat: &str, operation: &str, text: &str) -> Result<String> {
+        let super::super::Accepted::Received(receipt) = store.accept(
+            chat,
+            &SendMessage {
+                operation_id: operation.to_owned(),
+                text: text.to_owned(),
+                reply_to: None,
+            },
+        )?
+        else {
+            anyhow::bail!("fixture send failed")
+        };
+        Ok(receipt.message_id)
+    }
+
+    fn title(store: &Store, chat: &str) -> Result<String> {
+        Ok(store.discussion_detail(chat)?.expect("discussion")["title"]
+            .as_str()
+            .unwrap()
+            .to_owned())
+    }
+
+    fn legacy_database(db: &Connection) -> Result<()> {
+        remove_quick_handoff_and_title_schema(db)?;
+        db.pragma_update(None, "user_version", 41)?;
+        Ok(())
+    }
+
+    #[test]
+    fn complete_unicode_title_comes_only_from_first_prompt() -> Result<()> {
+        let mut store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let chat = new_discussion(&mut store, None)?;
+        assert_eq!(title(&store, &chat)?, UNTITLED_DISCUSSION);
+        store.request_discussion_draft(&chat, "hidden", true)?;
+        assert_eq!(title(&store, &chat)?, UNTITLED_DISCUSSION);
+        let long = "完整标题 ".repeat(250);
+        let raw = format!("   开头　\n\r\t{long}\u{2002}结尾  ");
+        let expected = format!("开头 {long}结尾");
+        assert_eq!(title_from_prompt(&raw), expected);
+        assert_eq!(title_from_prompt(" \t\r\n　\u{2002} "), UNTITLED_DISCUSSION);
+        let first = send(&mut store, &chat, "first", &raw)?;
+        assert_eq!(title(&store, &chat)?, expected);
+        assert_eq!(send(&mut store, &chat, "first", &raw)?, first);
+        send(&mut store, &chat, "second", "Later input")?;
+        assert_eq!(title(&store, &chat)?, expected);
+        assert_eq!(store.discussion_list(false)?[0]["title"], expected);
+        for origin in [Some(UNTITLED_DISCUSSION), Some("Explicit title"), None] {
+            let chat = new_discussion(&mut store, origin)?;
+            if origin.is_none() {
+                assert!(store.rename_discussion(&chat, UNTITLED_DISCUSSION)?);
+            }
+            send(
+                &mut store,
+                &chat,
+                &protocol::new_id(),
+                "Must not override manual title",
+            )?;
+            assert_eq!(title(&store, &chat)?, origin.unwrap_or(UNTITLED_DISCUSSION));
+        }
+        store.rename_discussion(&chat, UNTITLED_DISCUSSION)?;
+        assert_eq!(send(&mut store, &chat, "first", &raw)?, first);
+        assert_eq!(title(&store, &chat)?, UNTITLED_DISCUSSION);
+        Ok(())
+    }
+
+    #[test]
+    fn migration_reads_first_real_prompt_and_preserves_known_manual_titles() -> Result<()> {
+        let workspace = TempDb::new()?;
+        let mut store = Store::initialize(&workspace.path)?;
+        let backfill = new_discussion(&mut store, None)?;
+        let draft_only = new_discussion(&mut store, None)?;
+        let explicit_default = new_discussion(&mut store, Some(UNTITLED_DISCUSSION))?;
+        let manual_default = new_discussion(&mut store, None)?;
+        let manual_other = new_discussion(&mut store, None)?;
+        let blank = new_discussion(&mut store, None)?;
+        for chat in [&backfill, &draft_only] {
+            store.request_discussion_draft(chat, &protocol::new_id(), true)?;
+        }
+        for chat in [&backfill, &explicit_default, &manual_default, &manual_other] {
+            store.db.execute(
+                "INSERT INTO chat_messages(id,chat_id,text,created_at) VALUES(?1,?2,'Agent text',100)",
+                params![protocol::new_id(), chat],
+            )?;
+            send(&mut store, chat, &protocol::new_id(), " 首条\n　输入 ")?;
+            send(&mut store, chat, &protocol::new_id(), "Later input")?;
+        }
+        send(&mut store, &blank, &protocol::new_id(), "　 \n")?;
+        store.rename_discussion(&manual_other, "Other manual title")?;
+        store.db.execute(
+            "UPDATE discussions SET title=?1,updated_at=(SELECT MAX(m.created_at) FROM chat_messages m WHERE m.chat_id=discussions.chat_id)
+              WHERE chat_id IN (?2,?3,?4)",
+            params![UNTITLED_DISCUSSION, backfill, blank, manual_default],
+        )?;
+        store.db.execute(
+            "UPDATE discussions SET updated_at=updated_at+5 WHERE chat_id=?1",
+            [&manual_default],
+        )?;
+        store.db.execute(
+            "UPDATE discussions SET updated_at=updated_at+1 WHERE chat_id=?1",
+            [&backfill],
+        )?;
+        legacy_database(&store.db)?;
+        drop(store);
+        let mut store = Store::initialize(&workspace.path)?;
+        assert_eq!(title(&store, &backfill)?, "首条 输入");
+        assert_eq!(title(&store, &manual_other)?, "Other manual title");
+        for chat in [&draft_only, &explicit_default, &manual_default, &blank] {
+            assert_eq!(title(&store, chat)?, UNTITLED_DISCUSSION);
+            send(&mut store, chat, &protocol::new_id(), "After migration")?;
+        }
+        assert_eq!(title(&store, &draft_only)?, "After migration");
+        for chat in [&explicit_default, &manual_default, &blank] {
+            assert_eq!(title(&store, chat)?, UNTITLED_DISCUSSION);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn simultaneous_prompts_and_replays_use_acceptance_order() -> Result<()> {
+        let workspace = TempDb::new()?;
+        let mut store = Store::initialize(&workspace.path)?;
+        let chat = new_discussion(&mut store, None)?;
+        let operations = [
+            ("op-one", "First concurrent prompt"),
+            ("op-two", "Another concurrent prompt"),
+            ("op-one", "First concurrent prompt"),
+        ];
+        let barrier = std::sync::Barrier::new(operations.len());
+        let received = std::thread::scope(|scope| {
+            operations
+                .iter()
+                .map(|&(id, text)| {
+                    let (barrier, chat, path) = (&barrier, &chat, &workspace.path);
+                    scope.spawn(move || -> Result<String> {
+                        let mut store = Store::open(path)?;
+                        store.enable_foreground_writes()?;
+                        barrier.wait();
+                        send(&mut store, chat, id, text)
+                    })
+                })
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Result<Vec<_>>>()
+        })?;
+        assert_eq!(received[0], received[2]);
+        assert_ne!(received[0], received[1]);
+        let page = store.messages(&chat, i64::MAX)?;
+        assert_eq!(page.messages.len(), 2);
+        assert_eq!(title(&store, &chat)?, page.messages[0].text);
+        Ok(())
+    }
+
+    struct TempDb {
+        directory: std::path::PathBuf,
+        path: std::path::PathBuf,
+    }
+
+    impl TempDb {
+        fn new() -> Result<Self> {
+            let directory =
+                std::env::temp_dir().join(format!("tend-discussion-{}", protocol::new_id()));
+            std::fs::create_dir(&directory)?;
+            let path = directory.join("server.sqlite");
+            Ok(Self { directory, path })
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.directory);
+        }
     }
 
     #[test]
@@ -746,7 +1116,7 @@ mod tests {
             [],
         )?;
         assert!(matches!(
-            store.request_discussion_draft("same_name_with_draft", "draft-op")?,
+            store.request_discussion_draft("same_name_with_draft", "draft-op", false)?,
             Change::Ok(())
         ));
         let tx = store.db.transaction()?;

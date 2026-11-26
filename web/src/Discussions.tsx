@@ -24,7 +24,7 @@ import type {
   Source,
   WorkspaceChoice,
 } from "./discussionApi";
-import { HandoffDialog } from "./DiscussionHandoff";
+import { HandoffDialog, QuickHandoffControl } from "./DiscussionHandoff";
 import { discussionError, useReferenceSearch } from "./discussionSearch";
 import { navigate, trackPageVisit } from "./navigation";
 import "./discussions.css";
@@ -177,7 +177,7 @@ function DiscussionIndex({
             {rows.map(({ chat_id, title, updated_at }) => (
               <li key={chat_id}>
                 <a href={discussionLink(chat_id)}>
-                  <strong>{title}</strong>
+                  <strong title={title}>{title}</strong>
                   <time dateTime={new Date(updated_at * 1000).toISOString()}>
                     {new Date(updated_at * 1000).toLocaleDateString("zh-CN")}
                   </time>
@@ -206,6 +206,12 @@ function DiscussionView({
   const [savingArchive, setSavingArchive] = useState(false);
   const [picker, setPicker] = useState(false);
   const [handoff, setHandoff] = useState(false);
+  const [revision, setRevision] = useState(0);
+  const refreshDetail = useCallback(() => setRefresh((value) => value + 1), []);
+  const onPromptAccepted = useCallback(() => {
+    setRevision((value) => value + 1);
+    notifyDiscussionChanged(chat);
+  }, [chat]);
   const previousArchived = useRef(false);
   const archivalState = meta?.archived;
 
@@ -389,7 +395,7 @@ function DiscussionView({
             </form>
           ) : (
             <div className="discussion-title">
-              <h2>{meta.title}</h2>
+              <h2 title={meta.title}>{meta.title}</h2>
               <button
                 className="text-button"
                 type="button"
@@ -400,6 +406,12 @@ function DiscussionView({
             </div>
           )}
           <div className="discussion-actions">
+            <QuickHandoffControl
+              chat={chat}
+              revision={revision}
+              onPreview={() => setHandoff(true)}
+              onSent={refreshDetail}
+            />
             <button
               className="discussion-secondary"
               type="button"
@@ -407,13 +419,6 @@ function DiscussionView({
               onClick={() => setPicker((value) => !value)}
             >
               附加资料
-            </button>
-            <button
-              className="discussion-secondary"
-              type="button"
-              onClick={() => setHandoff(true)}
-            >
-              交给 Router
             </button>
             <button
               className="discussion-secondary discussion-archive-action"
@@ -484,6 +489,7 @@ function DiscussionView({
         chatId={chat}
         onReachable={onReachable}
         standalone={{
+          onPromptAccepted,
           renderMention: (query, done) => (
             <ReferencePicker
               query={query}

@@ -255,6 +255,7 @@ fn migration_counts_only_accepted_starts_and_late_use_repairs_the_original_run()
     assert!(crate::store::run::apply(&store.db, "runner", &failed)?);
     crate::store::remove_token_usage_schema(&store.db)?;
     crate::store::codebase_comments::drop_schema(&store.db)?;
+    crate::store::discussion::remove_quick_handoff_and_title_schema(&store.db)?;
     store.db.pragma_update(None, "user_version", 37)?;
     drop(store);
 

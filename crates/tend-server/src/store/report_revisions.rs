@@ -334,6 +334,7 @@ mod tests {
         let path = dir.join("server.sqlite");
         let original = Store::initialize(&path)?;
         // Restore the pre-feature schema and seed an existing v26 publication.
+        crate::store::discussion::remove_quick_handoff_and_title_schema(&original.db)?;
         super::super::board::remove_projection_schema(&original.db)?;
         crate::store::remove_token_usage_schema(&original.db)?;
         super::super::pull::restore_legacy_schema(&original.db)?;

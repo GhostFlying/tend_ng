@@ -43,6 +43,7 @@ export type WorkspaceChoice = IssueChoice & {
 export type Draft = {
   goal: string;
   decisions: string;
+  pending_items?: string;
   constraints: string;
   authorization_end: string;
 };
@@ -52,6 +53,19 @@ export type DraftRequest = {
   error: string | null;
   draft: Draft | null;
   message_id: string | null;
+};
+export type QuickHandoff = {
+  operation_id: string;
+  request: {
+    status: "queued" | "failed" | "sent";
+    generation: number;
+    error: string | null;
+    message_id: string | null;
+  } | null;
+};
+export type QuickHandoffAction = {
+  operation_id: string;
+  retry_generation?: number;
 };
 export type SendDraft = Draft & {
   operation_id: string;
@@ -140,16 +154,32 @@ export const readDraft = (chat: string, signal: AbortSignal, id?: string) =>
     `/${chat}/draft${id ? `?id=${encodeURIComponent(id)}` : ""}`,
     { signal },
   );
-export const requestDraft = (chat: string, operation_id: string) =>
+export const requestDraft = (
+  chat: string,
+  operation_id: string,
+  manual = false,
+) =>
   request<{ id: string }>(`/${chat}/draft`, {
     method: "POST",
-    body: { operation_id },
+    body: { operation_id, manual },
   });
 export const sendDraft = (chat: string, body: SendDraft) =>
   request<{ message_id: string }>(`/${chat}/handoffs`, {
     method: "POST",
     body,
   });
+
+export const readQuickHandoff = (
+  chat: string,
+  signal: AbortSignal,
+  operation?: string,
+) =>
+  request<QuickHandoff>(
+    `/${chat}/handoff${operation ? `?operation_id=${encodeURIComponent(operation)}` : ""}`,
+    { signal },
+  );
+export const submitQuickHandoff = (chat: string, action: QuickHandoffAction) =>
+  request<QuickHandoff>(`/${chat}/handoff`, { method: "POST", body: action });
 
 export const referenceStatus: Record<string, string> = {
   available: "可读",

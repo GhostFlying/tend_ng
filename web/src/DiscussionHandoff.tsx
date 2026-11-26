@@ -1,17 +1,21 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { chatLink, issueTitle, operationId } from "./api";
 import {
   DiscussionError,
   readDraft,
+  readQuickHandoff,
   referenceStatus,
   requestDraft,
   sendDraft,
+  submitQuickHandoff,
 } from "./discussionApi";
 import type {
   Draft,
   DraftRequest,
   IssueChoice,
+  QuickHandoff,
+  QuickHandoffAction,
   Reference,
   SendDraft,
 } from "./discussionApi";
@@ -20,6 +24,7 @@ import { discussionError, useReferenceSearch } from "./discussionSearch";
 const labels: [keyof Draft, string][] = [
   ["goal", "目标"],
   ["decisions", "已明确决策"],
+  ["pending_items", "待定事项"],
   ["constraints", "约束"],
   ["authorization_end", "授权终点"],
 ];
@@ -40,6 +45,222 @@ function save(key: string, value: unknown) {
   } catch {
     /* The original operation remains in memory in this tab. */
   }
+}
+
+export function QuickHandoffControl({
+  chat,
+  revision,
+  onSent,
+  onPreview,
+}: {
+  chat: string;
+  revision: number;
+  onSent: () => void;
+  onPreview: () => void;
+}) {
+  const key = `tend.discussion.quick.v2.${chat}`;
+  const [tracked, setTracked] = useState(
+    () => cached<QuickHandoffAction[]>(key) ?? [],
+  );
+  const trackedRef = useRef(tracked);
+  const [current, setCurrent] = useState<QuickHandoff>();
+  const [older, setOlder] = useState<QuickHandoff[]>([]);
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState<string>();
+  const posting = useRef(false);
+  const message = current?.request?.message_id;
+
+  const retain = useCallback(
+    (operations: QuickHandoffAction[]) => {
+      trackedRef.current = operations;
+      save(key, operations.length ? operations : null);
+      setTracked(operations);
+    },
+    [key],
+  );
+
+  useEffect(() => {
+    if (message) onSent();
+  }, [message, onSent]);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: number | undefined;
+    async function poll() {
+      let delay = 5000;
+      try {
+        if (posting.current) {
+          delay = 850;
+          return;
+        }
+        const [latest, ...previous] = await Promise.allSettled([
+          readQuickHandoff(chat, controller.signal),
+          ...tracked.map(({ operation_id }) =>
+            readQuickHandoff(chat, controller.signal, operation_id),
+          ),
+        ]);
+        if (controller.signal.aborted || posting.current) return;
+        if (latest.status === "fulfilled") setCurrent(latest.value);
+        const previousRecords = previous.flatMap((result) =>
+          result.status === "fulfilled" ? [result.value] : [],
+        );
+        setOlder(previousRecords);
+        setError(
+          latest.status === "rejected" ||
+            previous.some((result) => result.status === "rejected")
+            ? "暂时无法查证转交状态。"
+            : "",
+        );
+        const sent = new Set(
+          previousRecords
+            .filter(({ request }) => request?.status === "sent")
+            .map(({ operation_id }) => operation_id),
+        );
+        if (sent.size) {
+          retain(tracked.filter(({ operation_id }) => !sent.has(operation_id)));
+          onSent();
+        }
+        if (
+          previousRecords.some(({ request }) => request?.status === "queued") ||
+          (latest.status === "fulfilled" &&
+            latest.value.request?.status === "queued")
+        )
+          delay = 850;
+      } catch {
+        if (!controller.signal.aborted && !posting.current)
+          setError("暂时无法查证转交状态。");
+      } finally {
+        if (!controller.signal.aborted)
+          timer = window.setTimeout(() => void poll(), delay);
+      }
+    }
+    void poll();
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+    };
+  }, [chat, tracked, revision, retain, onSent]);
+
+  async function submit(record: QuickHandoff) {
+    const { operation_id, request } = record;
+    if (
+      posting.current ||
+      request?.status === "queued" ||
+      request?.status === "sent"
+    )
+      return;
+    const prior = trackedRef.current.find(
+      (action) => action.operation_id === operation_id,
+    );
+    const action = {
+      operation_id,
+      retry_generation:
+        request?.status === "failed"
+          ? request.generation
+          : prior?.retry_generation,
+    };
+    const without = () =>
+      trackedRef.current.filter(
+        (action) => action.operation_id !== operation_id,
+      );
+    posting.current = true;
+    retain([...without(), action]);
+    setBusy(operation_id);
+    setError("");
+    try {
+      const result = await submitQuickHandoff(chat, action);
+      setCurrent((curr) =>
+        curr?.operation_id === operation_id ? result : curr,
+      );
+      setOlder((old) => [
+        ...old.filter((row) => row.operation_id !== operation_id),
+        result,
+      ]);
+      if (result.request?.status === "sent") {
+        retain(without());
+        onSent();
+      }
+    } catch (error) {
+      if (error instanceof DiscussionError && error.status === 409) {
+        retain(without());
+        setError("讨论内容已变化，刷新状态后可重新发起转交。");
+      } else {
+        setError("暂时无法确认是否已登记。可用同一操作重试。");
+      }
+    } finally {
+      posting.current = false;
+      setBusy(undefined);
+    }
+  }
+
+  const statuses = [
+    ...(current ? [current] : []),
+    ...older.filter((row) => row.operation_id !== current?.operation_id),
+  ];
+  return (
+    <>
+      <button
+        className="primary"
+        type="button"
+        disabled={!current || !!busy || Boolean(current.request)}
+        onClick={() => current && void submit(current)}
+      >
+        转交主 Chat
+      </button>
+      <button
+        className="discussion-secondary"
+        type="button"
+        onClick={onPreview}
+      >
+        预览 / 编辑
+      </button>
+      {statuses.map((record) => {
+        const { operation_id, request } = record;
+        const previous = operation_id !== current?.operation_id;
+        if (
+          !request &&
+          busy !== operation_id &&
+          !tracked.some((row) => row.operation_id === operation_id)
+        )
+          return null;
+        return (
+          <div className="discussion-quick-status" key={operation_id}>
+            {busy === operation_id || request?.status === "queued" ? (
+              <span role="status">正在生成摘要并转交…</span>
+            ) : request?.message_id ? (
+              <span role="status">
+                已转交主 Chat ·{" "}
+                <a href={chatLink("main", request.message_id)}>
+                  查看主 Chat 消息 ↗
+                </a>
+              </span>
+            ) : (
+              <>
+                <span className="error" role="alert">
+                  {request?.status === "failed"
+                    ? `${previous ? "先前" : ""}转交失败，未发送到主 Chat。${request.error ?? ""}`
+                    : "暂时未查到转交请求。可用同一操作重试。"}
+                </span>
+                <button
+                  className="discussion-secondary"
+                  type="button"
+                  disabled={!!busy}
+                  onClick={() => void submit(record)}
+                >
+                  重试转交
+                </button>
+              </>
+            )}
+          </div>
+        );
+      })}
+      {!!error && (
+        <div className="discussion-quick-status error" role="alert">
+          {error}
+        </div>
+      )}
+    </>
+  );
 }
 
 export function HandoffDialog({
@@ -89,16 +310,16 @@ export function HandoffDialog({
     };
   }, [chat, id, reload, requestKey]);
 
-  async function generate() {
+  async function generate(manual = false) {
     if (busy) return;
-    const operation = id && !record ? id : operationId();
+    const operation = id && !record && !manual ? id : operationId();
     setBusy(true);
     setError("");
     setSent("");
     save(requestKey, operation);
     setId(operation);
     try {
-      await requestDraft(chat, operation);
+      await requestDraft(chat, operation, manual);
       setRecord(undefined);
       setReload((value) => value + 1);
     } catch (error) {
@@ -128,7 +349,7 @@ export function HandoffDialog({
         <header>
           <div>
             <p className="discussion-mode">独立讨论 → 主 Chat</p>
-            <h2 id="handoff-title">交给 Router</h2>
+            <h2 id="handoff-title">预览 / 编辑转交</h2>
           </div>
           <button
             type="button"
@@ -140,8 +361,8 @@ export function HandoffDialog({
           </button>
         </header>
         <p className="discussion-muted">
-          先核对草稿。只有点击「发送到主 Chat」，Router
-          才会收到一条新的用户消息。讨论历史留在这里。
+          这是一条独立的手动发送路径。核对草稿后，可选择引用和执行目标。
+          只有点击「发送到主 Chat」才会投递。转交不会扩大原授权。
         </p>
         {error && (
           <p className="error" role="alert">
@@ -190,14 +411,24 @@ export function HandoffDialog({
                   : "正在读取草稿…"}
               </p>
             ) : (
-              <button
-                type="button"
-                className="primary"
-                disabled={busy}
-                onClick={() => void generate()}
-              >
-                {id && error ? "重试生成草稿" : "生成转交草稿"}
-              </button>
+              <div className="discussion-actions">
+                <button
+                  type="button"
+                  className="primary"
+                  disabled={busy}
+                  onClick={() => void generate()}
+                >
+                  {id && error ? "重试生成草稿" : "生成转交草稿"}
+                </button>
+                <button
+                  type="button"
+                  className="discussion-secondary"
+                  disabled={busy}
+                  onClick={() => void generate(true)}
+                >
+                  手动填写
+                </button>
+              </div>
             )}
           </>
         )}
@@ -302,7 +533,7 @@ function HandoffFields({
           <label key={key}>
             {label}
             <textarea
-              value={edit.draft[key]}
+              value={edit.draft[key] ?? ""}
               required={key === "goal"}
               rows={key === "goal" ? 2 : 1}
               onChange={(event) =>

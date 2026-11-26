@@ -595,8 +595,8 @@ try {
     );
     await shoot(page, `discussion-${name}-references`);
 
-    await page.getByRole("button", { name: "交给 Router" }).click();
-    const dialog = page.getByRole("dialog", { name: "交给 Router" });
+    await page.getByRole("button", { name: "预览 / 编辑" }).click();
+    const dialog = page.getByRole("dialog", { name: "预览 / 编辑转交" });
     await dialog.getByRole("button", { name: "生成转交草稿" }).click();
     await dialog
       .getByRole("textbox", { name: "目标", exact: true })

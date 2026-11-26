@@ -69,6 +69,11 @@ fn cookie_routes_are_explicit_and_method_specific() {
             Method::Post,
             "/api/v1/chats/main/attentions/test-id/approve",
         ),
+        (
+            Method::Get,
+            "/api/v1/discussions/fixture/handoff?operation_id=opaque",
+        ),
+        (Method::Post, "/api/v1/discussions/fixture/handoff"),
         (Method::Get, "/api/v1/artifacts/fixture"),
         (Method::Get, "/api/v1/runs/fixture/rollout"),
     ] {
@@ -90,6 +95,8 @@ fn cookie_routes_are_explicit_and_method_specific() {
             Method::Post,
             "/api/v1/issues/42/attentions/question/approve",
         ),
+        (Method::Patch, "/api/v1/discussions/fixture/handoff"),
+        (Method::Delete, "/api/v1/discussions/fixture/handoff"),
         (Method::Get, "/api/v1/runs/fixture"),
         (Method::Head, "/api/v1/issues/42/state"),
         (Method::Post, protocol::REPORT_REVISIONS_PATH),
@@ -142,6 +149,7 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     drop(Store::initialize(&path)?);
     let sql = Connection::open(&path)?;
     // Roll back later schemas without recreating the v29 reply table.
+    crate::store::discussion::remove_quick_handoff_and_title_schema(&sql)?;
     crate::store::remove_token_usage_schema(&sql)?;
     crate::store::pull::restore_legacy_schema(&sql)?;
     sql.execute_batch(

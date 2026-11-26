@@ -253,9 +253,10 @@ for line in sys.stdin:
                                        if report["original_request"] == WEB_REQUEST
                                        else "The guide is ready. Download the attached guide.txt."),
                             "drop_before_start": 1}
-            elif text.startswith("从独立讨论转交。"):
-                assert "指定推进的 Issue" in text and "授权终点" in text
-                case = {"answer": "Router 已收到核对后的转交，先确认下一步。"}
+            elif text.startswith("讨论转交 · 上下文摘要。"):
+                assert context and "Tend provenance:" in context and "not new implementation authorization" in context
+                case = {"answer": "Router 已收到核对后的转交，先确认下一步。", "discussion_handoff": True}
+                assert "This is agent-written." not in context, "generated input reached unrestricted Router"
             elif text.startswith("Storage measurement "):
                 case = {"answer": "Accepted."}
             elif text.startswith(CROSS_CHAT_LOOKUP):
@@ -276,7 +277,9 @@ for line in sys.stdin:
             ).fetchone()[0]
             if starts <= case.get("drop_before_start", 0):
                 sys.exit(0)
-            if starts > 1:
+            # Independent discussions may produce the same synthetic summary
+            # text. A text match does not make the second delivery a replay.
+            if starts > 1 and not case.get("discussion_handoff"):
                 replay = json.loads(context.splitlines()[-1])
                 assert replay["kind"] == "replay" and replay["attempt_number"] == 2, replay
                 assert replay["source_message_id"]

@@ -18,12 +18,22 @@ const USAGE: &str = "Usage:
   tend discussion attach <chat> worktree <issue-id> <task-id> <repo-id>
   tend discussion detach <chat> <reference-id>
   tend discussion draft <chat> [operation-id]
+  tend discussion draft-manual <chat> [operation-id]
   tend discussion draft-read <chat> [draft-id]
+  tend discussion handoff-now <chat> [operation-id]
+  tend discussion handoff-status <chat> [operation-id]
+  tend discussion handoff-retry <chat> <operation-id> <failed-generation>
   tend discussion handoff <chat> <approved-json> [operation-id]
 
 Read or send discussion messages with tend chat read/send <chat>.
-Approved JSON fields: draft_id, goal, decisions, constraints, authorization_end,
-optional reference_ids and target_issue_id. Use handoff only after user approval.";
+No explicit title: use the first user prompt, or 未命名讨论 until then.
+handoff-now queues a summary in the original discussion and sends it on success.
+It shares context with Main Chat and is not new implementation authorization.
+Reuse the operation ID after an uncertain response. handoff-status reports the
+receipt or failed generation; handoff-retry replays only that failed generation.
+For the optional reviewed handoff, approved JSON fields: draft_id, goal,
+decisions, pending_items (optional), constraints, authorization_end, optional
+reference_ids and target_issue_id.";
 
 pub fn run(args: &[String]) -> Result<()> {
     let args = args.iter().map(String::as_str).collect::<Vec<_>>();
@@ -139,7 +149,7 @@ pub fn run(args: &[String]) -> Result<()> {
                         .map_or_else(|| req.clone(), |id| req.clone().query("id", id));
                     super::checked(req.call())?
                 }
-                ("draft", [] | [_]) => {
+                ("draft" | "draft-manual", [] | [_]) => {
                     let id = rest
                         .first()
                         .map_or_else(protocol::new_id, |id| (*id).to_owned());
@@ -148,9 +158,49 @@ pub fn run(args: &[String]) -> Result<()> {
                         &http,
                         &format!("{path}/draft"),
                         &auth,
-                        &json!({"operation_id":id}),
+                        &json!({"operation_id":id,"manual":*command == "draft-manual"}),
                     )
                     .with_context(|| format!("discussion draft operation {id}"))?
+                }
+                ("handoff-status" | "handoff-now", [] | [_]) => {
+                    let endpoint = format!("{path}/handoff");
+                    let operation = rest.first().copied();
+                    ensure!(operation.is_none_or(valid_id), "invalid operation ID");
+                    let get = || http.get(&endpoint).set("Authorization", &auth);
+                    if *command == "handoff-status" {
+                        let req = match operation {
+                            Some(id) => get().query("operation_id", id),
+                            None => get(),
+                        };
+                        super::checked(req.call())?
+                    } else {
+                        let id = match operation {
+                            Some(id) => id.to_owned(),
+                            None => {
+                                super::checked(get().call())?
+                                    .into_json::<protocol::DiscussionQuickHandoff>()?
+                                    .operation_id
+                            }
+                        };
+                        return print_quick_receipt(
+                            super::send(&http, &endpoint, &auth, &json!({"operation_id":id})),
+                            &id,
+                        );
+                    }
+                }
+                ("handoff-retry", [id, generation]) if valid_id(id) => {
+                    let generation: i64 =
+                        generation.parse().context("expected failed generation")?;
+                    ensure!(generation > 0, "failed generation must be positive");
+                    return print_quick_receipt(
+                        super::send(
+                            &http,
+                            &format!("{path}/handoff"),
+                            &auth,
+                            &json!({"operation_id":id, "retry_generation":generation}),
+                        ),
+                        id,
+                    );
                 }
                 ("handoff", [approved, extra @ ..]) if extra.len() <= 1 => {
                     let mut body: Value =
@@ -174,6 +224,18 @@ pub fn run(args: &[String]) -> Result<()> {
         _ => bail!("{USAGE}"),
     };
     let body: Value = results.into_json()?;
+    println!("{}", serde_json::to_string(&body)?);
+    Ok(())
+}
+
+fn print_quick_receipt(response: Result<ureq::Response>, operation: &str) -> Result<()> {
+    let body = response
+        .and_then(|response| Ok(response.into_json::<protocol::DiscussionQuickHandoff>()?))
+        .with_context(|| format!("quick handoff operation {operation}"))?;
+    ensure!(
+        body.operation_id == operation,
+        "uncertain response for quick handoff operation {operation}"
+    );
     println!("{}", serde_json::to_string(&body)?);
     Ok(())
 }

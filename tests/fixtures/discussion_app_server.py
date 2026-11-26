@@ -29,7 +29,9 @@ ledger = sqlite3.connect(home / "fixture.sqlite")
 ledger.executescript("""
 CREATE TABLE IF NOT EXISTS threads (id TEXT PRIMARY KEY, params TEXT);
 CREATE TABLE IF NOT EXISTS resumes (id TEXT, roots TEXT, found INTEGER);
-CREATE TABLE IF NOT EXISTS turns (id TEXT PRIMARY KEY, thread_id TEXT, text TEXT, context TEXT, history TEXT, roots TEXT);
+CREATE TABLE IF NOT EXISTS forks (id TEXT, parent TEXT, through_turn TEXT);
+CREATE TABLE IF NOT EXISTS input_history (turn_id TEXT, inherited TEXT);
+CREATE TABLE IF NOT EXISTS turns (id TEXT, thread_id TEXT, text TEXT, context TEXT, history TEXT, roots TEXT, PRIMARY KEY(thread_id, id));
 CREATE TABLE IF NOT EXISTS dropped_turns (text TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tool_results (turn_id TEXT, arguments TEXT, tool TEXT, result TEXT);
 """)
@@ -98,13 +100,25 @@ for line in sys.stdin:
             respond(request, {"config": {"mcp_servers": {}}})
         case "thread/start":
             roots = scope(params)
-            assert set(tool["name"] for tool in params["dynamicTools"]) == tools
-            assert "You cannot dispatch work" in params["developerInstructions"]
+            if "Main Chat assistant receiving" in params["developerInstructions"]:
+                assert params["dynamicTools"] == [] and roots == [], params
+                for key in ("shell_tool", "unified_exec", "apply_patch_freeform", "browser_use",
+                            "browser_use_external", "browser_use_full_cdp_access", "in_app_browser",
+                            "view_image", "goals", "memories", "hooks", "image_generation"):
+                    assert config[f"features.{key}"] == "false", config
+                assert config["tools.experimental_request_user_input.enabled"] == "false"
+                assert config["web_search"] == '"disabled"' and config["mcp_servers"] == "{}"
+            else:
+                assert set(tool["name"] for tool in params["dynamicTools"]) == tools
+                assert "You cannot dispatch work" in params["developerInstructions"]
             thread = str(uuid.uuid4())
             with ledger:
                 ledger.execute("INSERT INTO threads VALUES (?,?)", (thread, json.dumps(params)))
             loaded[thread] = roots
-            respond(request, thread_result(thread, roots))
+            binding = thread_result(thread, roots)
+            if config.get("features.shell_tool") == "false" and (home / "receiver-profile-mismatch").exists():
+                binding["sandbox"] = {"type": "dangerFullAccess"}
+            respond(request, binding)
         case "thread/resume":
             thread = params["threadId"]
             roots = scope(params)
@@ -123,6 +137,21 @@ for line in sys.stdin:
             with ledger:
                 ledger.execute("INSERT INTO resumes VALUES (?,?,1)", (thread, json.dumps(roots)))
             respond(request, thread_result(thread, roots))
+        case "thread/fork":
+            parent, through = params["threadId"], params["lastTurnId"]
+            roots = scope(params)
+            fork = str(uuid.uuid4())
+            included, = ledger.execute(
+                "SELECT rowid FROM turns WHERE thread_id=? AND id=?", (parent, through)).fetchone()
+            with ledger:
+                ledger.execute("INSERT INTO threads VALUES (?,?)", (fork, json.dumps(params)))
+                ledger.execute("INSERT INTO forks VALUES (?,?,?)", (fork, parent, through))
+                ledger.execute(
+                    """INSERT INTO turns SELECT id,?,text,context,history,roots
+                       FROM turns WHERE thread_id=? AND rowid<=? ORDER BY rowid""",
+                    (fork, parent, included))
+            loaded[fork] = roots
+            respond(request, thread_result(fork, roots))
         case "thread/turns/list":
             turns = ledger.execute("SELECT history FROM turns WHERE thread_id=? ORDER BY rowid DESC", (params["threadId"],))
             respond(request, {"data": [json.loads(history) for history, in turns], "nextCursor": None})
@@ -133,7 +162,9 @@ for line in sys.stdin:
             client_id = params["clientUserMessageId"]
             text = params["input"][-1]["text"]
             context = params["input"][0]["text"]
-            resources = json.loads(context.split("Earlier references do not grant access.\n")[-1])
+            receiver = config.get("features.shell_tool") == "false"
+            if not receiver:
+                resources = json.loads(context.split("Earlier references do not grant access.\n")[-1])
             case = text.split(":", 1)[0]
             if case == "Retry discussion":
                 with ledger:
@@ -145,7 +176,14 @@ for line in sys.stdin:
                 sys.exit(0)
             answer = "可以。先区分要讨论的想法与之后可能交给 Router 的工作。"
             respond(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
-            if case == "Read attached":
+            if receiver:
+                assert not roots and text.startswith("讨论转交 · 上下文摘要。"), (roots, text)
+                assert "This is agent-written." in context
+                for name in ("tend_dispatch_issue", "tend_backlog_issue", "tend_answer_attention"):
+                    result = read(request, thread, turn, name, name, {})
+                    assert not result["success"] and "cannot run tools" in str(result), result
+                answer = "Router 已收到讨论转交，请直接确认需要采取的行动。"
+            elif case == "Read attached":
                 issue_id, other_id, file_id, other_file_id = text.removeprefix("Read attached: ").split()
                 resource = next(row for row in resources if row["reference"]["kind"] == "repo")
                 checkout = Path(resource["checkout_path"])
@@ -176,7 +214,11 @@ for line in sys.stdin:
                             {"reference_id": "github:demo/quickstart:7"})
                 assert pull["success"] and "Synthetic PR body" in pull["contentItems"][0]["text"], pull
                 answer = mock_read(checkout / "README.md", roots)
-            elif case == "Hold discussion across archive":
+            elif case in ("Hold discussion across archive", "Hold before quick handoff", "Hold before failed quick handoff"):
+                if case == "Hold before quick handoff":
+                    answer = "LATE_ASSISTANT_AFTER_HANDOFF_CUTOFF"
+                if case == "Hold before failed quick handoff":
+                    answer = "LATE_FAILED_NATIVE_ITEM_OUTSIDE_CUTOFF"
                 (home / "archive-turn-started").touch()
                 deadline = time.monotonic() + 15
                 while not (home / "archive-turn-release").exists():
@@ -193,10 +235,30 @@ for line in sys.stdin:
                 checkout = Path(resource["checkout_path"])
                 assert str(checkout) in roots
                 answer = mock_read(checkout / "README.md", roots)
-            elif text.startswith("Prepare the editable handoff draft"):
+            elif text.startswith("Write the Main Chat handoff message"):
+                assert "Handoff request boundary" in context
+                assert "user authorization" in context
+                answer = ("请帮我比较合成样例的只读导出。已定首版用 CSV，"
+                          "保留天数尚未决定，需要协助比较。样例数据不得离开本机。"
+                          "只讨论方案，未授权实现或部署。")
+                inherited = ledger.execute(
+                    "SELECT text, history FROM turns WHERE thread_id=? ORDER BY rowid", (thread,)).fetchall()
+                with ledger:
+                    ledger.execute("INSERT INTO input_history VALUES (?,?)", (turn, json.dumps(inherited)))
+                history_page = read(request, thread, turn, "quick-history", "tend_read_discussion_history", {})
+                assert history_page["success"], history_page
+                (home / "handoff-started").touch()
+                deadline = time.monotonic() + 20
+                while (home / "handoff-hold").exists():
+                    assert time.monotonic() < deadline, "quick handoff fixture not released"
+                    time.sleep(0.02)
+                if (home / "handoff-invalid").exists():
+                    answer = json.dumps({"invalid": True})
+            elif text.startswith("Prepare an editable handoff draft"):
                 answer = json.dumps({
                     "goal": "整理演示仓库的上手说明",
                     "decisions": "保留一个运行示例，读者是第一次使用的人",
+                    "pending_items": "还需确认第一版的目录",
                     "constraints": "只使用已核对的安装命令",
                     "authorization_end": "先给出草案，等我确认，不部署",
                 }, ensure_ascii=False)
@@ -206,11 +268,15 @@ for line in sys.stdin:
                 answer = "恢复的是原讨论的同一条答复。"
             items = [{"type": "userMessage", "clientId": client_id},
                      {"type": "agentMessage", "id": f"{turn}-answer", "phase": "final_answer", "text": answer}]
-            history = {"id": turn, "status": "completed", "items": items}
+            history = {"id": turn, "status": "failed" if case == "Hold before failed quick handoff"
+                       else "completed", "items": items}
             with ledger:
                 ledger.execute("INSERT INTO turns VALUES (?,?,?,?,?,?)",
                                (turn, thread, text, context, json.dumps(history), json.dumps(roots)))
-            if case == "Recover discussion":
+            if case == "Recover discussion" or (
+                text.startswith("Write the Main Chat handoff message")
+                and (home / "handoff-recover").exists()
+            ):
                 sys.exit(0)
             for item in items:
                 event("item/completed", threadId=thread, turnId=turn, item=item)
