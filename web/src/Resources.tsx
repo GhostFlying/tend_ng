@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
 import { readAgents, readRunners } from "./api";
 import type { AgentDirectory, AgentProfile, RunnerInstance } from "./api";
+import { replacePageQuery, usePageURL } from "./navigation";
 import "./resources.css";
 
 type Props = { onReachable: (online: boolean) => void };
@@ -248,14 +249,12 @@ function AgentDetails({ entry, failed }: { entry: Entry; failed: boolean }) {
 
 export function Agents(props: Props) {
   const { data, failed, refresh } = useResource(props, readAgents);
-  const initial = new URLSearchParams(useRef(window.location.search).current);
-  const [categoryTab, setCategoryTab] = useState(
-    initial.get("tab") === "categories",
-  );
-  const [search, setSearch] = useState(initial.get("q") ?? "");
-  const [category, setCategory] = useState(initial.get("category") ?? "");
-  const [location, setLocation] = useState(initial.get("location") ?? "");
-  const [selectedKey, setSelected] = useState(initial.get("selected") ?? "");
+  const { searchParams } = usePageURL();
+  const categoryTab = searchParams.get("tab") === "categories";
+  const search = searchParams.get("q") ?? "";
+  const category = searchParams.get("category") ?? "";
+  const location = searchParams.get("location") ?? "";
+  const selectedKey = searchParams.get("selected") ?? "";
   const scroller = useRef<HTMLElement>(null);
   const detail = useRef<HTMLElement>(null);
   const restore = useRef<{ row: HTMLButtonElement; top: number } | null>(null);
@@ -287,21 +286,6 @@ export function Agents(props: Props) {
   });
 
   useEffect(() => {
-    const url = new URL(window.location.href);
-    for (const [key, value] of Object.entries({
-      tab: categoryTab ? "categories" : "",
-      q: search,
-      category,
-      location,
-      selected: selectedKey,
-    })) {
-      if (value) url.searchParams.set(key, value);
-      else url.searchParams.delete(key);
-    }
-    window.history.replaceState(null, "", url);
-  }, [categoryTab, search, category, location, selectedKey]);
-
-  useEffect(() => {
     if (!window.matchMedia("(max-width: 1399px)").matches) return;
     if (selectedId) {
       if (scroller.current) scroller.current.scrollTop = 0;
@@ -314,9 +298,7 @@ export function Agents(props: Props) {
   }, [selectedId]);
 
   function switchTab(tab: boolean) {
-    setCategoryTab(tab);
-    setSearch("");
-    setSelected("");
+    replacePageQuery({ tab: tab ? "categories" : "", q: "", selected: "" });
   }
 
   function tabKeys(event: KeyboardEvent<HTMLDivElement>) {
@@ -384,10 +366,9 @@ export function Agents(props: Props) {
                   placeholder={categoryTab ? "搜索类别" : "搜索名称或 ID"}
                   aria-label={categoryTab ? "搜索类别" : "搜索名称或 ID"}
                   value={search}
-                  onChange={(event) => {
-                    setSearch(event.target.value);
-                    setSelected("");
-                  }}
+                  onChange={(event) =>
+                    replacePageQuery({ q: event.target.value, selected: "" })
+                  }
                 />
               </label>
               {!categoryTab && (
@@ -395,10 +376,12 @@ export function Agents(props: Props) {
                   <select
                     aria-label="类别筛选"
                     value={category}
-                    onChange={(event) => {
-                      setCategory(event.target.value);
-                      setSelected("");
-                    }}
+                    onChange={(event) =>
+                      replacePageQuery({
+                        category: event.target.value,
+                        selected: "",
+                      })
+                    }
                   >
                     <option value="">全部类别</option>
                     {categories.map(({ id }) => (
@@ -410,10 +393,12 @@ export function Agents(props: Props) {
                   <select
                     aria-label="运行位置或方式筛选"
                     value={location}
-                    onChange={(event) => {
-                      setLocation(event.target.value);
-                      setSelected("");
-                    }}
+                    onChange={(event) =>
+                      replacePageQuery({
+                        location: event.target.value,
+                        selected: "",
+                      })
+                    }
                   >
                     <option value="">全部位置</option>
                     <optgroup label="运行位置">
@@ -462,12 +447,15 @@ export function Agents(props: Props) {
                               className="text-button"
                               key={entry.key}
                               type="button"
-                              onClick={() => {
-                                switchTab(false);
-                                setCategory(item.id);
-                                setLocation("");
-                                setSelected(entry.key);
-                              }}
+                              onClick={() =>
+                                replacePageQuery({
+                                  tab: "",
+                                  q: "",
+                                  category: item.id,
+                                  location: "",
+                                  selected: entry.key,
+                                })
+                              }
                             >
                               {entry.agent.id} ·{" "}
                               {entry.runner?.profile.runner_id}
@@ -510,7 +498,9 @@ export function Agents(props: Props) {
                         row,
                         top: scroller.current?.scrollTop ?? 0,
                       };
-                      setSelected(selectedId === entry.key ? "" : entry.key);
+                      replacePageQuery({
+                        selected: selectedId === entry.key ? "" : entry.key,
+                      });
                     }}
                   />
                 ))}
@@ -537,7 +527,7 @@ export function Agents(props: Props) {
           <button
             type="button"
             className="text-button agent-back"
-            onClick={() => setSelected("")}
+            onClick={() => replacePageQuery({ selected: "" })}
           >
             ‹ 返回列表
           </button>

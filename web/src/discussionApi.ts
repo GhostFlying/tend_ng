@@ -1,5 +1,11 @@
 import { sessionFetch } from "./webSession";
 
+export const discussionChanged = "tend-discussion-changed";
+
+export function notifyDiscussionChanged(chat?: string) {
+  window.dispatchEvent(new CustomEvent(discussionChanged, { detail: chat }));
+}
+
 export type Origin =
   | { kind: "chat"; chat_id: "main"; message_id: string }
   | { kind: "issue"; issue_id: string };

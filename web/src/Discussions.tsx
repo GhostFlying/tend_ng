@@ -6,9 +6,11 @@ import { issueTitle } from "./api";
 import {
   attachReference,
   detachReference,
+  discussionChanged,
   discussionIndexLink,
   discussionLink,
   listDiscussions,
+  notifyDiscussionChanged,
   readDiscussion,
   readWorkspaceChoices,
   referenceStatus,
@@ -24,10 +26,8 @@ import type {
 } from "./discussionApi";
 import { HandoffDialog } from "./DiscussionHandoff";
 import { discussionError, useReferenceSearch } from "./discussionSearch";
-import { navigate } from "./navigation";
+import { navigate, trackPageVisit } from "./navigation";
 import "./discussions.css";
-
-const DISCUSSION_LIST_CHANGED = "tend-discussion-list-changed";
 
 function useDiscussionList(
   archived: boolean,
@@ -61,12 +61,12 @@ function useDiscussionList(
       if (event.persisted) void load();
     }
     void load();
-    window.addEventListener(DISCUSSION_LIST_CHANGED, load);
+    window.addEventListener(discussionChanged, load);
     window.addEventListener("focus", load);
     window.addEventListener("pageshow", resume);
     return () => {
       pending?.abort();
-      window.removeEventListener(DISCUSSION_LIST_CHANGED, load);
+      window.removeEventListener(discussionChanged, load);
       window.removeEventListener("focus", load);
       window.removeEventListener("pageshow", resume);
     };
@@ -206,7 +206,6 @@ function DiscussionView({
   const [savingArchive, setSavingArchive] = useState(false);
   const [picker, setPicker] = useState(false);
   const [handoff, setHandoff] = useState(false);
-  const poll = useRef<AbortController | null>(null);
   const previousArchived = useRef(false);
   const archivalState = meta?.archived;
 
@@ -217,12 +216,11 @@ function DiscussionView({
     )
       return;
     previousArchived.current = archivalState;
-    window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
+    notifyDiscussionChanged();
   }, [archivalState]);
 
   useEffect(() => {
     const controller = new AbortController();
-    poll.current = controller;
     let timer: number | undefined;
     async function load() {
       try {
@@ -248,12 +246,19 @@ function DiscussionView({
       setSavingArchive(false);
       setRefresh((value) => value + 1);
     }
+    function onChange(event: Event) {
+      if (!(event instanceof CustomEvent) || event.detail !== chat) return;
+      controller.abort();
+      setRefresh((value) => value + 1);
+    }
     void load();
     window.addEventListener("pageshow", resume);
+    window.addEventListener(discussionChanged, onChange);
     return () => {
       controller.abort();
       window.clearTimeout(timer);
       window.removeEventListener("pageshow", resume);
+      window.removeEventListener(discussionChanged, onChange);
     };
   }, [chat, onReachable, refresh]);
 
@@ -301,8 +306,7 @@ function DiscussionView({
       await renameDiscussion(chat, title);
       setMeta((prev) => prev && { ...prev, title: title.trim() });
       setTitle(null);
-      window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
-      setRefresh((value) => value + 1);
+      notifyDiscussionChanged(chat);
     } catch (error) {
       setError(discussionError(error));
     } finally {
@@ -311,24 +315,22 @@ function DiscussionView({
   }
 
   async function changeArchive(archived: boolean) {
-    const from = window.location.href;
+    const endVisit = trackPageVisit();
+    let changed = false;
     setSavingArchive(true);
     setError("");
     try {
       await setDiscussionArchived(chat, archived);
-      poll.current?.abort();
       previousArchived.current = archived;
       setMeta((prev) => prev && { ...prev, archived });
-      setRefresh((value) => value + 1);
-      window.dispatchEvent(new Event(DISCUSSION_LIST_CHANGED));
+      changed = true;
+      notifyDiscussionChanged(chat);
     } catch (error) {
       setError(discussionError(error));
-      return;
     } finally {
       setSavingArchive(false);
+      if (endVisit() && changed && archived) navigate(discussionIndexLink());
     }
-    if (archived && window.location.href === from)
-      navigate(discussionIndexLink());
   }
 
   if (!meta)

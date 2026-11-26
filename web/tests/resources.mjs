@@ -8,7 +8,11 @@ try {
   for (const width of [1440, 390]) {
     const page = await browser.newPage({ viewport: { width, height: 844 } });
     const errors = [];
+    const documents = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    page.on("request", (request) => {
+      if (request.resourceType() === "document") documents.push(request.url());
+    });
     await page.goto(url);
     await page.getByLabel("访问令牌").fill(token);
     await page.getByRole("button", { name: "连接", exact: true }).click();
@@ -26,6 +30,21 @@ try {
     await workers.first().waitFor();
     assert.equal(await workers.count(), 3);
     const search = page.getByRole("searchbox", { name: "搜索名称或 ID" });
+    if (width === 1440) {
+      await search.fill("synthetic-filter");
+      await page.waitForURL(`${url}/agents?q=synthetic-filter`);
+      assert.equal(await workers.count(), 0);
+      await page.getByRole("link", { name: "Agents", exact: true }).click();
+      await page.waitForURL(`${url}/agents`);
+      assert.equal(await search.inputValue(), "");
+      assert.equal(await workers.count(), 3);
+      await page.goBack({ waitUntil: "commit" });
+      await page.waitForURL(`${url}/agents?q=synthetic-filter`);
+      assert.equal(await search.inputValue(), "synthetic-filter");
+      await page.goForward({ waitUntil: "commit" });
+      await page.waitForURL(`${url}/agents`);
+      assert.equal(await search.inputValue(), "");
+    }
     const category = page.getByLabel("类别筛选");
     assert.equal(
       await category.locator('option[value="implementation"]').textContent(),
@@ -87,6 +106,7 @@ try {
     await dialog.waitFor({ state: "detached" });
     assert.ok(await host.evaluate((row) => row === document.activeElement));
     assert.deepEqual(errors, []);
+    assert.deepEqual(documents, [`${url}/`]);
     await page.close();
   }
 } finally {

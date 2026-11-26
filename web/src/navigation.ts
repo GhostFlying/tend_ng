@@ -32,6 +32,20 @@ export function usePageURL() {
   return new URL(useSyncExternalStore(subscribe, currentURL));
 }
 
+// Mutations may finish after a user leaves and even after they return to the
+// same URL. Only the initiating visit may choose the next page.
+export function trackPageVisit() {
+  const href = currentURL();
+  let stayed = true;
+  const unsubscribe = subscribe(() => {
+    if (currentURL() !== href) stayed = false;
+  });
+  return () => {
+    unsubscribe();
+    return stayed && currentURL() === href;
+  };
+}
+
 function samePage(a: URL, b: URL) {
   return a.pathname === b.pathname && a.search === b.search;
 }
@@ -50,6 +64,17 @@ export function navigate(href: string) {
       }),
     );
   }
+}
+
+export function replacePageQuery(values: Record<string, string>) {
+  const url = new URL(currentURL());
+  for (const [key, value] of Object.entries(values)) {
+    if (value) url.searchParams.set(key, value);
+    else url.searchParams.delete(key);
+  }
+  if (url.href === currentURL()) return;
+  window.history.replaceState(window.history.state, "", url);
+  window.dispatchEvent(new Event(changed));
 }
 
 export function pageLink(anchor: HTMLAnchorElement): string | null {

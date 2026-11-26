@@ -116,14 +116,25 @@ function pendingKey(chat: string, issue?: string) {
 
 type SendOutcome = "received" | "retry" | "retry-unsaved";
 type ActiveSend = { message: PendingMessage; receipt: Promise<SendOutcome> };
+type FailedSend = {
+  message: PendingMessage;
+  failure: Exclude<SendOutcome, "received">;
+};
 
-// A client navigation can replace the composer without ending its POST.
-const activeSends = new Map<string, ActiveSend>();
+// Preserve the original operation even if the composer is replaced and
+// browser storage is unavailable. A new explicit send replaces this record.
+const unconfirmedSends = new Map<string, ActiveSend | FailedSend>();
+
+function retryMessage(outcome: FailedSend["failure"]) {
+  return outcome === "retry"
+    ? "暂时无法确认收件，再次发送会沿原消息重试。"
+    : "暂时无法确认收件。浏览器未保存草稿，刷新或关闭标签前可沿原消息重试。";
+}
 
 function savedMessage(chat: string, issue?: string): PendingMessage | null {
   const key = pendingKey(chat, issue);
-  const active = activeSends.get(key);
-  if (active) return active.message;
+  const unconfirmed = unconfirmedSends.get(key);
+  if (unconfirmed) return unconfirmed.message;
   try {
     const value = sessionStorage.getItem(key);
     return value ? (JSON.parse(value) as PendingMessage) : null;
@@ -144,25 +155,27 @@ function startMessageSend(
   } catch {
     saved = false;
   }
-  const receipt = sendMessage(message, issue, chat)
-    .then<SendOutcome, SendOutcome>(
-      () => {
-        if (saved) {
-          try {
-            sessionStorage.removeItem(key);
-          } catch {
-            // The Server already accepted the message.
-          }
-        }
-        return "received";
-      },
-      () => (saved ? "retry" : "retry-unsaved"),
-    )
-    .finally(() => {
-      activeSends.delete(key);
-    });
+  const receipt = sendMessage(message, issue, chat).then<
+    SendOutcome,
+    SendOutcome
+  >(
+    () => {
+      unconfirmedSends.delete(key);
+      try {
+        sessionStorage.removeItem(key);
+      } catch {
+        // The Server already accepted the message.
+      }
+      return "received";
+    },
+    () => {
+      const failure = saved ? "retry" : "retry-unsaved";
+      unconfirmedSends.set(key, { message, failure });
+      return failure;
+    },
+  );
   const delivery = { message, receipt };
-  activeSends.set(key, delivery);
+  unconfirmedSends.set(key, delivery);
   return delivery;
 }
 
@@ -451,9 +464,15 @@ function Composer({
   const [pending] = useState(() => savedMessage(chatId, issue));
   const attempt = useRef(pending);
   const [text, setText] = useState(pending?.text ?? "");
-  const [delivery, setDelivery] = useState(() => activeSends.get(key));
+  const [delivery, setDelivery] = useState<ActiveSend | undefined>(() => {
+    const record = unconfirmedSends.get(key);
+    return record && "receipt" in record ? record : undefined;
+  });
   const sending = delivery !== undefined;
-  const [error, setError] = useState("");
+  const [error, setError] = useState(() => {
+    const record = unconfirmedSends.get(key);
+    return record && "failure" in record ? retryMessage(record.failure) : "";
+  });
 
   const mention = standalone && /(?:^|\s)@([^\s@]*)$/.exec(text);
 
@@ -464,11 +483,7 @@ function Composer({
         setText("");
         onSent(sent.reply_to ?? null);
       } else {
-        setError(
-          outcome === "retry"
-            ? "暂时无法确认收件，再次发送会沿原消息重试。"
-            : "暂时无法确认收件，浏览器未保存草稿。请留在本页并重试。",
-        );
+        setError(retryMessage(outcome));
       }
       setDelivery(undefined);
     },
@@ -488,7 +503,8 @@ function Composer({
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const value = text.trim();
-    if (!value || sending || activeSends.has(key)) return;
+    const record = unconfirmedSends.get(key);
+    if (!value || sending || (record && "receipt" in record)) return;
     const quote = replyId ?? undefined;
     const message =
       attempt.current?.text === value && attempt.current.reply_to === quote

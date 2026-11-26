@@ -132,7 +132,7 @@ function App() {
   const [reachable, setReachable] = useState<boolean | null>(null);
   const connected = state === "connected";
   const { pathname: path, search, searchParams: query } = usePageURL();
-  const page = path + search;
+  const page = path === "/agents" ? path : path + search;
   const board = path === "/issues";
   const discussions = path === "/discussions";
   const resourceTitle =

@@ -99,14 +99,110 @@ async function sendAcrossNavigation(
     );
     assert.equal(posts.length, 1);
     assert.equal(posts[0].text, text);
-    const messages = JSON.parse(
-      execFileSync(cliPath, ["chat", "read", chat], { encoding: "utf8" }),
-    ).messages;
-    assert.equal(
-      messages.filter((row) => row.author === "user" && row.text === text)
-        .length,
-      1,
+    assertOneUserMessage(chat, text);
+  } finally {
+    release.resolve();
+    await page.unroute(path, handler);
+  }
+}
+
+function assertOneUserMessage(chat, text) {
+  const messages = JSON.parse(
+    execFileSync(cliPath, ["chat", "read", chat], { encoding: "utf8" }),
+  ).messages;
+  assert.equal(
+    messages.filter((row) => row.author === "user" && row.text === text).length,
+    1,
+  );
+}
+
+async function retryWithoutStorage(page, composer, leave, returnToChat) {
+  const path = `${base}/api/v1/chats/main/messages`;
+  const text = "Storage measurement · 丢失回执后沿原消息重试";
+  const accepted = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const posts = [];
+  const handler = async (route) => {
+    if (route.request().method() !== "POST") return route.continue();
+    posts.push(route.request().postDataJSON());
+    if (posts.length > 1) return route.continue();
+    const response = await route.fetch();
+    accepted.resolve(response.ok());
+    await release.promise;
+    await route.abort("failed");
+  };
+  await page.evaluate(() => {
+    const original = globalThis.Storage.prototype.setItem;
+    globalThis.tendRestoreTestStorage = () => {
+      globalThis.Storage.prototype.setItem = original;
+    };
+    globalThis.Storage.prototype.setItem = function (key, value) {
+      if (
+        this === globalThis.sessionStorage &&
+        key === "tend.pending-message.v1"
+      ) {
+        throw new globalThis.DOMException(
+          "Fixture storage unavailable",
+          "QuotaExceededError",
+        );
+      }
+      original.call(this, key, value);
+    };
+  });
+  await page.route(path, handler);
+  try {
+    await composer.fill(text);
+    await composer.press("Enter");
+    assert.equal(await accepted.promise, true);
+    await leave();
+    const lost = page.waitForEvent(
+      "requestfailed",
+      (request) => request.method() === "POST" && request.url() === path,
     );
+    release.resolve();
+    await lost;
+    await returnToChat();
+    await visible(page.getByText(/浏览器未保存草稿/));
+    assert.equal(await composer.inputValue(), text);
+    const receipt = page.waitForResponse(
+      (response) =>
+        response.url() === path && response.request().method() === "POST",
+    );
+    await composer.press("Enter");
+    assert.ok((await receipt).ok());
+    await page.waitForFunction(
+      () =>
+        document.querySelector('textarea[aria-label="发消息给 Tend"]')
+          ?.value === "",
+    );
+    assert.equal(posts.length, 2);
+    assert.ok(posts[0].operation_id);
+    assert.deepEqual(posts[1], posts[0]);
+    assertOneUserMessage("main", text);
+  } finally {
+    release.resolve();
+    await page.unroute(path, handler);
+    await page.evaluate(() => globalThis.tendRestoreTestStorage());
+  }
+}
+
+async function deferWrite(page, path, method, whileWaiting) {
+  const started = Promise.withResolvers();
+  const release = Promise.withResolvers();
+  const done = Promise.withResolvers();
+  const handler = async (route) => {
+    if (route.request().method() !== method) return route.continue();
+    started.resolve(route.request().postDataJSON());
+    await release.promise;
+    const response = await route.fetch();
+    await route.fulfill({ response });
+    done.resolve(response.ok());
+  };
+  await page.route(path, handler);
+  try {
+    await whileWaiting(started.promise);
+    release.resolve();
+    assert.equal(await done.promise, true);
   } finally {
     release.resolve();
     await page.unroute(path, handler);
@@ -144,10 +240,15 @@ try {
       const faviconProbe =
         message.location().url === `${base}/favicon.ico` &&
         /\b401\b/.test(message.text());
+      // The storage-failure case explicitly drops one successful POST receipt.
+      const lostReceipt =
+        message.location().url === `${base}/api/v1/chats/main/messages` &&
+        message.text().endsWith("net::ERR_FAILED");
       if (
         ["error", "warning"].includes(message.type()) &&
         !isAnonymousSessionProbe(message) &&
-        !faviconProbe
+        !faviconProbe &&
+        !lostReceipt
       ) {
         errors.push(`${message.location().url} ${message.text()}`);
       }
@@ -389,6 +490,18 @@ try {
       );
       await visible(main.getByText(messageInChat, { exact: true }));
       await shoot(page, "discussion-desktop-navigation-chat");
+      await retryWithoutStorage(
+        page,
+        mainComposer,
+        async () => {
+          await activate(directory);
+          await visible(recent);
+        },
+        async () => {
+          await activate(chatNav);
+          await visible(mainComposer);
+        },
+      );
       await activate(directory);
       const popup = context.waitForEvent("page");
       await recent.click({
@@ -554,8 +667,26 @@ try {
       assert.equal(await sidebarList.locator("[aria-current]").count(), 0);
     await shoot(page, `discussion-${name}-restore`);
 
-    await restore.click();
-    await visible(archive);
+    if (name === "desktop") {
+      await deferWrite(
+        page,
+        `${base}/api/v1/discussions/${chat}`,
+        "PATCH",
+        async (started) => {
+          await restore.click();
+          assert.deepEqual(await started, { archived: false });
+          await activate(directory);
+          await visible(legacyLink);
+          await page.goBack({ waitUntil: "commit" });
+          await visible(restore.and(page.locator(":enabled")));
+        },
+      );
+      // The new details view must react to the receipt, not the 12s poll.
+      await archive.waitFor({ state: "visible", timeout: 5000 });
+    } else {
+      await restore.click();
+      await visible(archive);
+    }
     assert.equal(page.url(), discussion);
     assert.deepEqual(cli("read", chat), beforeArchive);
     assert.equal(
@@ -604,6 +735,34 @@ try {
     await page.waitForURL(discussion);
     await visible(issueLink);
     if (name === "desktop") {
+      await activate(directory);
+      await main.getByRole("link", { name: "已归档", exact: true }).click();
+      await page.waitForURL(`${base}/discussions?archived=true`);
+      const oldIds = new Set(cliList().map(({ chat_id }) => chat_id));
+      await deferWrite(
+        page,
+        `${base}/api/v1/discussions`,
+        "POST",
+        async (started) => {
+          await navCreate.click();
+          await started;
+          await main
+            .getByRole("link", { name: "当前讨论", exact: true })
+            .click();
+          await visible(legacyLink);
+          await visible(sidebarList);
+        },
+      );
+      const created = cliList().filter(({ chat_id }) => !oldIds.has(chat_id));
+      assert.equal(created.length, 1);
+      const href = `/discussions?chat=${created[0].chat_id}`;
+      await currentList
+        .locator(`a[href="${href}"]`)
+        .waitFor({ state: "visible", timeout: 5000 });
+      await sidebarList
+        .locator(`a[href="${href}"]`)
+        .waitFor({ state: "visible", timeout: 5000 });
+      assert.equal(page.url(), `${base}/discussions`);
       await activate(chatNav);
       await page.getByRole("button", { name: "带入讨论" }).first().click();
       await page.waitForURL(/\/discussions\?chat=/);
@@ -619,7 +778,7 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS desktop and mobile Chromium: separate plus, zero document loads on client navigation, Back/Forward, native new tab and deep link, one POST per in-flight send, archive/restore, no Issue header entry, manual Issue references, handoff and backlinks",
+    "PASS desktop and mobile Chromium: separate plus, same-document Back/Forward, native new tab and deep links, one in-flight POST, identity retained on lost receipt with storage failure, late create/restore refresh, no Issue header entry, manual Issue references, handoff and backlinks",
   );
 } finally {
   await browser.close();
