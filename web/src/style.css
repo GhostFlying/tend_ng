@@ -286,19 +286,10 @@ a {
   line-height: 22px;
   overflow-wrap: anywhere;
 }
-.message p {
-  white-space: pre-wrap;
-}
 .message-user {
   align-self: flex-end;
   align-items: flex-end;
   max-width: 90%;
-}
-.message-user p {
-  padding: 12px 16px;
-  background: var(--bubble);
-  border-radius: 22px;
-  line-height: 24px;
 }
 .message-state {
   color: var(--muted);

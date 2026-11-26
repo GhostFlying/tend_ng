@@ -1,6 +1,4 @@
 import {
-  lazy,
-  Suspense,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -25,9 +23,7 @@ import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
 import { discussionLink } from "./discussionApi";
 import { DispatchAuthor, IssueTakeoverEvent } from "./IssueTimelineEvent";
-const DiscussionMarkdown = lazy(() =>
-  import("./Markdown").then(({ Markdown }) => ({ default: Markdown })),
-);
+import { Markdown } from "./Markdown";
 
 function OrdinaryChatAttention({
   chat,
@@ -335,19 +331,13 @@ function MessageRow({
         </a>
       )}
       {!message.attention?.proposal ? (
-        message.author === "discussion" ? (
-          <Suspense fallback={<p>{message.text}</p>}>
-            <DiscussionMarkdown text={message.text} />
-          </Suspense>
-        ) : (
-          <p>{message.text}</p>
-        )
+        <Markdown text={message.text} variant="chat" />
       ) : (
         (message.text !== message.attention.proposal.question ||
           message.attention.proposal.decision) && (
           <details className="proposal-original-question">
             <summary>原提问</summary>
-            <p>{message.text}</p>
+            <Markdown text={message.text} variant="chat" />
           </details>
         )
       )}

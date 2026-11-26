@@ -1,4 +1,5 @@
 import ReactMarkdown from "react-markdown";
+import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
 
 export function markdownLink(value: string) {
@@ -12,12 +13,19 @@ export function markdownLink(value: string) {
   }
 }
 
-export function Markdown({ text }: { text: string }) {
+export function Markdown({
+  text,
+  variant,
+}: {
+  text: string;
+  variant?: "chat";
+}) {
+  const chat = variant === "chat";
   return (
-    <div className="markdown">
+    <div className={chat ? "markdown chat-message-body" : "markdown"}>
       <ReactMarkdown
         skipHtml
-        remarkPlugins={[remarkGfm]}
+        remarkPlugins={chat ? [remarkGfm, remarkBreaks] : [remarkGfm]}
         urlTransform={(url, key) =>
           key === "href" ? markdownLink(url) : undefined
         }
