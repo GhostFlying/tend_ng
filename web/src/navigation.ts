@@ -13,7 +13,7 @@ const pages = new Set([
 ]);
 const changed = "tend:navigate";
 
-function subscribe(listener: () => void) {
+function subscribe(listener: (event: Event) => void) {
   window.addEventListener(changed, listener);
   window.addEventListener("popstate", listener);
   window.addEventListener("hashchange", listener);
@@ -37,8 +37,9 @@ export function usePageURL() {
 export function trackPageVisit() {
   const href = currentURL();
   let stayed = true;
-  const unsubscribe = subscribe(() => {
-    if (currentURL() !== href) stayed = false;
+  const unsubscribe = subscribe((event) => {
+    // Traversal can activate a different history entry with the same URL.
+    if (event.type === "popstate" || currentURL() !== href) stayed = false;
   });
   return () => {
     unsubscribe();

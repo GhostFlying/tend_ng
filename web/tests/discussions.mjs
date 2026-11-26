@@ -209,6 +209,31 @@ async function deferWrite(page, path, method, whileWaiting) {
   }
 }
 
+function traverseHistory(page, delta) {
+  // A same-URL traversal is observable by popstate, not by waiting for a
+  // different URL or a navigation response.
+  return page.evaluate(
+    (step) =>
+      new Promise((resolve, reject) => {
+        const controller = new globalThis.AbortController();
+        const timer = setTimeout(() => {
+          controller.abort();
+          reject(new Error(`No popstate for history.go(${step})`));
+        }, 5000);
+        globalThis.addEventListener(
+          "popstate",
+          () => {
+            clearTimeout(timer);
+            resolve(globalThis.location.href);
+          },
+          { once: true, signal: controller.signal },
+        );
+        globalThis.history.go(step);
+      }),
+    delta,
+  );
+}
+
 try {
   for (const [name, viewport] of Object.entries({
     desktop: { width: 1440, height: 960 },
@@ -763,6 +788,36 @@ try {
         .locator(`a[href="${href}"]`)
         .waitFor({ state: "visible", timeout: 5000 });
       assert.equal(page.url(), `${base}/discussions`);
+
+      const agents = menu.getByRole("link", { name: "Agents", exact: true });
+      const filter = page.getByRole("searchbox", { name: "搜索名称或 ID" });
+      const matchingEntry = `${base}/agents?q=same-entry-fixture`;
+      await agents.click();
+      await filter.fill("same-entry-fixture");
+      await page.waitForURL(matchingEntry);
+      await agents.click();
+      await page.waitForURL(`${base}/agents`);
+      await filter.fill("same-entry-fixture");
+      await page.waitForURL(matchingEntry);
+      const previousIds = new Set(cliList().map(({ chat_id }) => chat_id));
+      await deferWrite(
+        page,
+        `${base}/api/v1/discussions`,
+        "POST",
+        async (started) => {
+          await navCreate.click();
+          await started;
+          assert.equal(await traverseHistory(page, -1), matchingEntry);
+        },
+      );
+      await visible(navCreate.and(page.locator(":enabled")));
+      assert.equal(page.url(), matchingEntry);
+      assert.equal(await traverseHistory(page, 1), matchingEntry);
+      assert.equal(await filter.inputValue(), "same-entry-fixture");
+      assert.equal(
+        cliList().filter(({ chat_id }) => !previousIds.has(chat_id)).length,
+        1,
+      );
       await activate(chatNav);
       await page.getByRole("button", { name: "带入讨论" }).first().click();
       await page.waitForURL(/\/discussions\?chat=/);
@@ -778,7 +833,7 @@ try {
   }
   assert.deepEqual(errors, []);
   console.log(
-    "PASS desktop and mobile Chromium: separate plus, same-document Back/Forward, native new tab and deep links, one in-flight POST, identity retained on lost receipt with storage failure, late create/restore refresh, no Issue header entry, manual Issue references, handoff and backlinks",
+    "PASS desktop and mobile Chromium: separate plus, same-document Back/Forward including same-URL entries during a pending create, native new tab and deep links, one in-flight POST, identity retained on lost receipt with storage failure, late create/restore refresh, no Issue header entry, manual Issue references, handoff and backlinks",
   );
 } finally {
   await browser.close();
