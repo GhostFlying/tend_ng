@@ -454,7 +454,8 @@ impl Store {
             )? == 1,
             "cannot start the original Run"
         );
-        save_event(&tx, run, RunPhase::Started, branches)?;
+        let started_at = tx.query_row("SELECT unixepoch()", [], |row| row.get(0))?;
+        save_event(&tx, run, RunPhase::Started, branches, Some(started_at))?;
         tx.commit()?;
         Ok(())
     }
@@ -480,7 +481,7 @@ impl Store {
                 )? == 1,
                 "cannot attach the recovered turn"
             );
-            save_event(&tx, run, RunPhase::Started, branches)?;
+            save_event(&tx, run, RunPhase::Started, branches, None)?;
         }
         ensure!(
             tx.execute(
@@ -539,6 +540,7 @@ impl Store {
                 waiting_for_external,
             },
             branches,
+            None,
         )?;
         for (command, state) in commands {
             super::control::finish(&tx, &command, state)?;
@@ -603,6 +605,7 @@ fn save_event(
     run: &LocalRun,
     phase: RunPhase,
     branches: &[protocol::WorkBranch],
+    started_at: Option<i64>,
 ) -> Result<()> {
     let (thread_id, turn_id) = db.query_row(
         "SELECT thread_id, turn_id FROM local_runs WHERE id = ?1",
@@ -627,6 +630,7 @@ fn save_event(
             .map(|input| input.input_id.clone())
             .collect(),
         branches: branches.to_vec(),
+        started_at,
         phase,
     };
     db.execute(

@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import type { KeyboardEvent, ReactNode } from "react";
-import { readAgents, readRunners } from "./api";
-import type { AgentDirectory, AgentProfile, RunnerInstance } from "./api";
+import { issueLink, readAgents, readExecutionHosts } from "./api";
+import type {
+  AgentDirectory,
+  AgentProfile,
+  ExecutionHost,
+  ExecutionRunner,
+  RunnerInstance,
+  RunningTask,
+} from "./api";
 import { replacePageQuery, usePageURL } from "./navigation";
 import "./resources.css";
+import "./execution-hosts.css";
 
 type Props = { onReachable: (online: boolean) => void };
 
@@ -99,13 +107,6 @@ function runtimeName(entry: Entry) {
   return entry.agent.app_server
     ? `Codex · ${entry.agent.app_server}`
     : "Codex · app-server";
-}
-
-function runnerMode(runner: RunnerInstance) {
-  if (runner.drained_at) return "已排空";
-  if (runner.successor) return "排空中";
-  if (runner.profile.standby) return "待接替";
-  return "正常";
 }
 
 function activity(entry: Entry, failed: boolean) {
@@ -549,175 +550,292 @@ function timestamp(seconds: number) {
   );
 }
 
-function hostMetrics(runners: RunnerInstance[], failed: boolean) {
-  const connected = runners.filter((runner) => runner.online);
-  const active = connected.length > 0 && !failed;
-  const observed = active ? connected : runners;
-  return {
-    active,
-    state: failed ? "上次观察" : active ? "在线" : "离线",
-    running: observed.reduce(
-      (total, runner) => total + runner.profile.running_slots,
-      0,
-    ),
-    slots: observed.reduce(
-      (total, runner) => total + runner.profile.slot_limit,
-      0,
-    ),
-  };
+const runnerModes: Record<ExecutionRunner["mode"], string> = {
+  serving: "接单中",
+  draining: "收尾中",
+  standby: "待接替",
+  drained: "已排空",
+};
+
+const taskNames: Record<string, string> = {
+  "issue-router": "协调 Issue",
+  implementation: "实施",
+  "implementation-economy": "实施",
+  investigation: "调查",
+  review: "审阅",
+};
+
+function runnerName(id: string) {
+  // Generated registry IDs need a short visual handle, not a long UUID row.
+  const generated = /^runner-([\da-f]{8})-(?:[\da-f]{4}-){3}[\da-f]{12}$/i.exec(
+    id,
+  );
+  return generated ? `Runner · ${generated[1].slice(0, 6)}` : id;
 }
 
-function HostDetails({
-  id,
-  runners,
-  failed,
-  close,
-}: {
-  id: string;
-  runners: RunnerInstance[];
-  failed: boolean;
-  close: () => void;
-}) {
-  const panel = useRef<HTMLDialogElement>(null);
-  useEffect(() => {
-    panel.current?.showModal();
-  }, []);
-  const host = hostMetrics(runners, failed);
+function elapsed(started: number | null, observed: number) {
+  if (started === null) return null;
+  const seconds = Math.max(0, observed - started);
+  if (seconds < 60) return `${seconds} 秒`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes} 分${seconds % 60} 秒`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} 小时 ${minutes % 60} 分`;
+  return `${Math.floor(hours / 24)} 天 ${hours % 24} 小时`;
+}
 
+function RunningTasks({
+  runs,
+  observedAt,
+}: {
+  runs: RunningTask[];
+  observedAt: number;
+}) {
+  const groups = new Map<string, RunningTask[]>();
+  for (const run of runs) {
+    const group = groups.get(run.root_issue.id);
+    if (group) group.push(run);
+    else groups.set(run.root_issue.id, [run]);
+  }
   return (
-    <dialog
-      ref={panel}
-      className="host-dialog"
-      aria-label="主机详情"
-      onCancel={(event) => {
-        event.preventDefault();
-        close();
-      }}
-      onClick={(event) => {
-        if (event.target === event.currentTarget) close();
-      }}
-    >
-      <div className="host-dialog-header">
-        <h2>主机详情</h2>
-        <button
-          className="resource-icon"
-          type="button"
-          aria-label="关闭主机详情"
-          onClick={close}
-        >
-          ×
-        </button>
+    <div className="host-run-table">
+      <div className="host-run-guide" aria-hidden="true">
+        <span>Issue / Task</span>
+        <span>执行者</span>
+        <span>已运行</span>
       </div>
-      <h3>{id}</h3>
-      <Facts
-        values={[
-          ["连接", host.state],
-          [
-            host.active ? "槽位占用" : "记录槽位",
-            `${host.running} / ${host.slots}`,
-          ],
-          ["Runner", runners.length],
-        ]}
-      />
-      {runners.map((runner) => (
-        <section className="host-runner" key={runner.profile.runner_id}>
-          <h4>{runner.profile.runner_id}</h4>
-          <Facts
-            values={[
-              ["连接", failed ? "上次观察" : runner.online ? "在线" : "离线"],
-              ["运行模式", runnerMode(runner)],
-              [
-                "槽位占用",
-                `${runner.profile.running_slots} / ${runner.profile.slot_limit}`,
-              ],
-              [
-                "可派发槽位",
-                !failed && runner.online && runnerMode(runner) === "正常"
-                  ? runner.profile.available_for_assignment
-                  : "—",
-              ],
-              ["最后心跳", timestamp(runner.last_seen)],
-              ["通信协议", `v${runner.protocol}`],
-              ["仓库", runner.profile.repos.join("、") || "—"],
-              ...(runner.successor
-                ? [["接替 Runner", runner.successor] as [string, string]]
-                : []),
-            ]}
-          />
-        </section>
+      {[...groups].map(([id, group]) => {
+        const root = group[0].root_issue;
+        return (
+          <section className="host-run-group" key={id}>
+            <h4 className="host-issue">
+              <a href={issueLink(id, root.short_number ?? undefined)}>
+                {root.short_number !== null && (
+                  <span>#{root.short_number} </span>
+                )}
+                {root.title}
+              </a>
+            </h4>
+            <ul className="host-task-list">
+              {group.map((run) => {
+                const direct = run.issue.id === root.id;
+                const duration = elapsed(run.started_at, observedAt);
+                return (
+                  <li key={run.run_id} className="host-task">
+                    <span className="host-task-name">
+                      <small>Task</small>
+                      {direct ? (
+                        (taskNames[run.category] ?? run.category)
+                      ) : (
+                        <a
+                          href={issueLink(
+                            run.issue.id,
+                            run.issue.short_number ?? undefined,
+                          )}
+                        >
+                          {run.issue.title}
+                        </a>
+                      )}
+                    </span>
+                    <span
+                      className="host-task-agent"
+                      aria-label={`执行者 ${run.agent_id}`}
+                    >
+                      {run.agent_id}
+                    </span>
+                    <span
+                      className="host-run-time"
+                      aria-label={
+                        duration ? `已运行 ${duration}` : "启动时间未知"
+                      }
+                    >
+                      {duration ?? "—"}
+                    </span>
+                  </li>
+                );
+              })}
+            </ul>
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function RunnerActivity({
+  runner,
+  observedAt,
+}: {
+  runner: ExecutionRunner;
+  observedAt: number;
+}) {
+  const [chosen, setChosen] = useState<boolean | null>(null);
+  const open = chosen ?? runner.runs.length > 0;
+  return (
+    <details className="host-runner-block" open={open}>
+      <summary
+        className="host-runner-row"
+        onClick={(event) => {
+          event.preventDefault();
+          setChosen(!open);
+        }}
+      >
+        <span className="host-runner-id">
+          <strong>{runnerName(runner.runner_id)}</strong>
+          <span
+            className="host-runner-mode"
+            data-mode={runner.online ? runner.mode : "offline"}
+          >
+            {runner.online ? runnerModes[runner.mode] : "离线"}
+          </span>
+        </span>
+        <span className="host-runner-use">
+          <b>{runner.running_slots ?? "—"}</b> / {runner.slot_limit} 槽位
+        </span>
+        <span className="host-runner-chevron" aria-hidden="true">
+          ›
+        </span>
+      </summary>
+      {open && (
+        <div className="host-run-content">
+          {runner.runs.length > 0 && (
+            <RunningTasks runs={runner.runs} observedAt={observedAt} />
+          )}
+          {runner.running_slots === null ? (
+            <p className="host-run-empty">离线，无法确认正在运行的 Task。</p>
+          ) : runner.running_slots === 0 ? (
+            <p className="host-run-empty">当前没有运行中的 Task。</p>
+          ) : runner.running_slots > runner.runs.length ? (
+            <p className="host-run-empty">有运行记录尚未同步。</p>
+          ) : null}
+        </div>
+      )}
+    </details>
+  );
+}
+
+function HostCard({
+  host,
+  observedAt,
+}: {
+  host: ExecutionHost;
+  observedAt: number;
+}) {
+  const connected = host.runners.some((runner) => runner.online);
+  const draining = host.runners.reduce(
+    (sum, runner) =>
+      sum + (runner.mode === "draining" ? (runner.running_slots ?? 0) : 0),
+    0,
+  );
+  const capacity = host.slot_limit;
+  const slots = Math.min(capacity, 24);
+  const fill = capacity
+    ? Math.min(slots, Math.ceil((slots * host.running_slots) / capacity))
+    : 0;
+  const serving = capacity
+    ? Math.ceil((slots * (host.running_slots - draining)) / capacity)
+    : 0;
+  return (
+    <section
+      className="execution-host-card"
+      aria-label={`主机 ${host.host_id}`}
+    >
+      <header className="execution-host-head">
+        <div className="execution-host-name">
+          <span className="execution-host-icon" aria-hidden="true">
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.6"
+              strokeLinecap="round"
+            >
+              <rect x="3" y="5" width="18" height="6" rx="2" />
+              <rect x="3" y="13" width="18" height="6" rx="2" />
+              <path d="M7 8h.1M7 16h.1" />
+            </svg>
+          </span>
+          <div>
+            <h2>{host.host_id}</h2>
+            <p className="execution-host-meta">
+              <span data-online={connected}>{connected ? "在线" : "离线"}</span>
+              <span aria-hidden="true">·</span>
+              <span>{host.runners.length} 个 Runner</span>
+            </p>
+          </div>
+        </div>
+        <div className="execution-host-count">
+          <span>
+            <strong>
+              {connected ? host.running_slots : "—"}
+              <small> / {capacity || "—"}</small>
+            </strong>
+            <small>槽位</small>
+          </span>
+          {slots > 0 && (
+            <span className="execution-host-meter" aria-hidden="true">
+              {Array.from({ length: slots }, (_, index) => (
+                <i
+                  key={index}
+                  data-used={index < fill}
+                  data-draining={index >= serving && index < fill}
+                />
+              ))}
+            </span>
+          )}
+        </div>
+      </header>
+      {host.runners.map((runner) => (
+        <RunnerActivity
+          key={runner.runner_id}
+          runner={runner}
+          observedAt={observedAt}
+        />
       ))}
-    </dialog>
+    </section>
   );
 }
 
 export function Hosts(props: Props) {
-  const { data, failed } = useResource(props, readRunners);
-  const [selected, setSelected] = useState("");
-  const restore = useRef<HTMLButtonElement>(null);
-  const hosts = new Map<string, RunnerInstance[]>();
-  for (const runner of currentRunners(data ?? [])) {
-    const id = runner.profile.host_id;
-    const prior = hosts.get(id) ?? [];
-    hosts.set(id, [...prior, runner]);
-  }
-  const selectedRunners = hosts.get(selected);
+  const { data, failed } = useResource(props, readExecutionHosts);
+  const connected = data?.hosts.filter((host) =>
+    host.runners.some((runner) => runner.online),
+  ).length;
   return (
     <main className="resource-page hosts-page" aria-label="执行主机占用">
-      <p className="host-list-title">执行主机{data && ` · ${hosts.size} 台`}</p>
-      {failed && (
-        <p className="resource-warning" role="status">
-          {data ? "等待连接恢复，显示最后观察状态。" : "暂时无法读取执行主机。"}
-        </p>
-      )}
-      {!data && !failed && (
-        <p role="status" className="resource-empty">
-          正在读取…
-        </p>
-      )}
-      {data && !hosts.size && (
-        <p className="resource-empty">暂无已登记的执行主机。</p>
-      )}
-      {[...hosts].map(([id, runners]) => {
-        const host = hostMetrics(runners, failed);
-        const mode = runners.find((runner) => runner.successor);
-        return (
-          <button
-            className="host-row"
-            type="button"
-            key={id}
-            aria-label={`主机详情：${id}`}
-            onClick={(event) => {
-              restore.current = event.currentTarget;
-              setSelected(id);
-            }}
-          >
-            <span className="host-identity">
-              <span>{id}</span>
-              <small data-online={host.active}>{host.state}</small>
-            </span>
-            <span className="host-summary">
-              {mode && <span className="host-mode">{runnerMode(mode)}</span>}
-              {host.active
-                ? host.running
-                  ? "执行中"
-                  : "空闲"
-                : "记录占用"} · {host.running} / {host.slots} 槽位
-              {runners.length > 1 && ` · ${runners.length} 个 Runner`}
-            </span>
-          </button>
-        );
-      })}
-      {selectedRunners && (
-        <HostDetails
-          id={selected}
-          runners={selectedRunners}
-          failed={failed}
-          close={() => {
-            setSelected("");
-            requestAnimationFrame(() => restore.current?.focus());
-          }}
-        />
-      )}
+      <div className="execution-host-lane">
+        {data && (
+          <p className="host-list-title">
+            执行主机 · <strong>{data.hosts.length}</strong> 台
+            <span aria-hidden="true"> · </span>
+            {connected} 台在线
+          </p>
+        )}
+        {failed && (
+          <p className="resource-warning" role="status">
+            {data
+              ? "等待连接恢复，显示最后观察状态。"
+              : "暂时无法读取执行主机。"}
+          </p>
+        )}
+        {!data && !failed && (
+          <p role="status" className="resource-empty">
+            正在读取…
+          </p>
+        )}
+        {data && !data.hosts.length && (
+          <p className="resource-empty">暂无已登记的执行主机。</p>
+        )}
+        <div className="execution-host-list">
+          {data?.hosts.map((host) => (
+            <HostCard
+              key={host.host_id}
+              host={host}
+              observedAt={data.observed_at}
+            />
+          ))}
+        </div>
+      </div>
     </main>
   );
 }

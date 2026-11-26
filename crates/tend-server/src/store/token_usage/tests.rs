@@ -59,6 +59,7 @@ fn native_run(run: &str, task: &str) -> RunObservation {
         turn_id: Some(format!("turn-{run}")),
         input_ids: vec![],
         branches: vec![],
+        started_at: None,
         phase: RunPhase::Started,
     }
 }

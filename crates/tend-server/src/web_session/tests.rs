@@ -57,6 +57,7 @@ fn cookie_policy_uses_only_explicit_https_or_canonical_loopback_authorities() ->
 fn cookie_routes_are_explicit_and_method_specific() {
     for (method, path) in [
         (Method::Get, "/api/v1/runners"),
+        (Method::Get, protocol::EXECUTION_HOSTS_PATH),
         (Method::Get, "/api/v1/issues/%2342/messages?before=10"),
         (Method::Get, "/api/v1/issues/42/attention-replies?before=10"),
         (Method::Get, "/api/v1/issues/42/token-usage"),

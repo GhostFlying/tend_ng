@@ -2,6 +2,7 @@ use crate::{AttentionRequest, DispatchIssue, IssueMessage};
 use serde::{Deserialize, Serialize};
 
 pub const RUNNER_PROTOCOL: u32 = 2;
+pub const EXECUTION_HOSTS_PATH: &str = "/api/v1/execution-hosts";
 pub const RUNNER_SYNC_BATCH: usize = 32;
 pub const WORK_CATEGORIES: &[&str] = &[
     "implementation",
@@ -417,6 +418,9 @@ pub struct RunObservation {
     pub input_ids: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub branches: Vec<crate::WorkBranch>,
+    /// Runner wall clock when it received confirmation of this native start.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at: Option<i64>,
     pub phase: RunPhase,
 }
 

@@ -301,6 +301,7 @@ fn web_route(method: &Method, url: &str) -> bool {
             path,
             protocol::ISSUE_BOARD_PATH
                 | protocol::TOP_LEVEL_BOARD_PATH
+                | protocol::EXECUTION_HOSTS_PATH
                 | "/api/v1/runners"
                 | "/api/v1/agents"
         ) {

@@ -409,6 +409,9 @@ fn handle(
         }
         return control_response(store.reclaim_workspace(&issue, &input.operation_id)?);
     }
+    if path == protocol::EXECUTION_HOSTS_PATH && request.method() == &Method::Get {
+        return Ok((200, serde_json::to_value(store.execution_hosts()?)?));
+    }
     if path == "/api/v1/runners" && request.method() == &Method::Get {
         return Ok((200, serde_json::to_value(store.runner_instances()?)?));
     }

@@ -31,7 +31,13 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
         )
         .optional()?;
     if let Some((source, prior)) = prior {
-        return Ok(source == runner && prior == original);
+        if source != runner {
+            return Ok(false);
+        }
+        if prior == original {
+            return Ok(true);
+        }
+        return compatible_start_receipt(&prior, &original);
     }
 
     let authorized = db.query_row(
@@ -155,6 +161,21 @@ pub fn apply(db: &Connection, runner: &str, observation: &RunObservation) -> Res
     Ok(true)
 }
 
+// An old Server or Runner omits the optional clock evidence on replay.
+fn compatible_start_receipt(prior: &str, supplied: &str) -> Result<bool> {
+    let mut prior: RunObservation = serde_json::from_str(prior)?;
+    let mut supplied: RunObservation = serde_json::from_str(supplied)?;
+    if prior.phase != RunPhase::Started
+        || supplied.phase != RunPhase::Started
+        || prior.started_at.is_some() == supplied.started_at.is_some()
+    {
+        return Ok(false);
+    }
+    prior.started_at = None;
+    supplied.started_at = None;
+    Ok(prior == supplied)
+}
+
 pub(crate) struct RunReader {
     pub origin: String,
     pub reader: String,
@@ -196,6 +217,39 @@ fn run_reader(db: &Connection, run: &str) -> Result<Option<RunReader>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_start_clock_does_not_change_an_existing_receipt_identity() -> Result<()> {
+        let mut run = RunObservation {
+            event_id: "event".to_owned(),
+            assignment_id: "assignment".to_owned(),
+            task_id: "task".to_owned(),
+            run_id: "run".to_owned(),
+            thread_id: Some("thread".to_owned()),
+            turn_id: Some("turn".to_owned()),
+            input_ids: vec![],
+            branches: vec![],
+            started_at: None,
+            phase: RunPhase::Started,
+        };
+        let legacy = serde_json::to_string(&run)?;
+        assert!(!legacy.contains("started_at"));
+        run.started_at = Some(10);
+        let current = serde_json::to_string(&run)?;
+        assert!(compatible_start_receipt(&legacy, &current)?);
+        assert!(compatible_start_receipt(&current, &legacy)?);
+        run.started_at = Some(11);
+        assert!(!compatible_start_receipt(
+            &current,
+            &serde_json::to_string(&run)?
+        )?);
+        run.task_id = "another-task".to_owned();
+        assert!(!compatible_start_receipt(
+            &legacy,
+            &serde_json::to_string(&run)?
+        )?);
+        Ok(())
+    }
 
     #[test]
     fn retired_run_reader_follows_only_confirmed_same_host_replacements() -> Result<()> {

@@ -470,10 +470,47 @@ export async function readNotifications(before?: number, signal?: AbortSignal) {
   return (await request(url, { signal })).json() as Promise<NotificationPage>;
 }
 
-export async function readRunners(signal: AbortSignal) {
-  return (await request("/api/v1/runners", { signal })).json() as Promise<
-    RunnerInstance[]
-  >;
+type ActivityIssue = {
+  id: string;
+  title: string;
+  short_number: number | null;
+};
+
+export type RunningTask = {
+  run_id: string;
+  task_id: string;
+  category: string;
+  agent_id: string;
+  started_at: number | null;
+  issue: ActivityIssue;
+  root_issue: ActivityIssue;
+};
+
+export type ExecutionRunner = {
+  runner_id: string;
+  mode: "serving" | "draining" | "standby" | "drained";
+  online: boolean;
+  running_slots: number | null;
+  slot_limit: number;
+  runs: RunningTask[];
+};
+
+export type ExecutionHost = {
+  host_id: string;
+  running_slots: number;
+  slot_limit: number;
+  runners: ExecutionRunner[];
+};
+
+export type ExecutionHostSnapshot = {
+  observed_at: number;
+  hosts: ExecutionHost[];
+};
+
+export async function readExecutionHosts(signal: AbortSignal) {
+  return (
+    await request("/api/v1/execution-hosts", { signal })
+  ).json() as Promise<ExecutionHostSnapshot>;
 }
 
 export async function readAgents(signal: AbortSignal) {

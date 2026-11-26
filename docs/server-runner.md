@@ -8,6 +8,8 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 本机恢复时，Runner 沿自己的本地库和 `runner_id` 接续。常规升级默认同机接替，前驱和后继以各自的 `runner_id` 登记在同一个 Host 下，分别持有本地执行记录。Run 按实际执行的 Runner 查证，workspace 占用沿原 Task 保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
 
+执行主机页按 Host 展开各 Runner 的实际活动，沿 Run 的原派发关联 Issue、Task 和具名 Agent。收尾代占用照计，配置容量只计仍可接单的代，已退役不出现在当前页面。Runner 可随 Started 事实发送本机确认开始时间，旧代仍兼容，历史没有证据时显示未知。CLI 的 `tend runner activity` 读取同一个快照。 [执行主机页](plans/execution-hosts.md)
+
 ## 通信通道与独立升级
 
 **已确认。** 外置 tsnet、LAN 直连和宿主机 `tailscaled` 是一期对等的通信方式。部署可按实际可达性配置，任一通道都可承载同一套 Tend API 和同步协议。信道按可信处理，请求用预共享 token 鉴权。业务身份独立于网络入口和 tailnet 节点名、tag、WhoIs。重连或切换通道后沿同一 Runner、Task 和操作身份对账。Runner 同步、原执行实例的 inspect 与交付上传只接受显式 Bearer，不接受 Web 会话 Cookie。浏览器访问 Server 的 rollout 读取入口时，Server 仍用共享 Bearer 向原 Runner 读取。 [Web 会话与 Bearer 边界](web-session.md)

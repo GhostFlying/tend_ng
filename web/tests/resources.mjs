@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { chromium } from "playwright";
 
 const {
   TEND_URL: url,
   TEND_TOKEN: token,
   TEND_SCREENSHOTS: output,
+  TEND_RESOURCES_DB: fixtureDb,
 } = process.env;
 async function capture(page, name) {
   if (output) {
@@ -18,7 +20,11 @@ assert(url && token);
 const browser = await chromium.launch({ args: ["--no-proxy-server"] });
 try {
   for (const width of [1440, 390]) {
-    const page = await browser.newPage({ viewport: { width, height: 844 } });
+    const page = await browser.newPage({
+      viewport: { width, height: 844 },
+      hasTouch: width === 390,
+      isMobile: width === 390,
+    });
     const errors = [];
     const documents = [];
     page.on("pageerror", (error) => errors.push(error.message));
@@ -74,7 +80,7 @@ try {
     await category.selectOption("implementation");
     await search.fill("worker");
     assert.equal(await page.locator("button.agent-row").count(), 3);
-    await page.getByLabel("运行位置或方式筛选").selectOption("host:demo-host");
+    await page.getByLabel("运行位置或方式筛选").selectOption("host:devbox");
     assert.equal(await workers.count(), 2);
     const chosen = workers.filter({ hasText: "current-runner" });
     await chosen
@@ -111,31 +117,90 @@ try {
 
     if (width === 390) await page.getByRole("link", { name: "更多" }).click();
     await page.getByRole("link", { name: "主机", exact: true }).click();
-    await page.getByText("执行主机 · 2 台", { exact: true }).waitFor();
-    const host = page.getByRole("button", { name: "主机详情：demo-host" });
-    await host.getByText(/0 \/ 6 槽位 · 2 个 Runner/).waitFor();
-    await page
-      .getByRole("button", { name: "主机详情：offline-host" })
-      .getByText("离线")
-      .waitFor();
-    await host.click();
-    const dialog = page.getByRole("dialog", { name: "主机详情" });
-    await dialog
-      .getByRole("heading", { name: "current-runner", exact: true })
-      .waitFor();
-    await dialog
-      .getByRole("heading", { name: "previous-runner", exact: true })
-      .waitFor();
+    await page.waitForURL(`${url}/hosts`);
+    await page.getByText(/执行主机 · 2 台 · 2 台在线/).waitFor();
+    const host = page.getByRole("region", { name: "主机 devbox" });
+    const idle = page.getByRole("region", { name: "主机 smallbox" });
+    assert.match(
+      await host.locator(".execution-host-count").innerText(),
+      /3.*6.*槽位/,
+    );
+    assert.match(
+      await idle.locator(".execution-host-count").innerText(),
+      /0.*12.*槽位/,
+    );
+    const current = host
+      .locator("details")
+      .filter({ hasText: "current-runner" });
+    const draining = host
+      .locator("details")
+      .filter({ hasText: "previous-runner" });
+    const idleRunner = idle.locator("details");
+    assert.equal(await host.locator("details").count(), 2);
     assert.equal(
-      await dialog.getByRole("heading", { name: "retired-runner" }).count(),
+      await page.getByText("retired-runner", { exact: true }).count(),
       0,
     );
-    await dialog.getByText("排空中", { exact: true }).waitFor();
-    assert.equal(await dialog.locator("section.host-runner").count(), 2);
-    await capture(page, `resource-host-${width}.png`);
-    await page.keyboard.press("Escape");
-    await dialog.waitFor({ state: "detached" });
-    assert.ok(await host.evaluate((row) => row === document.activeElement));
+    await current.getByText("Cedar", { exact: true }).waitFor();
+    await current.getByText("Laurel", { exact: true }).waitFor();
+    assert.equal(
+      await current
+        .getByRole("link", { name: /#86 展示派发来源/ })
+        .getAttribute("href"),
+      "/issues/86",
+    );
+    assert.equal(
+      await current
+        .getByRole("link", { name: "实现派发与接手条目" })
+        .getAttribute("href"),
+      "/issues/87",
+    );
+    assert.match(
+      await current.locator(".host-run-time").first().innerText(),
+      /^4 分/,
+    );
+    await draining.getByText("收尾中", { exact: true }).waitFor();
+    await draining.getByText("Maple", { exact: true }).waitFor();
+    assert.equal(await draining.getByLabel("启动时间未知").innerText(), "—");
+    assert.equal(await host.getByText(/不展示/).count(), 0);
+    assert.equal(await idleRunner.evaluate((details) => details.open), false);
+    await capture(page, `execution-hosts-render-${width}.png`);
+    const toggle = current.locator("summary");
+    await toggle.focus();
+    await page.keyboard.press("Enter");
+    assert.equal(await current.evaluate((details) => details.open), false);
+    assert.equal(await draining.evaluate((details) => details.open), true);
+    assert.ok(
+      await toggle.evaluate((summary) => summary === document.activeElement),
+    );
+    await page.keyboard.press("Space");
+    assert.equal(await current.evaluate((details) => details.open), true);
+    if (width === 390) await idleRunner.locator("summary").tap();
+    else await idleRunner.locator("summary").click();
+    await idleRunner.getByText("当前没有运行中的 Task。").waitFor();
+    assert.equal(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+      width,
+    );
+    assert.equal(await page.locator("vite-error-overlay").count(), 0);
+    if (width === 390 && fixtureDb) {
+      const db = new DatabaseSync(fixtureDb);
+      try {
+        db.prepare(
+          "UPDATE runner_replacements SET drained_at=unixepoch(), retired_at=unixepoch() WHERE predecessor='previous-runner'",
+        ).run();
+      } finally {
+        db.close();
+      }
+      await draining.waitFor({ state: "detached" });
+      assert.equal(await host.locator("details").count(), 1);
+      assert.match(
+        await host.locator(".execution-host-count").innerText(),
+        /2.*6.*槽位/,
+      );
+      assert.equal(await current.evaluate((details) => details.open), true);
+      assert.equal(await idleRunner.evaluate((details) => details.open), true);
+    }
     assert.deepEqual(errors, []);
     assert.deepEqual(documents, [`${url}/`]);
     await page.close();
@@ -144,5 +209,5 @@ try {
   await browser.close();
 }
 console.log(
-  "PASS desktop and mobile Agent filtering, detail navigation, and same-host Runner details",
+  "PASS desktop and mobile Agent filtering and keyboard/touch Runner activity, including retirement and unknown starts",
 );

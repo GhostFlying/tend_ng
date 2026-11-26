@@ -5,6 +5,7 @@ pub(crate) mod control;
 mod coordination;
 pub(crate) mod discovery;
 pub mod discussion;
+mod execution_hosts;
 mod external;
 pub(crate) mod external_routing;
 mod handoff;
@@ -276,6 +277,7 @@ impl Store {
              CREATE INDEX IF NOT EXISTS issue_reports_by_issue ON issue_reports(issue_id);
              CREATE INDEX IF NOT EXISTS issue_report_publications_by_report ON issue_report_publications(report_id);",
         )?;
+        execution_hosts::install_index(&tx)?;
         tx.commit()?;
         board::install_tracking(&store.db)?;
         Ok(store)

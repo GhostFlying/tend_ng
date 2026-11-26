@@ -232,9 +232,38 @@ def main():
             wait_for(lambda: cli("issue", "read", overlap[one]["issue_id"]), lambda row: row["status"] == "running")
             assert local_active(db) == local_active(next_db) == 1
             assert started() == [one]
+            active = wait_for(lambda: cli("runner", "activity"), lambda snapshot: any(
+                h["running_slots"] == 2 and
+                sum(len(r["runs"]) for r in h["runners"]) == 2 for h in snapshot["hosts"]))
+            [host] = active["hosts"]
+            assert host["slot_limit"] == 2  # standby peer and draining capacity do not inflate it
+            current, draining, standby = host["runners"]
+            assert (current["runner_id"], current["mode"]) == (successor, "serving")
+            assert (draining["runner_id"], draining["mode"]) == ("demo-runner", "draining")
+            assert standby["mode"] == "standby" and not standby["runs"]
+            assert draining["runs"][0]["run_id"] == old_run["run"]
+            for row in (current, draining):
+                assert len(row["runs"]) == 1
+                run = row["runs"][0]
+                start = SQL(db if row["mode"] == "draining" else next_db,
+                            "SELECT json_extract(observation, '$.started_at') FROM run_outbox "
+                            "WHERE json_extract(observation, '$.run_id') = ? AND "
+                            "json_extract(observation, '$.phase.state') = 'started'", run["run_id"])
+                assert start == [(run["started_at"],)] and run["started_at"] is not None
+                assert run["started_at"] <= active["observed_at"]
         else:
             wait_for(lambda: local_active(db), lambda count: count == 1)
             assert roster()[successor]["execution_slot_limit"] == 0
+            active = wait_for(lambda: cli("runner", "activity"), lambda snapshot: any(
+                host["running_slots"] == 1 and any(
+                    row["run_id"] == old_run["run"] for runner in host["runners"] for row in runner["runs"])
+                for host in snapshot["hosts"]))
+            [host] = active["hosts"]
+            current, draining, standby = host["runners"]
+            assert host["running_slots"] == 1 and host["slot_limit"] == 2
+            assert current["mode"] == "serving" and not current["runs"]
+            assert draining["mode"] == "draining" and len(draining["runs"]) == 1
+            assert draining["runs"][0]["started_at"] is None
 
         terminate(first)
         first.communicate()
@@ -258,6 +287,8 @@ def main():
         stdout, stderr = retry.communicate(timeout=15)
         assert retry.returncode == 1 and "cleanup did not complete" in stderr, (stdout, stderr)
         assert roster()["demo-runner"]["retired_at"] and db.is_file()
+        [host] = cli("runner", "activity")["hosts"]
+        assert "demo-runner" not in {row["runner_id"] for row in host["runners"]}
         assert SQL(db, "SELECT state, thread_id FROM local_runs WHERE id = ?", old_run["run"]) == [
             ("stopped", old_run["thread"])]
         fact = cli("runner", "retirement", "demo-runner")

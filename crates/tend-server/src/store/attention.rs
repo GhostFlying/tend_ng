@@ -571,6 +571,7 @@ mod tests {
             turn_id: Some("turn".into()),
             input_ids: vec![],
             branches: vec![],
+            started_at: None,
             phase: RunPhase::Started,
         };
         assert!(super::super::run::apply(&tx, "runner", &run)?);
