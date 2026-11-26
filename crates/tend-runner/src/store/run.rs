@@ -237,23 +237,34 @@ impl Store {
             .collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
-    pub fn next_queued_run(&mut self) -> Result<Option<LocalRun>> {
+    pub fn next_queued_run(&mut self, slot_limit: u32) -> Result<Option<LocalRun>> {
         // Idle and blocked queues need no writer. Recheck under the same
         // transaction that installs the exclusive Run.
-        if ready_assignment(&self.0)?.is_none() {
+        let can_start = |db: &Connection| -> rusqlite::Result<bool> {
+            db.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM local_drain)
+                    AND (SELECT count(*) FROM local_runs WHERE state IN ('prepared', 'running'))
+                        < min(?1, coalesce((SELECT slots FROM local_execution_limit), ?1))",
+                [slot_limit],
+                |row| row.get(0),
+            )
+        };
+        if !can_start(&self.0)? || ready_assignment(&self.0)?.is_none() {
             return Ok(None);
         }
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if !can_start(&tx)? {
+            return Ok(None);
+        }
         let Some(assignment_id) = ready_assignment(&tx)? else {
             return Ok(None);
         };
 
         let acquired = tx.execute(
             "UPDATE received_assignments SET execution_state = 'active'
-              WHERE id = ?1 AND execution_state = 'queued'
-                AND NOT EXISTS(SELECT 1 FROM local_drain)",
+              WHERE id = ?1 AND execution_state = 'queued'",
             [&assignment_id],
         )?;
         if acquired == 0 {

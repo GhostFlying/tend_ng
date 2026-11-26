@@ -3,7 +3,7 @@ use anyhow::Result;
 use protocol::{HandoffPhase, HandoffProof, RunnerProfile};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
-use std::ops::RangeInclusive;
+use std::{ops::RangeInclusive, path::Path};
 
 pub fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -20,6 +20,55 @@ pub fn migrate(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub fn migrate_slot_budget(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE runner_replacements ADD COLUMN slot_budget INTEGER NOT NULL DEFAULT 0;
+         ALTER TABLE runner_replacements ADD COLUMN occupied_slots INTEGER NOT NULL DEFAULT 0;
+         UPDATE runner_replacements SET slot_budget = coalesce((
+             SELECT json_extract(profile, '$.slot_limit') FROM runners WHERE id = predecessor
+         ), 0);
+         UPDATE runner_replacements SET occupied_slots = slot_budget;
+         CREATE VIEW runner_handoff_limits AS
+           SELECT successor, min(slot_budget - occupied_slots) AS limit_slots
+           FROM runner_replacements WHERE drained_at IS NULL AND retired_at IS NULL
+           GROUP BY successor;",
+    )?;
+    Ok(())
+}
+
+pub fn note_drain_slots(db: &Connection, runner: &str, occupied: u32) -> Result<()> {
+    // A fenced predecessor cannot reserve a new Run. Replayed or older
+    // snapshots cannot take slots back from the successor.
+    db.execute(
+        "UPDATE runner_replacements SET occupied_slots = ?2
+         WHERE predecessor = ?1 AND drained_at IS NULL AND occupied_slots > ?2",
+        params![runner, occupied],
+    )?;
+    Ok(())
+}
+
+pub fn execution_slot_limit(db: &Connection, profile: &RunnerProfile) -> Result<Option<u32>> {
+    if !profile.handoff_slots {
+        return Ok(None);
+    }
+    let shared = db
+        .query_row(
+            "SELECT limit_slots FROM runner_handoff_limits WHERE successor = ?1",
+            [&profile.runner_id],
+            |row| row.get::<_, u32>(0),
+        )
+        .optional()?;
+    Ok(Some(profile.slot_limit.min(shared.unwrap_or(u32::MAX))))
+}
+
+pub fn drain_acknowledged(db: &Connection, runner: &str) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM runner_replacements WHERE predecessor = ?1 AND drained_at IS NOT NULL)",
+        [runner],
+        |row| row.get(0),
+    )?)
+}
+
 pub fn drain_target(db: &Connection, runner: &str) -> Result<Option<String>> {
     Ok(db.query_row("SELECT successor FROM runner_replacements WHERE predecessor = ?1 AND retired_at IS NULL",
                     [runner], |row| row.get(0)).optional()?)
@@ -31,6 +80,7 @@ pub fn note_drained(db: &Connection, runner: &str) -> Result<()> {
          WHERE predecessor = ?1 AND drained_at IS NULL
            AND NOT EXISTS(SELECT 1 FROM artifacts WHERE runner_id = ?1 AND available = 0)
            AND NOT EXISTS(SELECT 1 FROM workspace_reclaims WHERE runner_id = ?1 AND receipt IS NULL)
+           AND NOT EXISTS(SELECT 1 FROM runner_assignments WHERE runner_id = ?1 AND state = 'issued')
            AND NOT EXISTS(SELECT 1 FROM tasks t JOIN runner_assignments a ON a.id = t.current_assignment
                   WHERE a.runner_id = ?1 AND t.status NOT IN ('completed','failed','cancelled'))",
         [runner],
@@ -161,7 +211,12 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
 }
 
 impl Store {
-    pub fn replace_runner(&mut self, old: &str, new: &str) -> Result<Option<Value>> {
+    pub fn replace_runner(
+        &mut self,
+        old: &str,
+        new: &str,
+        predecessor_workspace_root: Option<&str>,
+    ) -> Result<Option<Value>> {
         if old == new {
             return Ok(None);
         }
@@ -180,7 +235,13 @@ impl Store {
                 .map(|(raw, protocol)| Ok((serde_json::from_str(&raw)?, protocol)))
                 .transpose()
         };
-        let existing = drain_target(&tx, old)?;
+        let existing: Option<String> = tx
+            .query_row(
+                "SELECT successor FROM runner_replacements WHERE predecessor = ?1",
+                [old],
+                |row| row.get(0),
+            )
+            .optional()?;
         if existing.is_some() {
             return Ok((existing.as_deref() == Some(new))
                 .then(|| json!({"predecessor":old,"successor":new})));
@@ -190,24 +251,37 @@ impl Store {
         else {
             return Ok(None);
         };
+        let workspace = predecessor
+            .workspace_root
+            .as_deref()
+            .or(predecessor_workspace_root);
         if new_protocol < old_protocol
             || predecessor.host_id != successor.host_id
-            || predecessor.workspace_root.is_none()
-            || predecessor.workspace_root != successor.workspace_root
-            || drain_target(&tx, new)?.is_some()
+            || !workspace.is_some_and(|path| Path::new(path).is_absolute())
+            || workspace != successor.workspace_root.as_deref()
+            || tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runner_replacements
+                     WHERE predecessor = ?2 OR successor = ?2 OR (successor = ?1 AND retired_at IS NULL))
+                 OR EXISTS(SELECT 1 FROM runner_assignments a
+                     WHERE a.runner_id = ?2 AND a.state IN ('issued','accepted'))
+                 OR ?3 > 0",
+                params![old, new, successor.running_slots],
+                |row| row.get::<_, bool>(0),
+            )?
         {
             return Ok(None);
         }
         tx.execute(
-            "INSERT INTO runner_replacements(predecessor, successor) VALUES (?1, ?2)",
-            params![old, new],
+            "INSERT INTO runner_replacements(predecessor, successor, slot_budget, occupied_slots)
+             VALUES (?1, ?2, ?3, ?3)",
+            params![old, new, predecessor.slot_limit],
         )?;
         tx.execute(
             "UPDATE tasks SET current_assignment = NULL, status = 'awaiting_assignment'
-             WHERE current_assignment IN (SELECT id FROM runner_assignments WHERE runner_id = ?1 AND state = 'reserved')",
-            [old],
+             WHERE current_assignment IN (SELECT id FROM runner_assignments WHERE runner_id IN (?1, ?2) AND state = 'reserved')",
+            params![old, new],
         )?;
-        tx.execute("UPDATE runner_assignments SET state = 'revoked' WHERE runner_id = ?1 AND state = 'reserved'", [old])?;
+        tx.execute("UPDATE runner_assignments SET state = 'revoked' WHERE runner_id IN (?1, ?2) AND state = 'reserved'", params![old, new])?;
         super::board::commit(tx)?;
         Ok(Some(json!({"predecessor":old,"successor":new})))
     }
@@ -215,15 +289,25 @@ impl Store {
     pub fn runner_instances(&self) -> Result<Vec<Value>> {
         let mut query = self.db.prepare(
             "SELECT r.profile, r.protocol, r.last_seen, p.successor, p.drained_at, p.retired_at,
-                    r.last_seen > unixepoch() - ?1
-             FROM runners r LEFT JOIN runner_replacements p ON p.predecessor = r.id ORDER BY r.host_id, r.id",
+                    r.last_seen > unixepoch() - ?1, l.limit_slots
+             FROM runners r LEFT JOIN runner_replacements p ON p.predecessor = r.id
+             LEFT JOIN runner_handoff_limits l ON l.successor = r.id ORDER BY r.host_id, r.id",
         )?;
         query.query_map([super::runner::FRESH_SECONDS], |row| Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?, row.get::<_, i64>(2)?,
-            row.get::<_, Option<String>>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?, row.get::<_, bool>(6)?)))?
+            row.get::<_, Option<String>>(3)?, row.get::<_, Option<i64>>(4)?, row.get::<_, Option<i64>>(5)?,
+            row.get::<_, bool>(6)?, row.get::<_, Option<u32>>(7)?)))?
             .map(|entry| {
-                let (profile, protocol, last_seen, successor, drained_at, retired_at, online) = entry?;
-                Ok(json!({"profile":serde_json::from_str::<Value>(&profile)?, "protocol":protocol,
-                          "last_seen":last_seen,"online":online,"successor":successor,"drained_at":drained_at,"retired_at":retired_at}))
+                let (profile, protocol, last_seen, successor, drained_at, retired_at, online, shared) = entry?;
+                let profile: Value = serde_json::from_str(&profile)?;
+                let slot_limit = profile["slot_limit"].as_u64().unwrap_or(0);
+                let execution_slot_limit = match shared {
+                    Some(limit) if profile["handoff_slots"] == true => slot_limit.min(u64::from(limit)),
+                    Some(_) => 0,
+                    None => slot_limit,
+                };
+                Ok(json!({"profile":profile, "protocol":protocol,
+                          "last_seen":last_seen,"online":online,"successor":successor,"drained_at":drained_at,"retired_at":retired_at,
+                          "execution_slot_limit":execution_slot_limit}))
             }).collect()
     }
 
@@ -269,5 +353,96 @@ impl Store {
                 }))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    fn register(store: &Store, id: &str, slots: u32, standby: bool) -> Result<RunnerProfile> {
+        let profile = RunnerProfile {
+            runner_id: id.into(),
+            host_id: "host".into(),
+            repos: Vec::new(),
+            agents: Vec::new(),
+            slot_limit: slots,
+            running_slots: 0,
+            available_for_assignment: slots,
+            inspect_url: None,
+            workspace_root: Some("/workspace".into()),
+            standby,
+            shared_reviews: true,
+            handoff_slots: true,
+        };
+        store.db.execute(
+            "INSERT INTO runners (id, host_id, profile, last_seen, protocol)
+             VALUES (?1, 'host', ?2, unixepoch(), 2)",
+            params![id, serde_json::to_string(&profile)?],
+        )?;
+        Ok(profile)
+    }
+
+    #[test]
+    fn budget_is_frozen_and_released_monotonically_until_drain() -> Result<()> {
+        let mut store = Store::initialize(Path::new(":memory:"))?;
+        register(&store, "old", 3, false)?;
+        let new = register(&store, "new", 5, true)?;
+        register(&store, "third", 5, true)?;
+        assert!(store.replace_runner("old", "new", None)?.is_some());
+        assert!(store.replace_runner("old", "new", None)?.is_some());
+        assert!(store.replace_runner("old", "third", None)?.is_none());
+        assert!(store.replace_runner("new", "third", None)?.is_none());
+        assert!(store.replace_runner("third", "new", None)?.is_none());
+        assert!(!store.retire_runner("old")?);
+        assert_eq!(execution_slot_limit(&store.db, &new)?, Some(0));
+        store.db.execute(
+            "UPDATE runners SET profile = json_set(profile,'$.slot_limit',12) WHERE id = 'old'",
+            [],
+        )?;
+        note_drain_slots(&store.db, "old", 1)?;
+        assert_eq!(execution_slot_limit(&store.db, &new)?, Some(2));
+        note_drain_slots(&store.db, "old", 2)?;
+        assert_eq!(execution_slot_limit(&store.db, &new)?, Some(2));
+        note_drain_slots(&store.db, "old", 0)?;
+        assert_eq!(execution_slot_limit(&store.db, &new)?, Some(3));
+        assert!(!drain_acknowledged(&store.db, "old")?);
+        note_drained(&store.db, "old")?;
+        assert_eq!(execution_slot_limit(&store.db, &new)?, Some(5));
+        assert!(drain_acknowledged(&store.db, "old")?);
+        assert!(store.retire_runner("old")?);
+        assert!(store.retire_runner("old")?);
+        assert!(store.replace_runner("old", "new", None)?.is_some());
+        assert!(store.replace_runner("new", "third", None)?.is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_budget_migration_reserves_unknown_occupancy() -> Result<()> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE runners(id TEXT, profile TEXT);
+             CREATE TABLE runner_replacements(predecessor TEXT, successor TEXT, drained_at INTEGER, retired_at INTEGER);
+             INSERT INTO runners VALUES ('old', '{\"slot_limit\":3}'), ('prior', '{\"slot_limit\":4}');
+             INSERT INTO runner_replacements VALUES ('old','new',NULL,NULL), ('prior','old',1,2);",
+        )?;
+        migrate_slot_budget(&db)?;
+        assert_eq!(
+            db.query_row(
+                "SELECT slot_budget, occupied_slots FROM runner_replacements WHERE predecessor = 'old'",
+                [],
+                |row| Ok((row.get::<_, u32>(0)?, row.get::<_, u32>(1)?)),
+            )?,
+            (3, 3)
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT successor, limit_slots FROM runner_handoff_limits",
+                [],
+                |row| { Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?)) }
+            )?,
+            ("new".to_owned(), 0)
+        );
+        Ok(())
     }
 }

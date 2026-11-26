@@ -341,6 +341,9 @@ mod tests {
          DROP TABLE discussion_references;
          DROP TABLE discussions;
          DROP TABLE web_sessions;
+             DROP VIEW runner_handoff_limits;
+             ALTER TABLE runner_replacements DROP COLUMN occupied_slots;
+             ALTER TABLE runner_replacements DROP COLUMN slot_budget;
              DROP TABLE issue_attention_replies;
              DROP TABLE report_revision_receipts;
              DROP TABLE report_revisions;

@@ -26,6 +26,9 @@ for binary in "$staging/bin/"*; do
     fi
 done
 
+install -m 755 scripts/tend-runner-upgrade "$staging/bin/"
+test -x "$staging/bin/tend-runner-upgrade"
+
 tar -czf "$output/$name.tar.gz" -C "$staging" bin web REVISION
 cd "$output"
 sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"

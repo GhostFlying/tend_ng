@@ -38,4 +38,8 @@ pub struct HandoffProof {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct ReplaceRunner {
     pub successor: String,
+    // For an older configuration that used the Runner DB's adjacent .runs
+    // directory. Explicitly asserted by the same-host upgrade operator.
+    #[serde(default)]
+    pub predecessor_workspace_root: Option<String>,
 }

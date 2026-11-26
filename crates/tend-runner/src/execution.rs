@@ -27,7 +27,7 @@ use std::{
 pub struct Runtime {
     pub proposal_approval: Arc<AtomicBool>,
     pub root: PathBuf,
-    pub artifacts: PathBuf,
+    pub artifacts: crate::artifacts::Transfer,
     pub program: OsString,
     pub args: Vec<OsString>,
 }
@@ -55,13 +55,8 @@ pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtim
                     }
                 }
             }
-            let limit = if store.is_draining()? {
-                0
-            } else {
-                config.slot_limit as usize
-            };
-            for _ in active.len()..limit {
-                let Some(run) = store.next_queued_run()? else {
+            for _ in active.len()..config.slot_limit as usize {
+                let Some(run) = store.next_queued_run(config.slot_limit)? else {
                     break;
                 };
                 candidates.push(run);
@@ -214,39 +209,29 @@ fn native_context(
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
     let is_review = run.assignment.review.is_some();
-    let started = config
-        .native_agent(&run.assignment)
-        .and_then(|agent| {
-            let app_server = agent.app_server.as_ref().map(|id| &config.app_servers[id]);
-            let directory = if is_review {
-                workspace::verify_review(&runtime.root, run, &config.repos)
-            } else {
-                workspace::prepare(&runtime.root, run)
-            }
-            .context("prepare Tend workspace")?;
-            Ok((agent, app_server, directory))
-        })
-        .and_then(|(agent, app_server, directory)| {
-            let artifact = if let Some(file) = run
-                .assignment
-                .review
-                .as_ref()
-                .and_then(|review| review.candidate.strip_prefix("artifact:"))
-            {
-                anyhow::ensure!(protocol::valid_id(file), "invalid review artifact");
-                let path = runtime.artifacts.canonicalize()?.join(file);
-                anyhow::ensure!(
-                    path.canonicalize().ok().as_ref() == Some(&path) && path.is_file(),
-                    "immutable review artifact is missing from this Runner"
-                );
-                Some(path)
-            } else {
-                None
-            };
-            Ok((directory, agent, app_server, artifact))
-        });
+    let started = config.native_agent(&run.assignment).and_then(|agent| {
+        let app_server = agent.app_server.as_ref().map(|id| &config.app_servers[id]);
+        let directory = if is_review {
+            workspace::verify_review(&runtime.root, run, &config.repos)
+        } else {
+            workspace::prepare(&runtime.root, run)
+        }
+        .context("prepare Tend workspace")?;
+        Ok((agent, app_server, directory))
+    });
+    let started = started.and_then(|(agent, app_server, directory)| {
+        let artifact = run
+            .assignment
+            .review
+            .as_ref()
+            .and_then(|review| review.candidate.strip_prefix("artifact:"))
+            .map(|id| runtime.artifacts.review_file(id))
+            .transpose()?;
+        Ok((directory, agent, app_server, artifact))
+    });
     let (cwd, agent, app_server, artifact) = match started {
-        Ok(started) => started,
+        Ok((_, _, _, Some(None))) => return store.retry_resume(&run.id),
+        Ok((cwd, agent, app_server, artifact)) => (cwd, agent, app_server, artifact.flatten()),
         Err(error) => {
             if let Some(thread) = &run.resume_guard {
                 return store.defer_active_resume(&run.id, thread);
@@ -366,7 +351,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 store,
                 run,
                 cwd: &cwd,
-                artifacts: &runtime.artifacts,
+                artifacts: &runtime.artifacts.root,
                 proposal_approval: &runtime.proposal_approval,
                 branches: &branches,
                 config,

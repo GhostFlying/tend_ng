@@ -175,6 +175,8 @@ pub fn artifact_path(id: &str) -> String {
     format!("/api/v1/artifacts/{id}")
 }
 
+pub const ARTIFACT_BYTES_HEADER: &str = "X-Tend-Artifact-Bytes";
+
 pub fn artifact_upload_path(runner: &str, id: &str) -> String {
     format!("/api/v1/runners/{runner}/artifacts/{id}")
 }

@@ -427,11 +427,15 @@ fn handle(store: &mut Store, request: &mut Request, router: &Value) -> Result<(u
             return Ok(api_error(400, "valid successor Runner ID required"));
         }
         return Ok(
-            match store.replace_runner(&runner, &replacement.successor)? {
+            match store.replace_runner(
+                &runner,
+                &replacement.successor,
+                replacement.predecessor_workspace_root.as_deref(),
+            )? {
                 Some(receipt) => (200, receipt),
                 None => api_error(
                     409,
-                    "replacement requires two live Runners on the same Host with the same workspace root",
+                    "replacement requires two live Runners on the same Host with the same workspace root, an unused successor and no unfinished incoming replacement",
                 ),
             },
         );

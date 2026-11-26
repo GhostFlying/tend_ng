@@ -24,6 +24,7 @@
 - 待安排 Issue 保存意图，尚未创建执行 Task。开始后进入待推进。看板以顶层 Issue 树的事实分列，有实际 Run 时显示进行中，有可安排工作或可处理输入时显示待推进，整棵树只等已登记的条件或回复时显示等待中。已完成与已取消沿业务终态展示。人工检查通过原 Chat 的 Attention 处理，卡片显示待你决定。 [看板阶段](docs/plans/issue-board-phases.md)
 - Server 和 Runner 各自运行和持久化。已领取任务可以离线推进，按原 Task、Run 和操作身份全量对账或增量同步。工具写操作先在执行实例持久受理。业务状态、操作结果与待投递记录在所属实例的同一短事务提交，响应丢失时沿原身份查证。 [同步 API](docs/server-runner.md#一期同步-api) · [写入与故障边界](docs/storage.md#写入与故障边界)
 - 按实际停妥证据归还 slot。原 Task 在 `waitfor` 期间继续独占 workspace。绑定审阅只在作者 Run 实际停妥后复用原目录，审阅 Run 停妥后作者才续跑。每一层的 `waitfor` 命中后，经负责原 Task 接续的 Runner 直接送给登记等待的 Agent。同 Host 接替时，前驱负责旧 Run 停妥，后继取得接续权后可在原 workspace 启动下一次 Run。 [等待与续跑](docs/task-lifecycle.md#命中事件与续跑) · [同机 Run 交接](docs/server-runner.md#同机接替时的-run-交接)
+- Runner 常规升级默认使用 main-build 的 `bin/tend-runner-upgrade` 同机接替。两代共用 Server 持久记录的前驱原 slot 预算，前驱自然停妥并实际退出后再退役。用同一 Runner ID 和库重启只用于本机恢复。 [常规升级](README.md#runner-常规升级默认同机新旧代交接)
 
 - GitHub PR / CI 由 Server 使用自己的只读权限采集。Runner 管理本机仓库与 Git 访问。采集范围来自已关联或明确登记的对象。 [外部事实](docs/design.md#pr-和-ci-事实的采集与投递)
 

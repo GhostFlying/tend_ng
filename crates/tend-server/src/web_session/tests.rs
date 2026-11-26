@@ -134,13 +134,16 @@ fn upgrades_v29_without_recreating_the_issue_attention_reply_table() -> Result<(
     let path = db.path();
     drop(Store::initialize(&path)?);
     let sql = Connection::open(&path)?;
-    // Model a stored v29 database by removing only the v30 table.
+    // Roll back later schemas without recreating the v29 reply table.
     sql.execute_batch(
         "DROP TABLE discussion_handoffs;
          DROP TABLE discussion_drafts;
          DROP TABLE discussion_references;
          DROP TABLE discussions;
          DROP TABLE web_sessions;
+         DROP VIEW runner_handoff_limits;
+         ALTER TABLE runner_replacements DROP COLUMN occupied_slots;
+         ALTER TABLE runner_replacements DROP COLUMN slot_budget;
          PRAGMA user_version = 29;",
     )?;
     let reply_schema = |db: &Connection| {

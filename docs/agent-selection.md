@@ -18,7 +18,7 @@
 
 **已确认。** Router 在顶层派发时带上已经明确必需的 repo 和 capability。Server 在提供 `issue-router` 的 Runner 中筛选同时能访问全部所需 repo、且具备对应工作配置的候选。`image_gen` 等工作能力按该 Runner 上符合用途的具名 Agent 配置核对。例如工作需要 repo X 和 Y，Runner B 能同时访问两仓并有合适的配置，就可以成为候选。
 
-对于未显式指定 Runner、没有前序 Task 或既有 Runner 归属的顶层 Issue 首次派发，Server 在满足全部资格的候选中选占用比例最低的 Runner。占用数等于最新上报的 `slot_limit - available_for_assignment`，再加上 Server 尚未收到领取结论的 `reserved` 和 `issued` 分配数。以 `slot_limit` 为分母。预留数达到上报的可接单容量时，该 Runner 不参与首次派发。
+对于未显式指定 Runner、没有前序 Task 或既有 Runner 归属的顶层 Issue 首次派发，Server 在满足全部资格的候选中选占用比例最低的 Runner。占用数等于最新上报的 `slot_limit - available_for_assignment`，再加上 Server 尚未收到领取结论的 `reserved` 和 `issued` 分配数。分母通常为 `slot_limit`，接替期间使用 Server 当前授予后继的执行上限。占用数达到执行上限时，该 Runner 不参与首次派发。
 
 比例相同时，优先选择最久未获此类自动预分配的 Runner。没有这类记录时优先，仍并列才按 Runner ID。轮换顺序与预分配同一事务持久化，跨 Server 重启保留。显式指定 Runner、子 Issue、已绑定接续和交接不参与轮换，继续沿原选择和归属调度。
 

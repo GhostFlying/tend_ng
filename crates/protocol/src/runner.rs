@@ -82,6 +82,8 @@ pub struct RunnerProfile {
     pub standby: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub shared_reviews: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub handoff_slots: bool,
 }
 
 impl RunnerProfile {
@@ -166,6 +168,10 @@ pub struct RunnerSync {
     pub protocol: u32,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub drained: bool,
+    // Present only after the local drain fence is installed. Counts prepared,
+    // running and recovering executions until they actually settle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_active_slots: Option<u32>,
     pub profile: RunnerProfile,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reclaim_receipts: Vec<crate::WorkspaceReclaimReceipt>,
@@ -178,6 +184,10 @@ pub struct RunnerSync {
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSyncReply {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub execution_slot_limit: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_acknowledged: Option<bool>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub proposal_approval: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

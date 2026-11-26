@@ -12,6 +12,9 @@ root = Path(sys.argv[1])
 mode = sys.argv[2]
 fallback = mode in {"fallback", "workspace-missing", "workspace-replaced"}
 two_rounds = mode in {"resume", "review-missing", "review-unknown", "replacement"}
+artifact_handoff = mode == "artifact-replacement"
+candidate_text = "Initial candidate\n" * (4096 if artifact_handoff else 1)
+workspace_text = "Worktree changed after snapshot\n" if artifact_handoff else candidate_text
 
 
 def gate(name):
@@ -139,7 +142,11 @@ elif model == "fixture-reviewer":
         path = Path(context["bound_review_artifact"])
         assert path.is_absolute() and not path.is_relative_to(author_cwd)
         assert path.name == binding["candidate"].removeprefix("artifact:")
-        assert path.read_text() == "Initial candidate\n"
+        assert path.read_text() == candidate_text
+        if artifact_handoff:
+            assert assignment["placement"]["runner_id"] == "next-runner"
+            assert path.parent == root / "next.artifacts"
+            assert Path("repos/example/guide.txt").read_text() == workspace_text
     else:
         assert inputs[0]["kind"] == "review_requested"
         assert inputs[0]["review"] == binding
@@ -191,9 +198,11 @@ elif not inputs:
         assert not assignment.get("workspace_key") and Path.cwd().name == assignment["parent_issue_id"]
     (root / "author-cwd").write_text(cwd)
     guide = Path("guide.txt" if fallback else "repos/example/guide.txt")
-    guide.write_text("Initial candidate\n")
+    guide.write_text(candidate_text)
     tool("tend_post_issue_message", {"text": "Initial candidate is ready for review."}, "post")
     file = tool("tend_submit_artifact", {"path": str(guide)}, "file")
+    if artifact_handoff:
+        guide.write_text(workspace_text)
     if mode == "drift":
         assert Path(os.environ["CODEX_HOME"]) == root / "author-codex-old"
         (root / "author-before-review").touch()
@@ -222,7 +231,7 @@ else:
     else:
         assert review["result"]["evidence"] == "Line one should include an example."
         guide = Path("guide.txt" if fallback else "repos/example/guide.txt")
-        assert guide.read_text() == "Initial candidate\n"
+        assert guide.read_text() == workspace_text
         if mode in {"missing", "broken", "drift"}:
             assert not reused
             if mode == "drift":
@@ -231,7 +240,7 @@ else:
                 assert turn["params"]["effort"] == "low"
             assert any(op["action"]["kind"] == "request_review"
                        for op in context["recovery"]["prior_receipts_recent_first"])
-        elif mode == "replacement":
+        elif mode in {"replacement", "artifact-replacement"}:
             assert not reused and assignment["placement"]["runner_id"] == "next-runner"
         else:
             assert reused

@@ -6,7 +6,7 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 **已确认。** Host 是运行 Runner 的部署主机，使用稳定的 `host_id`。Runner 是独立持有本地数据和执行状态的实例，使用稳定的 `runner_id`，登记时关联所属 `host_id`。一个 Host 可同时登记多个 Runner。Server 可以按 Host 列出各 Runner 的 ID、版本、最近联系和可用容量，派发、控制、工作归属和同步按实际 Runner 记录。两种身份都独立于地址和通道。 [通信通道与独立升级](#通信通道与独立升级)
 
-普通重启或本机顺序升级时，Runner 沿自己的本地库和 `runner_id` 接续。同机并行接替时，前驱和后继以各自的 `runner_id` 登记在同一个 Host 下，分别持有本地执行记录。Run 按实际执行的 Runner 查证，workspace 占用沿原 Task 保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
+本机恢复时，Runner 沿自己的本地库和 `runner_id` 接续。常规升级默认同机接替，前驱和后继以各自的 `runner_id` 登记在同一个 Host 下，分别持有本地执行记录。Run 按实际执行的 Runner 查证，workspace 占用沿原 Task 保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
 
 ## 通信通道与独立升级
 
@@ -14,11 +14,11 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 **外置 tsnet。** Go 通信进程独立持有节点状态，负责入网、监听、拨号和转发。它独立于 Rust 业务进程发布和重启。鉴权与业务协议由 Server 和 Runner 的 API 处理，Server 按 `runner_id` 查询对应的执行端点。 [独立 tsnet 进程](engineering.md#独立-tsnet-进程)
 
-**本机顺序替换。** 一期 Server 与 Runner 独立更新，允许短暂断线。Server 重启期间，已领取的工作由原 Runner 本地推进。Runner 更新时暂停接单，待本机活跃执行可停妥或接续后替换，排队、`waitfor` 和待同步记录从原本地库恢复。顺序替换使用一条可用通道即可恢复同步。
+**独立更新与本机恢复。** Server 重启期间，已领取的工作由原 Runner 本地推进。Runner 常规升级使用目标 main-build 中的 `bin/tend-runner-upgrade`。新代从前驱配置派生，继承同一个 workspace 根和 Host，使用独立身份和本地库。只在同一实例本机恢复时原位重启，从原本地库恢复排队、`waitfor` 和待同步记录。 [部署步骤](../README.md#runner-常规升级默认同机新旧代交接)
 
 **同机并行接替的部署要求。** 前驱仍运行时，前驱和后继须能分别向同一 Server 鉴权和同步，各自保有可查询的 Runner 端点。两代可共用外置 tsnet 通道。禁止把新协议 Runner 接替到旧协议 Runner。接替期间的原执行和 workspace 占用沿原领取证据确认。
 
-**自然退役。** 前驱在原 Run 停妥、未完成 Task 的接续已交接、待回传记录收齐后自然退出。Server 确认原进程退出后登记退役，移出其升代预检范围。原 Runner 的数据和 workspace 按既有保留规则保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
+**自然退役。** 前驱在原 Run 停妥、未完成 Task 的接续已交接、待回传记录收齐后自然退出。Server 持久确认 drain，升级入口在本机验证前驱进程实际退出及后继可用后调用 `runner retire`，移出其升代预检范围。手工调用 retire 时仍由操作者核对实际退出。原 Runner 的数据和 workspace 按既有保留规则保存。 [同机接替时的 Run 交接](#同机接替时的-run-交接)
 
 ### Server 升级兼容窗口
 
@@ -74,6 +74,10 @@ Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner �
 
 **已确认。** Run 边界的交接用于同一个 `host_id` 上已确定的新旧 Runner 接替。切换接单后，后继接新顶层 Issue 和已接替 Issue 树的后续派发。旧派发的领取结果待确认时先沿原分配查证。 [并行接替的 Issue 归属](design-questions.md#并行接替的-issue-归属)
 
+**共享执行预算。** replace 原子记录前驱当时的 `slot_limit`，后继在前驱安装本地 drain 栅栏前没有新执行额度。此后前驱只上报仍占用的 Run slot（包含准备启动、执行和恢复确认中的 Run），Server 按已证实释放的额度单调增加后继预算，取其与后继自身配置的较小值。后继持久保存 Server 下发的上限，在创建本地 Run 时检查，已领取任务或唤醒中的 Task 都不能绕过。Server 重启和 Runner 重连不重新计算原预算。前驱 drain 入账后恢复后继配置的完整预算。普通 `running_slots` 仍只统计实际已启动的进程。
+
+预算只绑定这对接替关系，同 Host 上其他 Runner 仍按各自的 `slot_limit` 独立调度。新旧字段在原 v1/v2 窗口内可选。没有 drain slot 上报的旧前驱占满预算直到 drain 入账。不能执行动态上限的旧后继在前驱 drain 前不收新派发。升级到此版 Server 前宜先收尾已由旧版 Server 登记的接替，已被旧二进制领取的工作无法追溯撤销。手工 replace 同样不能串起尚未退役的第三代，也不能用已经收过派发的 Runner 作新代。
+
 已启动的 Run 由前驱执行到停妥。已领取的 Task 需要继续时，前驱在确认本次执行停妥或尚未启动后，持久交出后续执行权，经普通同步提交给 Server。接续记录携带原 Owner、目录绑定、待处理输入、等待条件及开工所需的回执。后继持久领取后接续原 Task 的待执行或等待状态，实际启动时使用新 Run 和已有的 workspace。处于 `waitfor` 的 Task 可以在条件命中前完成交接，目录持续由原 Task 独占。 [命中事件与续跑](task-lifecycle.md#命中事件与续跑)
 
 交接期间到达的用户输入或等待命中沿原 Task 持久保存。接续生效后，后继按原身份消费仍待处理的输入。指定旧 Run 的控制、历史和回执沿原执行查证，原文件和回执仍由前驱独立回传。本次实现仅在原 Runner 的原分配中复用 thread。换 Runner 后沿原 Issue、Task、待处理输入和交接回执开新 session，不把原生会话转移作为接续前提。 [原生接续调研](design-questions.md#run-边界更换-runner-的调研)
@@ -112,7 +116,7 @@ Server 首次返回任务前，在同一个短事务中确认分配仍可投递�
 
 Runner 以实际目录路径判定独占。`waitfor` 等待及待续跑期间，原 Task 继续独占该目录。绑定审阅按作者分配解析同一个目录，依次取 `workspace_key`、父 Issue，或 `tasks/<author_task_id>`。即使 slot 已满，合格的同 Runner 审阅也可先进入本地队列。确认作者停妥后，队列允许绑定 Reviewer 取得原目录，普通目录竞争者继续等待。PR/CI 等待的保留锁不能被 Reviewer 绕过。Reviewer 停妥前，作者不能重新取得目录。
 
-Reviewer 验证作者原目录和 Git 挂载，从对象库按完整 SHA 读取候选，不新建 worktree、刷新或切换 HEAD。文件候选直接读取原 Runner 的不可变交付副本。目录、精确提交或原件缺失或无法确认时，沿原审阅 Task 报告准备失败，不从其他目录或远端补建。Task 结束后，Runner 根据实际退出或隔离证据释放占用。 [共享 worktree 的占用](design-questions.md#共享-worktree-的占用)
+Reviewer 验证作者原目录和 Git 挂载，从对象库按完整 SHA 读取候选，不新建 worktree、刷新或切换 HEAD。文件候选优先读取本机不可变交付副本。后继没有快照时，经 Server 既有交付下载接口按原 artifact ID 读取已登记的原件，校验长度后原子保存到自己的交付目录，从不使用可变 workspace 文件替代。文件暂时待上传或传输中断时，沿原准备中的 Run 重试。目录、精确提交或原件无法确认时，沿原审阅 Task 报告准备失败。Task 结束后，Runner 根据实际退出或隔离证据释放占用。 [共享 worktree 的占用](design-questions.md#共享-worktree-的占用)
 
 同机并行接替期间，两代 Runner 按同一份 workspace 占用事实准入。前驱仍在使用的目录继续由原 Task 独占。该 Task 交接后，后继以原占用接续，其他需要同一目录的 Task 继续排队。 [同机 Run 交接](#同机接替时的-run-交接)
 

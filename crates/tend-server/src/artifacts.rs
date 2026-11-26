@@ -97,13 +97,28 @@ fn handle(
             }
             let path = root.join(&id);
             match File::open(&path) {
-                Ok(file) => Ok(Response::from_file(file)
-                    .with_header(
-                        Header::from_bytes("Content-Type", "application/octet-stream").unwrap(),
-                    )
-                    .with_header(Header::from_bytes("Content-Disposition", "attachment").unwrap())
-                    .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
-                    .boxed()),
+                Ok(file) if file.metadata()?.len() == artifact.bytes => {
+                    Ok(Response::from_file(file)
+                        .with_header(
+                            Header::from_bytes("Content-Type", "application/octet-stream").unwrap(),
+                        )
+                        .with_header(
+                            Header::from_bytes("Content-Disposition", "attachment").unwrap(),
+                        )
+                        .with_header(Header::from_bytes("Cache-Control", "no-store").unwrap())
+                        .with_header(
+                            Header::from_bytes(
+                                protocol::ARTIFACT_BYTES_HEADER,
+                                artifact.bytes.to_string(),
+                            )
+                            .unwrap(),
+                        )
+                        .boxed())
+                }
+                Ok(_) => Ok(error_response(
+                    422,
+                    "Delivery file differs from its registered length",
+                )),
                 Err(error) if error.kind() == ErrorKind::NotFound => {
                     Ok(error_response(409, "Delivery file is pending restoration"))
                 }

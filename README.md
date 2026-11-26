@@ -31,6 +31,7 @@ In a second shell, create `.local/runner/config.json`. Replace the example repos
   "runner_id": "development-runner",
   "host_id": "development-host",
   "slot_limit": 2,
+  "workspace_root": "/path/to/runner/workspaces-root",
   "repos": [
     { "id": "example", "path": "/path/to/local/clone", "default_branch": "main" }
   ],
@@ -87,7 +88,33 @@ target/release/tend chat read main
 target/release/tend --help
 ```
 
-Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach. For parallel replacement on the same Host, give both Runners the same absolute `workspace_root` and `host_id`, plus distinct Runner IDs and database files.
+Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach.
+
+## Runner 常规升级（默认同机新旧代交接）
+
+先让 Server 使用支持共享接替预算的版本，再把目标 [main-build](https://github.com/GhostFlying/tend_ng/releases/tag/main-build) 归档解压到本机版本目录。保留归档的 `bin/` 和 `REVISION`，不要覆盖前驱正在使用的文件。用与前驱相同的 Linux 用户、PID 命名空间和服务环境运行以下入口（需要 Python 3.9+）。保持前驱运行。若由服务管理器启动，确保它不会在前驱正常退出后重启旧代。
+
+若前驱用 systemd 管理，升级前用 `systemctl edit <旧 unit>` 加以下 drop-in，再执行 `systemctl daemon-reload`。用户级 unit 在两条命令中都加 `--user`。不要因此重启正在运行的前驱。旧 unit 的 `Restart=always` 会在 drain 正常退出后再次拉起旧代。退役后将旧 unit 移出自动启动，避免主机重启时再启动旧代。
+
+```ini
+[Service]
+Restart=on-failure
+```
+
+```sh
+export TEND_URL=http://127.0.0.1:8832
+# 在现有服务环境中加载 TEND_TOKEN、CODEX_HOME 和 launcher 所需的环境变量。
+/path/to/extracted-main-build/bin/tend-runner-upgrade \
+  --config /path/to/current/runner.json --db /path/to/current/runner.sqlite
+```
+
+如果前驱配置了 `inspect`，同一命令加上 `--inspect-listen <后继监听地址>` 和 `--inspect-url <Server 可达的后继 HTTP 地址>`，两者都不要占用前驱端点。脚本从前驱派生配置，保留 Host、repo、Agent、工作目录和启动参数，使用独立 ID 与 SQLite 库。以前未配 `workspace_root` 的 Runner 沿用前驱实际使用的数据库旁 `.runs` 目录。
+
+脚本先核对前驱数据库的持久 Runner/Host 身份，再启动 standby、登记接替。两代重叠时共用前驱原有的 slot 预算，同 Host 其他 Runner 的额度不变。已启动的 Run 由前驱自然执行到停妥，未完成的 Task、待处理输入和 workspace 交给后继。确认前驱 drain 已入账、原进程已退出且后继在线后，脚本登记退役。没有待续任务时不人为派发验证任务。
+
+前驱库旁的 `<原库文件名>.upgrade/` 保存目标 REVISION、接替状态和 `runner.log`，后继配置和库以新 ID 命名并放在前驱库同一目录。失败或中断后，按提示排查并用同一归档和前驱路径重跑；不要删除这些文件或手改生成的配置。后继启动失败且尚未登记接替时，可以用新参数修正 inspection 端点。等待默认一小时，活跃 Run 尚未停妥时可用 `--timeout <秒>` 调整。命令不会停止任一 Runner，已登记的接替会继续生效。
+
+成功回执给出后继配置、数据库、启动目录和记录启动参数的本机状态文件。后继配置和数据库是下一次常规升级的输入。主机重启或同一 Runner 故障恢复时，用该代的原二进制、原参数、同一 Runner ID 和数据库启动。原位重启只用于这种本机恢复。保留旧库和 Codex 历史可按原 Run 身份查证；旧进程退出后，其在线 inspect 端点不再提供原生 rollout。
 
 ## Web sign-in over HTTPS
 

@@ -37,7 +37,10 @@ impl Store {
              );
              CREATE INDEX IF NOT EXISTS unsent_claims
                 ON received_assignments(acknowledged) WHERE acknowledged = 0;
-             CREATE INDEX IF NOT EXISTS local_assignments_by_task ON received_assignments(task_id);",
+             CREATE INDEX IF NOT EXISTS local_assignments_by_task ON received_assignments(task_id);
+             CREATE TABLE IF NOT EXISTS local_execution_limit (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), slots INTEGER NOT NULL
+             );",
         )?;
         run::create_tables(&tx)?;
         tx.execute_batch(
@@ -92,6 +95,17 @@ impl Store {
     }
 
     pub fn apply_sync(&mut self, config: &Config, reply: RunnerSyncReply) -> Result<()> {
+        let execution_limit = if let Some(slots) = reply.execution_slot_limit {
+            let saved: Option<u32> = self
+                .0
+                .query_row("SELECT slots FROM local_execution_limit", [], |row| {
+                    row.get(0)
+                })
+                .optional()?;
+            (saved != Some(slots)).then_some(slots)
+        } else {
+            None
+        };
         if reply.assignments.is_empty()
             && reply.confirmed_receipts.is_empty()
             && reply.confirmed_runs.is_empty()
@@ -101,6 +115,7 @@ impl Store {
             && reply.drain_to.is_none()
             && reply.workspace_reclaims.is_empty()
             && reply.confirmed_reclaims.is_empty()
+            && execution_limit.is_none()
         {
             return Ok(());
         }
@@ -110,6 +125,13 @@ impl Store {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(target) = &reply.drain_to {
             handoff::accept_drain(&tx, target)?;
+        }
+        if let Some(slots) = execution_limit {
+            tx.execute(
+                "INSERT INTO local_execution_limit VALUES (1, ?1)
+                 ON CONFLICT(singleton) DO UPDATE SET slots = excluded.slots",
+                [slots],
+            )?;
         }
         for id in reply.confirmed_reclaims {
             tx.execute(

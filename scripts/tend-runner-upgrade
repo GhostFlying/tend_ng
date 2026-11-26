@@ -1,0 +1,351 @@
+#!/usr/bin/env python3
+"""Replace a local Tend Runner with the Runner from this main-build archive."""
+
+import argparse
+from contextlib import closing
+import fcntl
+import json
+import os
+from pathlib import Path
+import re
+import sqlite3
+import subprocess
+import sys
+import tempfile
+import time
+import uuid
+
+DEFAULT_SERVER = "http://127.0.0.1:8832"
+
+
+class UpgradeError(Exception):
+    pass
+
+
+def require(condition, message):
+    if not condition:
+        raise UpgradeError(message)
+
+
+def publish(path, data):
+    with tempfile.NamedTemporaryFile(dir=path.parent, mode="w", delete=False) as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(data, stream, indent=2)
+            stream.flush()
+            os.fsync(stream.fileno())
+            os.replace(temporary, path)
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def ticks(pid):
+    try:
+        fields = (Path("/proc") / str(pid) / "stat").read_text().rsplit(")", 1)[1].split()
+        return None if fields[0] in {"Z", "X"} else fields[19]
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+
+
+def find_runner(db, config):
+    candidates = []
+    for process in Path("/proc").iterdir():
+        if not process.name.isdecimal():
+            continue
+        try:
+            if process.stat().st_uid != os.geteuid():
+                continue
+            pid = int(process.name)
+            start = ticks(pid)
+            if start is None:
+                continue
+            exe = Path(os.readlink(process / "exe")).name.removesuffix(" (deleted)")
+            if exe != "tend-runner":
+                continue
+            args = [os.fsdecode(arg) for arg in (process / "cmdline").read_bytes().split(b"\0")[:-1]]
+            cwd = Path(os.readlink(process / "cwd"))
+            options = {}
+            native = []
+            persistent = True
+            for i in range(1, len(args), 2):
+                if args[i] in {"--once", "--reconcile"}:
+                    persistent = False
+                    break
+                if args[i] == "--app-server":
+                    native = args[i:]
+                    break
+                options[args[i]] = args[i + 1]
+            if not persistent or "--db" not in options or (cwd / options["--db"]).resolve() != db:
+                continue
+            require((cwd / options["--config"]).resolve() == config,
+                    f"PID {pid} uses this database with a different configuration")
+            if ticks(pid) == start:
+                candidates.append((pid, start, cwd, options, native))
+        except (FileNotFoundError, PermissionError, ProcessLookupError, IndexError):
+            continue
+    require(len(candidates) <= 1, f"More than one Runner process is opening {db}; retry after checking them")
+    return candidates[0] if candidates else None
+
+
+def inspection(prior, listen, url):
+    require(bool(listen) == bool(url), "Set --inspect-listen and --inspect-url together")
+    require(not prior or listen,
+            "The predecessor has inspect enabled; supply a distinct --inspect-listen and --inspect-url")
+    if listen:
+        require(listen != (prior or {}).get("listen")
+                and url.rstrip("/") != (prior or {}).get("url", "").rstrip("/"),
+                "The inspection listener and Server-facing URL must both be distinct")
+        return {"listen": listen, "url": url}
+    return None
+
+
+def predecessor_identity(db, source):
+    with closing(sqlite3.connect(db.as_uri() + "?mode=ro", uri=True)) as ledger:
+        identity = ledger.execute("SELECT runner_id, host_id FROM runner_instance WHERE singleton = 1").fetchone()
+    require(identity and identity == (source["runner_id"], source["host_id"]),
+            "Predecessor configuration does not match the Runner/Host identity saved in its database")
+    return identity
+
+
+def check_predecessor_process(process, db, server):
+    pid, start, _, _, _ = process
+    proc = Path("/proc") / str(pid)
+    expected = db.stat()
+    for fd in (proc / "fd").iterdir():
+        try:
+            if os.path.samestat(expected, fd.stat()):
+                break
+        except (FileNotFoundError, ProcessLookupError):
+            continue
+    else:
+        raise UpgradeError(f"Live predecessor PID {pid} does not have this database file open")
+    process_server = next((os.fsdecode(entry[9:]) for entry in
+                           (proc / "environ").read_bytes().split(b"\0")
+                           if entry.startswith(b"TEND_URL=")), DEFAULT_SERVER)
+    require(process_server.rstrip("/") == server, "TEND_URL differs from the live predecessor's Server")
+    require(ticks(pid) == start, "Predecessor process changed during verification; retry")
+
+
+def derive(runner, config, source, process, old, listen, url):
+    pid, _, cwd, options, _ = process
+    profile = old["profile"]
+    for key in ("runner_id", "host_id", "slot_limit"):
+        require(source[key] == profile[key], f"Live predecessor differs from its configuration in {key}")
+    require(source["slot_limit"] > 0, "The predecessor has no execution slots")
+    require((source.get("inspect") or {}).get("url") == profile.get("inspect_url"),
+            "Live predecessor differs from its configured inspection URL")
+    source["inspect"] = inspection(source.get("inspect"), listen, url)
+    configured = source.get("workspace_root")
+    if configured is not None:
+        workspace = (config.parent / configured).resolve()
+    else:
+        # Use the same path rule as the Runner, with the live process's
+        # original DB argument and cwd (not the canonical lock/ledger path).
+        query = subprocess.run([runner, "--default-workspace-root", options["--db"]],
+                               cwd=cwd, capture_output=True, text=True, timeout=10)
+        require(query.returncode == 0, f"Cannot resolve the predecessor's default workspace: {query.stderr.strip()}")
+        workspace = Path(json.loads(query.stdout)).resolve()
+    require(profile.get("workspace_root") == (str(workspace) if configured is not None else None),
+            f"PID {pid} does not use the expected workspace root")
+    source.update(runner_id=f"runner-{uuid.uuid4()}", standby=True, workspace_root=str(workspace))
+    for repo in source["repos"]:
+        repo["path"] = str(config.parent / repo["path"])
+    for app in source.get("app_servers", {}).values():
+        if "/" in app["program"]:
+            app["program"] = str(config.parent / app["program"])
+        if app.get("codex_home") is not None:
+            app["codex_home"] = str(config.parent / app["codex_home"])
+    return source
+
+
+def upgrade(args, bundle, revision, config, db, state_dir):
+    tend = bundle / "bin/tend"
+    server = os.environ.get("TEND_URL", DEFAULT_SERVER).rstrip("/")
+    require(os.environ.get("TEND_TOKEN"), "Set TEND_TOKEN in the Runner service environment")
+
+    def cli(*words):
+        result = subprocess.run([tend, "runner", *words], capture_output=True, text=True, timeout=10)
+        require(result.returncode == 0, result.stderr.strip() or f"tend runner {words[0]} failed")
+        return json.loads(result.stdout)
+
+    def runners():
+        return {row["profile"]["runner_id"]: row for row in cli("list")}
+
+    def result(state):
+        print(json.dumps({
+            "state": "retired", "predecessor": old_id, "successor": new_id,
+            "revision": revision, "config": str(next_config), "db": str(next_db),
+            "log": str(log), "cwd": state["cwd"], "journal": str(manifest),
+        }))
+
+    manifest = state_dir / "upgrade.json"
+    log = state_dir / "runner.log"
+    boot = Path("/proc/sys/kernel/random/boot_id").read_text().strip()
+    source = json.loads(config.read_text())
+    old_id, old_host = predecessor_identity(db, source)
+
+    def verify_predecessor(row):
+        profile = row["profile"]
+        require(predecessor_identity(db, json.loads(config.read_text())) ==
+                (profile["runner_id"], profile["host_id"]) == (old_id, old_host),
+                "Predecessor identity no longer matches the saved Runner/Host and Server registration")
+
+    rows = runners()
+    old = rows.get(old_id)
+    require(old and "execution_slot_limit" in old,
+            "Server must already support the shared handoff budget and know this Runner ID")
+    verify_predecessor(old)
+
+    if manifest.exists():
+        state = json.loads(manifest.read_text())
+        require([revision, server, str(config), old_id, old_host] ==
+                [state["revision"], state["server"], state["source_config"], state["predecessor"], state["config"]["host_id"]],
+                f"Resume using the original bundle REVISION, Server and configuration recorded in {manifest}")
+    else:
+        require(old["online"] and old["successor"] is None,
+                "Predecessor must be online and not already replaced before starting an upgrade")
+        process = find_runner(db, config)
+        require(process, "No live local tend-runner found with these --config and --db paths")
+        pid, start, cwd, _, native = process
+        check_predecessor_process(process, db, server)
+        state = {
+            "revision": revision, "server": server, "source_config": str(config), "predecessor": old_id,
+            "original_process": [boot, pid, start], "cwd": str(cwd), "app_server_args": native,
+            "config": derive(bundle / "bin/tend-runner", config, source.copy(), process, old,
+                             args.inspect_listen, args.inspect_url),
+        }
+        publish(manifest, state)
+    settings = state["config"]
+    new_id = settings["runner_id"]
+    # Keep generations beside one another even after many upgrades.
+    next_config, next_db = (db.parent / f"{new_id}.{suffix}" for suffix in ("json", "sqlite"))
+    require(old["successor"] in (None, new_id), f"{old_id} already has a different successor")
+    if old["retired_at"] is not None:
+        require(old["successor"] == new_id, "Retired predecessor does not match the saved replacement")
+        result(state)
+        return
+    if args.inspect_listen or args.inspect_url:
+        inspect = inspection(source.get("inspect"), args.inspect_listen, args.inspect_url)
+        if settings.get("inspect") != inspect:
+            require(old["successor"] is None and find_runner(next_db, next_config) is None,
+                    "Inspection options can change only before replace and with the successor stopped")
+            settings["inspect"] = inspect
+            publish(manifest, state)
+    if not next_config.exists() or json.loads(next_config.read_text()) != settings:
+        require(find_runner(next_db, next_config) is None, f"Live successor configuration differs at {next_config}")
+        publish(next_config, settings)
+
+    print(f"Upgrading {old_id} to {new_id} from {revision}; state and logs: {state_dir}", file=sys.stderr)
+    launched = None
+    deadline = time.monotonic() + args.timeout
+    while time.monotonic() < deadline:
+        old, new = rows[old_id], rows.get(new_id)
+        require(old["successor"] in (None, new_id), f"{old_id} already has a different successor")
+        if old["retired_at"] is not None:
+            require(old["successor"] == new_id, "Retired predecessor does not match the saved replacement")
+            result(state)
+            return
+
+        prior = find_runner(db, config)
+        old_boot, old_pid, old_start = state["original_process"]
+        original_alive = old_boot == boot and ticks(old_pid) == old_start
+        if old["drained_at"] is None and prior is None and not original_alive:
+            # The Runner can exit just after the roster read.
+            old = runners()[old_id]
+            require(old["drained_at"] is not None,
+                    "Predecessor exited without acknowledged drain. Recover it with its original config and DB, then rerun")
+
+        require(not new or new["successor"] is None, "The saved successor has already started its own replacement")
+        process = find_runner(next_db, next_config)
+        if process is None and launched is None:
+            verify_predecessor(old)
+            if prior is not None:
+                check_predecessor_process(prior, db, server)
+            ready_file = state_dir / f"ready-{uuid.uuid4().hex}"
+            with log.open("ab") as output:
+                launched = subprocess.Popen(
+                    [bundle / "bin/tend-runner", "--config", next_config, "--db", next_db,
+                     "--ready-file", ready_file, *state["app_server_args"]],
+                    cwd=state["cwd"], stdin=subprocess.DEVNULL, stdout=output, stderr=output,
+                    start_new_session=True,
+                )
+        if process is None and launched is not None and launched.poll() is not None:
+            raise UpgradeError(f"Successor exited with status {launched.returncode}; check {log} and rerun")
+        ready = False
+        if process is not None:
+            pid, _, _, options, _ = process
+            marker = Path(options.get("--ready-file", "/dev/null"))
+            require(marker.parent == state_dir and marker.name.startswith("ready-"),
+                    "Successor must be started by this entry point until the predecessor is retired")
+            ready = marker.exists() and marker.read_text().strip() == str(pid)
+
+        if ready and new and new["online"]:
+            profile = new["profile"]
+            for field in ("host_id", "workspace_root", "slot_limit"):
+                require(settings[field] == profile.get(field), f"Successor registered an unexpected {field}")
+            require(profile.get("standby") and profile.get("handoff_slots"),
+                    "Successor did not register standby with shared slot support")
+            require(profile.get("inspect_url") == (settings.get("inspect") or {}).get("url"),
+                    "Successor did not register the configured inspection URL")
+            old_profile = old["profile"]
+            require(sorted(profile["repos"]) == sorted(old_profile["repos"])
+                    and profile["agents"] == old_profile["agents"],
+                    "Successor and predecessor advertise different repos or Agents; compare their service environment")
+            if old["successor"] is None and old["online"] and prior is not None:
+                verify_predecessor(old)
+                check_predecessor_process(prior, db, server)
+                extra = [] if old_profile.get("workspace_root") is not None else [
+                    "--predecessor-workspace-root", settings["workspace_root"]]
+                cli("replace", old_id, new_id, *extra)
+                print(f"Replacement recorded; waiting for {old_id} to finish and exit naturally", file=sys.stderr)
+            elif (old["successor"] == new_id and old["drained_at"] is not None
+                  and prior is None and not original_alive
+                  and new["execution_slot_limit"] == settings["slot_limit"]):
+                verify_predecessor(old)
+                cli("retire", old_id)
+                result(state)
+                return
+        time.sleep(0.5)
+        rows = runners()
+
+    raise UpgradeError("Timed out waiting for registration or natural drain; inspect the Runner logs and roster")
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, required=True, help="predecessor Runner JSON")
+    parser.add_argument("--db", type=Path, required=True, help="predecessor Runner database")
+    parser.add_argument("--inspect-listen", help="distinct successor inspection listener")
+    parser.add_argument("--inspect-url", help="successor inspection HTTP base address usable by Server")
+    parser.add_argument("--timeout", type=int, default=3600, help="wait limit in seconds (default: 3600)")
+    args = parser.parse_args()
+    os.umask(0o077)
+    try:
+        bundle = Path(__file__).resolve().parent.parent
+        revision = (bundle / "REVISION").read_text().strip()
+        require(re.fullmatch(r"[0-9a-f]{40}", revision), "Run from an extracted main-build archive with a valid REVISION")
+        require(args.timeout > 0, "--timeout must be positive")
+        config, db = args.config.resolve(strict=True), args.db.resolve(strict=True)
+        state_dir = db.with_name(db.name + ".upgrade")
+        require(not state_dir.is_symlink(), "Upgrade state directory must not be a symlink")
+        state_dir.mkdir(mode=0o700, exist_ok=True)
+        with (state_dir / "upgrade.lock").open("a") as lock:
+            try:
+                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError as error:
+                raise UpgradeError(f"Another upgrade is using {state_dir}") from error
+            upgrade(args, bundle, revision, config, db, state_dir)
+    except (UpgradeError, OSError, ValueError, KeyError, sqlite3.Error, subprocess.TimeoutExpired, KeyboardInterrupt) as error:
+        print(f"Runner upgrade paused: {error or 'interrupted'}. Fix the reported condition and rerun the same command. "
+              "Keep the upgrade directory and both Runner databases.", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

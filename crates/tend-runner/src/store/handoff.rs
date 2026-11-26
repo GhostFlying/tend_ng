@@ -25,12 +25,14 @@ pub fn accept_drain(db: &Connection, target: &str) -> Result<()> {
 }
 
 impl Store {
-    pub fn is_draining(&self) -> Result<bool> {
-        Ok(self
-            .0
-            .query_row("SELECT EXISTS(SELECT 1 FROM local_drain)", [], |row| {
-                row.get(0)
-            })?)
+    pub fn drain_active_slots(&self) -> Result<Option<u32>> {
+        Ok(self.0.query_row(
+            "SELECT CASE WHEN EXISTS(SELECT 1 FROM local_drain) THEN (
+                 SELECT count(*) FROM local_runs WHERE state IN ('prepared', 'running')
+             ) END",
+            [],
+            |row| row.get(0),
+        )?)
     }
 
     pub fn drain_finished(&self) -> Result<bool> {

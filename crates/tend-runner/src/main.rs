@@ -15,7 +15,9 @@ use protocol::{
 use std::{
     env,
     ffi::OsString,
-    path::PathBuf,
+    fs::OpenOptions,
+    io::ErrorKind,
+    path::{Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -25,12 +27,59 @@ use std::{
 };
 use store::Store;
 
-const USAGE: &str = "Usage: tend-runner --config <json-file> --db <sqlite-file> [--once | --reconcile <task-id>] [--app-server <program> <args>...]\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates Runner sync.";
+const USAGE: &str = "Usage: tend-runner --config <json-file> --db <sqlite-file> [--once | --reconcile <task-id>] [--ready-file <path>] [--app-server <program> <args>...]\n       tend-runner --default-workspace-root <sqlite-file>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates Runner sync.";
+
+fn default_workspace_root(database: &Path) -> PathBuf {
+    database.with_extension("runs")
+}
+
+fn canonical_database(path: &Path) -> Result<PathBuf> {
+    let path = match path.canonicalize() {
+        Ok(path) => path,
+        Err(error) if error.kind() == ErrorKind::NotFound => {
+            // A dangling link cannot safely reserve the target's lock name.
+            ensure!(
+                !path.symlink_metadata().is_ok_and(|meta| meta.is_symlink()),
+                "Runner database is a dangling symbolic link"
+            );
+            let absolute = std::path::absolute(path)?;
+            absolute
+                .parent()
+                .context("Runner database needs a parent directory")?
+                .canonicalize()?
+                .join(
+                    path.file_name()
+                        .context("Runner database needs a file name")?,
+                )
+        }
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        ensure!(
+            !path.metadata().is_ok_and(|meta| meta.nlink() > 1),
+            "Runner database must not have hard links"
+        );
+    }
+    Ok(path)
+}
 
 fn main() -> Result<()> {
-    let mut args = env::args_os().skip(1);
+    let mut args = env::args_os().skip(1).peekable();
+    if args
+        .next_if(|arg| arg == "--default-workspace-root")
+        .is_some()
+    {
+        let database = PathBuf::from(args.next().context(USAGE)?);
+        ensure!(args.next().is_none(), "{USAGE}");
+        let root = std::path::absolute(default_workspace_root(&database))?;
+        println!("{}", serde_json::to_string(&root)?);
+        return Ok(());
+    }
     let (mut config_path, mut db_path, mut once) = (None, None, false);
     let mut task = None;
+    let mut ready_file = None;
     let mut program = OsString::from("codex");
     let mut app_args = ["app-server", "--listen", "stdio://"]
         .map(OsString::from)
@@ -44,6 +93,11 @@ fn main() -> Result<()> {
                 db_path = Some(PathBuf::from(args.next().context("--db needs a path")?))
             }
             Some("--once") => once = true,
+            Some("--ready-file") => {
+                ready_file = Some(PathBuf::from(
+                    args.next().context("--ready-file needs a path")?,
+                ))
+            }
             Some("--reconcile") => {
                 let id = args
                     .next()
@@ -66,9 +120,27 @@ fn main() -> Result<()> {
         }
     }
     ensure!(!once || task.is_none(), "{USAGE}");
+    ensure!(ready_file.is_none() || (!once && task.is_none()), "{USAGE}");
     let config = Arc::new(Config::load(&config_path.context(USAGE)?)?);
     let db_path = db_path.context(USAGE)?;
-    let mut store = Store::open(&db_path, &config)?;
+    let database = canonical_database(&db_path).context("resolve Runner database")?;
+    // Forward recovery and upgrade retries can race to launch the same
+    // generation. Only one execution scheduler may own a local ledger.
+    let _instance_lock = if task.is_none() {
+        let mut lock_path = database.as_os_str().to_owned();
+        lock_path.push(".lock");
+        let file = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(lock_path)?;
+        file.try_lock()
+            .context("another Runner is already using this database")?;
+        Some(file)
+    } else {
+        None
+    };
+    let mut store = Store::open(&database, &config)?;
     let base = env::var("TEND_URL").unwrap_or_else(|_| format!("http://{DEFAULT_LISTEN}"));
     let token = env::var(TOKEN_ENV).context("set TEND_TOKEN before starting Runner")?;
     ensure!(!token.is_empty(), "TEND_TOKEN is empty");
@@ -88,23 +160,23 @@ fn main() -> Result<()> {
         auth: auth.clone(),
     };
     if once {
-        return transfer.upload(sync(&config, &mut store, &server)?);
+        return transfer.upload(sync(&config, &mut store, &server)?.0);
     }
     if let Some(task) = task {
         let path = protocol::reconcile_path(&config.runner_id, &task);
         reconcile::task(&config, &mut store, &server, &task, &path)?;
         loop {
-            let files = server.exchange(&config, &mut store, &path, Vec::new(), Vec::new())?;
+            let (files, _) = server.exchange(&config, &mut store, &path, Vec::new(), Vec::new())?;
             if files.is_empty() {
                 return Ok(());
             }
             transfer.upload(files)?;
         }
     }
-    let uploads = transfer.start();
+    let uploads = transfer.clone().start();
     let reconciliation = reconcile::start(
         Arc::clone(&config),
-        Store::open(&db_path, &config)?,
+        Store::open(&database, &config)?,
         Arc::clone(&server),
     );
     let runtime = execution::Runtime {
@@ -112,39 +184,49 @@ fn main() -> Result<()> {
         root: config
             .workspace_root
             .clone()
-            .unwrap_or_else(|| db_path.with_extension("runs")),
-        artifacts: db_path.with_extension("artifacts"),
+            .unwrap_or_else(|| default_workspace_root(&db_path)),
+        artifacts: transfer,
         program,
         args: app_args,
     };
     if let Some(inspection) = &config.inspect {
         inspect::serve(
             inspection.listen,
-            Store::open(&db_path, &config)?,
+            Store::open(&database, &config)?,
             runtime.clone(),
             Arc::clone(&config),
             auth,
         )?;
     }
     workspace::serve_reclaims(
-        Store::open(&db_path, &config)?,
+        Store::open(&database, &config)?,
         Arc::clone(&config),
         runtime.root.clone(),
     );
     if config.slot_limit > 0 {
-        let local = Store::open(&db_path, &config)?;
+        let local = Store::open(&database, &config)?;
         let execution_config = Arc::clone(&config);
-        thread::spawn(move || execution::serve(local, db_path, execution_config, runtime));
+        thread::spawn(move || execution::serve(local, database, execution_config, runtime));
     }
 
     let mut reconnecting = true;
     loop {
         let was_drained = store.drain_finished()?;
         match sync(&config, &mut store, &server) {
-            Ok(files) => {
-                if files.is_empty() && was_drained && store.drain_finished()? {
+            Ok((files, drain_acknowledged)) => {
+                if drain_acknowledged
+                    && files.is_empty()
+                    && was_drained
+                    && store.drain_finished()?
+                {
                     eprintln!("Runner {} drained and acknowledged", config.runner_id);
                     return Ok(());
+                }
+                if let Some(path) = &ready_file {
+                    match std::fs::write(path, format!("{}\n", std::process::id())) {
+                        Ok(()) => ready_file = None,
+                        Err(error) => eprintln!("Runner readiness file: {error}"),
+                    }
                 }
                 if reconnecting && reconciliation.try_send(()).is_ok() {
                     reconnecting = false;
@@ -168,7 +250,7 @@ fn main() -> Result<()> {
     }
 }
 
-fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<Vec<String>> {
+fn sync(config: &Config, store: &mut Store, server: &Server) -> Result<(Vec<String>, bool)> {
     store.prepare_handoffs()?;
     server.exchange(
         config,
@@ -194,7 +276,7 @@ impl Server {
         path: &str,
         receipts: Vec<ClaimReceipt>,
         records: Vec<RunnerRecord>,
-    ) -> Result<Vec<String>> {
+    ) -> Result<(Vec<String>, bool)> {
         let running = store.running_slots()?;
         let mut profile = config.profile(store.unfinished()?);
         profile.running_slots = running;
@@ -206,6 +288,7 @@ impl Server {
         let request = RunnerSync {
             protocol: RUNNER_PROTOCOL,
             drained: store.drain_finished()?,
+            drain_active_slots: store.drain_active_slots()?,
             reclaim_receipts: store.reclaim_receipts()?,
             profile,
             receipts,
@@ -222,7 +305,13 @@ impl Server {
         self.proposal_approval
             .store(reply.proposal_approval, Ordering::Relaxed);
         let uploads = std::mem::take(&mut reply.uploads);
+        let drain_acknowledged = reply.drain_acknowledged.unwrap_or(true);
+        // Full reconciliation has its own connection and can finish after a
+        // newer heartbeat. Only the ordered incremental stream installs a cap.
+        if path != protocol::runner_sync_path(&config.runner_id) {
+            reply.execution_slot_limit = None;
+        }
         store.apply_sync(config, reply)?;
-        Ok(uploads)
+        Ok((uploads, drain_acknowledged))
     }
 }

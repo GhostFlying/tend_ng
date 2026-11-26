@@ -52,20 +52,25 @@ pub(super) fn migrate_auto_assignment_order(db: &Connection) -> Result<()> {
 
 struct AvailableRunner {
     profile: RunnerProfile,
+    execution_limit: u32,
     last_seen: i64,
     protocol: u32,
 }
 
 fn available_runners(db: &Connection, include_full: bool) -> Result<Vec<AvailableRunner>> {
     let mut statement = db.prepare(
-        "SELECT r.profile, r.last_seen, r.protocol FROM runners r
+        "SELECT r.profile, r.last_seen, r.protocol, l.limit_slots FROM runners r
+         LEFT JOIN runner_handoff_limits l ON l.successor = r.id
          WHERE r.last_seen > unixepoch() - ?1
            AND NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
            AND (coalesce(json_extract(r.profile, '$.standby'), 0) = 0 OR
                 EXISTS(SELECT 1 FROM runner_replacements p WHERE p.successor = r.id))
+           AND (l.limit_slots IS NULL OR
+               (l.limit_slots > 0 AND json_extract(r.profile, '$.handoff_slots') = 1))
            AND ((?2 AND json_extract(r.profile, '$.shared_reviews') = 1 AND r.protocol >= 2
                      AND json_extract(r.profile, '$.slot_limit') > 0)
-             OR json_extract(r.profile, '$.available_for_assignment') > (
+             OR json_extract(r.profile, '$.available_for_assignment')
+                - coalesce(max(0, json_extract(r.profile, '$.slot_limit') - l.limit_slots), 0) > (
                 SELECT COUNT(*) FROM runner_assignments a
                 WHERE a.runner_id = r.id AND a.state IN ('reserved', 'issued')
            ))
@@ -76,12 +81,15 @@ fn available_runners(db: &Connection, include_full: bool) -> Result<Vec<Availabl
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, u32>(2)?,
+            row.get::<_, Option<u32>>(3)?,
         ))
     })?;
     rows.map(|row| {
-        let (profile, last_seen, protocol) = row?;
+        let (profile, last_seen, protocol, shared_limit) = row?;
+        let profile: RunnerProfile = serde_json::from_str(&profile)?;
         Ok(AvailableRunner {
-            profile: serde_json::from_str(&profile)?,
+            execution_limit: profile.slot_limit.min(shared_limit.unwrap_or(u32::MAX)),
+            profile,
             last_seen,
             protocol,
         })
@@ -97,7 +105,8 @@ struct RunnerLoad {
 }
 
 impl RunnerLoad {
-    fn read(db: &Connection, profile: &RunnerProfile) -> Result<Self> {
+    fn read(db: &Connection, runner: &AvailableRunner) -> Result<Self> {
+        let profile = &runner.profile;
         let (pending, last_selected) = db.query_row(
             "SELECT (SELECT COUNT(*) FROM runner_assignments a
                       WHERE a.runner_id = ?1 AND a.state IN ('reserved', 'issued')),
@@ -105,11 +114,10 @@ impl RunnerLoad {
             [&profile.runner_id],
             |row| Ok((row.get::<_, u32>(0)?, row.get(1)?)),
         )?;
-        // Ordinary candidates have pending < available <= limit, so both
-        // the occupied count and limit fit in u32 before cross multiplication.
+        // Eligibility keeps occupied + pending below the effective limit.
         Ok(Self {
             occupied: u64::from(profile.slot_limit - profile.available_for_assignment + pending),
-            limit: u64::from(profile.slot_limit),
+            limit: u64::from(runner.execution_limit),
             last_selected,
         })
     }
@@ -230,7 +238,7 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             continue;
         };
         if balance {
-            let load = RunnerLoad::read(db, profile)?;
+            let load = RunnerLoad::read(db, &available)?;
             if lowest_load.is_some_and(|best| !load.precedes(best)) {
                 continue;
             }
@@ -490,8 +498,22 @@ impl Store {
                 [&profile.runner_id],
                 |row| row.get::<_, bool>(0),
             )?;
+        let drain_slots = request
+            .drain_active_slots
+            .filter(|_| task.is_none() && profile.handoff_slots);
+        let release_slots = if let Some(slots) = drain_slots {
+            self.db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM runner_replacements
+                 WHERE predecessor = ?1 AND drained_at IS NULL AND occupied_slots > ?2)",
+                params![profile.runner_id, slots],
+                |row| row.get(0),
+            )?
+        } else {
+            false
+        };
         if !refresh
             && !reserved
+            && !release_slots
             && request.receipts.is_empty()
             && request.runs.is_empty()
             && request.records.is_empty()
@@ -499,6 +521,8 @@ impl Store {
             && request.reclaim_receipts.is_empty()
         {
             return Ok(Some(RunnerSyncReply {
+                execution_slot_limit: super::handoff::execution_slot_limit(&self.db, profile)?,
+                drain_acknowledged: None,
                 proposal_approval: true,
                 workspace_reclaims: if task.is_none() {
                     super::reclaim::pending(&self.db, &profile.runner_id)?
@@ -685,12 +709,21 @@ impl Store {
         let uploads = super::artifacts::pending(&tx, &profile.runner_id, task)?;
         let controls = super::control::pending(&tx, &profile.runner_id, task)?;
         let drain_to = super::handoff::drain_target(&tx, &profile.runner_id)?;
-        if request.drained {
-            super::handoff::note_drained(&tx, &profile.runner_id)?;
+        if let Some(slots) = drain_slots.filter(|_| release_slots) {
+            super::handoff::note_drain_slots(&tx, &profile.runner_id, slots)?;
         }
+        let drain_acknowledged = if task.is_none() && request.drained {
+            super::handoff::note_drained(&tx, &profile.runner_id)?;
+            Some(super::handoff::drain_acknowledged(&tx, &profile.runner_id)?)
+        } else {
+            None
+        };
+        let execution_slot_limit = super::handoff::execution_slot_limit(&tx, profile)?;
         super::board::refresh(&tx)?;
         super::timing::commit(tx, timing)?;
         Ok(Some(RunnerSyncReply {
+            execution_slot_limit,
+            drain_acknowledged,
             proposal_approval: true,
             workspace_reclaims,
             confirmed_reclaims,
@@ -785,6 +818,7 @@ mod tests {
             None,
         )?;
         let request = |ids: &[&str]| RunnerSync {
+            drain_active_slots: None,
             protocol: protocol::RUNNER_PROTOCOL,
             profile: RunnerProfile {
                 runner_id: "runner".into(),
@@ -798,6 +832,7 @@ mod tests {
                 workspace_root: None,
                 standby: false,
                 shared_reviews: false,
+                handoff_slots: false,
             },
             drained: false,
             reclaim_receipts: vec![],

@@ -32,7 +32,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 35;
+pub(crate) const SCHEMA_VERSION: i64 = 36;
 
 pub struct Store {
     db: Connection,
@@ -243,6 +243,9 @@ impl Store {
         }
         if version < 35 {
             runner::migrate_auto_assignment_order(&tx)?;
+        }
+        if version < 36 {
+            handoff::migrate_slot_budget(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

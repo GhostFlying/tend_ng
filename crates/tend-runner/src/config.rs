@@ -140,6 +140,7 @@ impl Config {
                 .map(str::to_owned),
             standby: self.standby,
             shared_reviews: true,
+            handoff_slots: true,
         }
     }
 

@@ -30,6 +30,20 @@ jobs:
         run: python3 -B tests/e2e/web_session.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check the Runner protocol window
         run: python3 -B tests/e2e/protocol_window.py target/release/tend-server target/release/tend target/release/tend-runner
+      - name: Check the persistent Runner handoff budget
+        run: cargo test --release --locked -p tend-server store::handoff
+      - name: Check the packaged Runner upgrade entry
+        shell: bash
+        run: |
+          bundle=$(mktemp -d)
+          trap 'rm -rf "$bundle"' EXIT
+          mkdir "$bundle/bin"
+          install target/release/{tend-server,tend-runner,tend} scripts/tend-runner-upgrade "$bundle/bin/"
+          printf '%s\n' "$GITHUB_SHA" > "$bundle/REVISION"
+          python3 -B tests/e2e/runner_upgrade.py "$bundle"
+          python3 -B tests/e2e/runner_upgrade.py "$bundle" --trailing-dot-db
+      - name: Check first queued artifact review across Runner replacement
+        run: python3 -B tests/e2e/review_transition.py target/release/tend-server target/release/tend target/release/tend-runner --scenario artifact-replacement
       - uses: actions/upload-artifact@v7
         with:
           name: ci-rust
@@ -119,6 +133,13 @@ jobs:
           name: ci-web
           path: components/web
       - run: bash .github/scripts/package-main-build.sh components deployment
+      - name: Verify the published upgrade entry and revision
+        run: |
+          bundle=$(mktemp -d)
+          trap 'rm -rf "$bundle"' EXIT
+          tar -xzf "deployment/tend-ng-linux-amd64-${GITHUB_SHA}.tar.gz" -C "$bundle"
+          test "$(cat "$bundle/REVISION")" = "$GITHUB_SHA"
+          "$bundle/bin/tend-runner-upgrade" --help
       - uses: actions/upload-artifact@v7
         with:
           name: tend-ng-linux-amd64-${{ github.sha }}

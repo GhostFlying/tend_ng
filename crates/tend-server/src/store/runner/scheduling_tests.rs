@@ -45,6 +45,7 @@ fn runner(id: &str, limit: u32, available: u32) -> RunnerProfile {
         workspace_root: None,
         standby: false,
         shared_reviews: true,
+        handoff_slots: false,
     }
 }
 
@@ -56,6 +57,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
                 protocol,
                 profile,
                 drained: false,
+                drain_active_slots: None,
                 reclaim_receipts: vec![],
                 receipts: vec![],
                 runs: vec![],
@@ -169,6 +171,9 @@ fn equal_load_rotates_across_reopen_and_ignores_pinned_assignments() -> Result<(
     // Reconstruct a v34 fixture with intact runner registrations.
     store.db.execute_batch(
         "DROP TABLE runner_auto_assignment_order;
+         DROP VIEW runner_handoff_limits;
+         ALTER TABLE runner_replacements DROP COLUMN occupied_slots;
+         ALTER TABLE runner_replacements DROP COLUMN slot_budget;
          PRAGMA user_version = 34;",
     )?;
     drop(store);
@@ -315,6 +320,10 @@ fn low_load_does_not_bypass_matching_or_generation_eligibility() -> Result<()> {
         runner_id: None,
     });
     let issue = top_level(&mut store, "requirements", &required)?;
+    // This legacy successor does not enforce a dynamic slot limit.
+    assert_eq!(placement(&store, &issue.task_id)?, None);
+    super::super::handoff::note_drained(&store.db, "d-predecessor")?;
+    store.schedule_assignments(&mut 0)?;
     assert_eq!(
         placement(&store, &issue.task_id)?.as_deref(),
         Some("z-successor")
@@ -427,5 +436,35 @@ fn bound_review_still_requires_shared_protocol_and_released_workspace() -> Resul
     store.schedule_assignments(&mut 0)?;
     // The shared review may queue on its author even though all its slots are full.
     assert_eq!(placement(&store, "review")?.as_deref(), Some("z-author"));
+    Ok(())
+}
+
+#[test]
+fn first_assignment_balances_against_the_successors_effective_limit() -> Result<()> {
+    let mut store = fixture(Path::new(":memory:"))?;
+    let mut old = runner("old", 4, 2);
+    old.workspace_root = Some("/workspace".into());
+    let mut next = runner("a-next", 4, 4);
+    next.workspace_root = old.workspace_root.clone();
+    next.standby = true;
+    next.handoff_slots = true;
+    announce(&mut store, old, 2)?;
+    announce(&mut store, next, 2)?;
+    assert!(store.replace_runner("old", "a-next", None)?.is_some());
+    super::super::handoff::note_drain_slots(&store.db, "old", 2)?;
+
+    let first = top_level(&mut store, "handoff-first", &work())?;
+    assert_eq!(
+        placement(&store, &first.task_id)?.as_deref(),
+        Some("a-next")
+    );
+    // a-next has one outstanding assignment in a shared limit of two.
+    // The alternative has one locally occupied slot out of four.
+    announce(&mut store, runner("b-other", 4, 3), 2)?;
+    let second = top_level(&mut store, "handoff-second", &work())?;
+    assert_eq!(
+        placement(&store, &second.task_id)?.as_deref(),
+        Some("b-other")
+    );
     Ok(())
 }

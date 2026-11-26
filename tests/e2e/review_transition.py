@@ -177,6 +177,45 @@ def exercise(args, root):
             print(f"PASS {args.scenario}: buffered round settles once without reactivating the completed Reviewer")
             return
 
+        if args.scenario == "artifact-replacement":
+            with runner(path, "runner", address, args.scenario) as predecessor:
+                cli("chat", "send", "main", "Dispatch from Chat.")
+                gate("author-continued-1")
+                request = json.loads((root / "request-1").read_text())
+                file = request["action"]["candidate"].removeprefix("artifact:")
+                reviewer = request["action"]["task_id"]
+                wait_for(lambda: local("runner", reviewer), lambda rows: rows == [("queued",)])
+                wait_for(lambda: sql("server", "SELECT available FROM artifacts WHERE id = ?", file),
+                         lambda rows: rows == [(1,)])
+                assert runs("runner", reviewer) == []
+                assert not (root / "next.artifacts" / file).exists()
+                author_cwd = Path((root / "author-cwd").read_text())
+                original = root / "runner.artifacts" / file
+                assert original.stat().st_size > 32768
+                assert original.read_bytes() != (author_cwd / "repos/example/guide.txt").read_bytes()
+
+                new = {**settings, "runner_id": "next-runner", "standby": True}
+                new.pop("inspect")
+                successor_cfg = root / "next.json"
+                successor_cfg.write_text(json.dumps(new))
+                with runner(successor_cfg, "next", address, args.scenario):
+                    wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == 2)
+                    cli("runner", "replace", "demo-runner", "next-runner")
+                    wait_for(lambda: sql("runner", "SELECT successor FROM local_drain"), bool)
+                    mark("allow-author-stop-1")
+                    gate("review-running-1")
+                    assert runs("runner", reviewer) == []
+                    assert (root / "next.artifacts" / file).read_bytes() == original.read_bytes()
+                    assert not list((root / "next.artifacts").glob("*.part"))
+                    mark("deliver-review-1")
+                    gate("result-1")
+                    mark("allow-review-stop-1")
+                    wait_for(lambda: sql("server", "SELECT status FROM tasks WHERE id = ?", reviewer),
+                             lambda rows: rows == [("completed",)])
+                    assert predecessor.wait(timeout=10) == 0
+            print("PASS artifact replacement: first queued Review reads the original snapshot on the successor")
+            return
+
         with runner(path, "runner", address, "replacement") as predecessor:
             author, reviewer, review_issue, _ = first_result()
             new = {**settings, "runner_id": "next-runner", "standby": True}
@@ -228,7 +267,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for binary in ("server", "cli", "runner"):
         parser.add_argument(binary, type=lambda value: Path(value).resolve())
-    parser.add_argument("--scenario", choices=("cancel", "cancel-reopen", "replacement"), required=True)
+    parser.add_argument("--scenario", choices=("cancel", "cancel-reopen", "replacement", "artifact-replacement"), required=True)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tend-review-transition-") as directory:
         root = Path(directory)

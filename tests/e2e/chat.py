@@ -19,7 +19,7 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "chat_app_server.py
 
 @contextmanager
 def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=None, web_origin=None,
-           discussion_config=None, router_name=None):
+           discussion_config=None, router_name=None, router_fixture=FIXTURE):
     origin = ["--web-origin", web_origin] if web_origin is not None else []
     web = ["--web-dir", web_dir] if web_dir is not None else []
     provider = ["--github-cli", github_cli] if github_cli is not None else []
@@ -29,7 +29,7 @@ def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=Non
         [
             binary, "--db", root / "server.sqlite", "--listen", listen,
             "--router-cwd", root, *web, *provider, *origin, *discussion, *name, "--app-server", sys.executable,
-            FIXTURE, root / "app.sqlite",
+            router_fixture, root / "app.sqlite",
         ],
         stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
     )
