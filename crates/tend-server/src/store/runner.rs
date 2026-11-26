@@ -518,6 +518,9 @@ impl Store {
                      WHERE id = ?1 AND current_assignment = ?3",
                     params![task, status, receipt.assignment_id],
                 )? == 1, "delivered assignment changed before receipt");
+                if state == "accepted" {
+                    super::issue_chat::record_takeover(&tx, &receipt.assignment_id)?;
+                }
             } else if recorded_decision.as_deref() != Some(&decision) {
                 return Ok(None);
             }
@@ -678,7 +681,113 @@ fn assignments_to_send(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{ClaimReceipt, IssueMessageKind};
     use serde_json::json;
+    use std::path::Path;
+
+    #[test]
+    fn takeover_is_atomic_with_accepted_receipt_and_replay_is_idempotent() -> Result<()> {
+        let mut store = Store::initialize(Path::new(":memory:"))?;
+        store.db.execute_batch(
+            r#"INSERT INTO chat_messages (seq,id,chat_id,text) VALUES (1,'source','main','Request');
+               INSERT INTO issues (id,source_seq,title,objective) VALUES ('issue',1,'Test issue','Test objective');
+               INSERT INTO tasks (id,issue_id,category,status,repo_ids,required_capabilities)
+                 VALUES ('task','issue','issue-router','assigned','[]','[]');
+               INSERT INTO runners (id,host_id,profile,last_seen) VALUES ('runner','host','{}',0);
+               INSERT INTO runner_assignments (id,task_id,runner_id,contract,state,expires_at)
+                 VALUES ('assignment','task','runner',
+                   '{"placement":{"agent":{"id":"frozen-agent","category":"issue-router"}}}', 'reserved', unixepoch()+60);
+               UPDATE tasks SET current_assignment='assignment' WHERE id='task';"#,
+        )?;
+        super::super::issue_chat::dispatch(
+            &store.db,
+            "dispatch",
+            "issue",
+            "router",
+            "Test objective",
+            Some("source"),
+            None,
+        )?;
+        let request = |ids: &[&str]| RunnerSync {
+            protocol: protocol::RUNNER_PROTOCOL,
+            profile: RunnerProfile {
+                runner_id: "runner".into(),
+                host_id: "host".into(),
+                repos: vec![],
+                agents: vec![],
+                slot_limit: 1,
+                running_slots: 0,
+                available_for_assignment: 0,
+                inspect_url: None,
+                workspace_root: None,
+                standby: false,
+                shared_reviews: false,
+            },
+            drained: false,
+            reclaim_receipts: vec![],
+            receipts: ids
+                .iter()
+                .map(|id| ClaimReceipt {
+                    assignment_id: (*id).into(),
+                    decision: ClaimDecision::Accepted,
+                })
+                .collect(),
+            runs: vec![],
+            records: vec![],
+        };
+        let kinds = |store: &Store| -> Result<Vec<IssueMessageKind>> {
+            Ok(store
+                .issue_messages("issue", i64::MAX)?
+                .unwrap()
+                .messages
+                .into_iter()
+                .map(|row| row.kind)
+                .collect())
+        };
+        assert_eq!(kinds(&store)?, [IssueMessageKind::Dispatch]);
+        assert!(
+            store
+                .sync_runner(request(&["assignment"]), Some("task"))?
+                .is_none()
+        );
+        store
+            .db
+            .execute("UPDATE runner_assignments SET state='issued'", [])?;
+        assert_eq!(kinds(&store)?, [IssueMessageKind::Dispatch]);
+
+        // A later invalid receipt aborts the batch, including the first acceptance and event.
+        assert!(
+            store
+                .sync_runner(request(&["assignment", "unknown"]), Some("task"))?
+                .is_none()
+        );
+        assert_eq!(kinds(&store)?, [IssueMessageKind::Dispatch]);
+        let state: String = store.db.query_row(
+            "SELECT state FROM runner_assignments WHERE id = 'assignment'",
+            [],
+            |row| row.get(0),
+        )?;
+        assert_eq!(state, "issued");
+        let claim = store.sync_runner(request(&["assignment"]), None)?.unwrap();
+        assert_eq!(claim.confirmed_receipts, ["assignment"]);
+        assert_eq!(
+            kinds(&store)?,
+            [IssueMessageKind::Dispatch, IssueMessageKind::Takeover]
+        );
+        let page = store.issue_messages("issue", i64::MAX)?.unwrap();
+        assert_eq!(page.messages[1].author, "frozen-agent");
+        assert!(page.messages[1].created_at.is_some());
+        let replay = store
+            .sync_runner(request(&["assignment", "assignment"]), Some("task"))?
+            .unwrap();
+        assert_eq!(replay.confirmed_receipts, ["assignment", "assignment"]);
+        assert_eq!(
+            store.issue_messages("issue", i64::MAX)?.unwrap().messages,
+            page.messages
+        );
+        assert!(super::super::issue_chat::record_takeover(&store.db, "assignment").is_err());
+        Ok(())
+    }
 
     #[test]
     fn review_delivery_respects_v1_and_the_v2_capability() -> Result<()> {

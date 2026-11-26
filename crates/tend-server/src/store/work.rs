@@ -89,6 +89,7 @@ impl Store {
         call: &ToolCall,
         work: &DispatchIssue,
         record_only: bool,
+        dispatcher_name: Option<&str>,
     ) -> Result<Option<IssueDetail>> {
         let tx = self
             .db
@@ -140,10 +141,10 @@ impl Store {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![operation_id, issue_id, attempt_id, call.call_id, request, record_only],
         )?;
-        let source_id: String = tx.query_row(
-            "SELECT id FROM chat_messages WHERE seq = ?1",
+        let (source_id, source_chat): (String, String) = tx.query_row(
+            "SELECT id, chat_id FROM chat_messages WHERE seq = ?1",
             [source],
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
         super::issue_chat::dispatch(
             &tx,
@@ -152,6 +153,7 @@ impl Store {
             "router",
             &work.objective,
             Some(&source_id),
+            dispatcher_name.filter(|_| source_chat == "main"),
         )?;
         if !record_only {
             start_first_task(&tx, &issue_id, &operation_id, work)?;

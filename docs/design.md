@@ -38,7 +38,7 @@ Web 以共享访问令牌换取可独立撤销的浏览器会话，刷新与同�
 
 | 名称 | 职责 |
 | --- | --- |
-| **Router Agent（Router）** | 由 Server 托管并直接绑定主 Chat 的具名 Agent。接收主 Chat 的用户输入、Issue 上报和归属未定的事实，负责判断、路由、跨 Issue 协调和回复用户。 [Router 托管与恢复](chat-routing.md#router-托管与恢复) |
+| **Router Agent（Router）** | 由 Server 托管并直接绑定主 Chat 的助手，可显式配置显示名。接收主 Chat 的用户输入、Issue 上报和归属未定的事实，负责判断、路由、跨 Issue 协调和回复用户。 [Router 托管与恢复](chat-routing.md#router-托管与恢复) |
 | **Issue Agent** | 顶层 Issue 的协调 Owner，使用专属的 `issue-router`。按用户的原目标、授权和停点委派与验收子 Issue，跟进并汇总交付，决定顶层 Issue 何时结案。 |
 | **Work Agent** | 工作子 Issue 的 Owner，负责技术计划、调查、实际执行、验证、产物和子 Issue 结案。按具体工作要求选择具名配置。 |
 | **Review Agent** | 通过 `review` 分配的具名 Agent，担任审阅子 Issue 的 Owner 并交付独立审阅结果。 |

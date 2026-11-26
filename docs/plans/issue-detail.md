@@ -1,5 +1,7 @@
 # Issue 详情与原讨论同页
 
+时间线的派发来源和只读接手事件见 [Issue 时间线的派发来源与确认接手](issue-timeline-dispatch-provenance.md)。
+
 ## 目标和边界
 
 - #25 在 #6 已合入的概览、看板入口和 Issue Chat 基础上推进。检查工作区和 refs，未见另一个 #25 实现候选。

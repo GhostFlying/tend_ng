@@ -25,6 +25,7 @@ import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
 import { DiscussionStart } from "./DiscussionStart";
 import { discussionLink } from "./discussionApi";
+import { DispatchAuthor, IssueTakeoverEvent } from "./IssueTimelineEvent";
 const DiscussionMarkdown = lazy(() =>
   import("./Markdown").then(({ Markdown }) => ({ default: Markdown })),
 );
@@ -304,12 +305,16 @@ function MessageRow({
       id={`message-${message.id}`}
     >
       <div className="message-heading">
-        <span className="author">
-          {user
-            ? "你"
-            : (detail?.author ??
-              (message.author === "discussion" ? "讨论助手" : "Tend"))}
-        </span>
+        {detail?.kind === "dispatch" ? (
+          <DispatchAuthor provenance={detail.dispatch_provenance} />
+        ) : (
+          <span className="author">
+            {user
+              ? "你"
+              : (detail?.author ??
+                (message.author === "discussion" ? "讨论助手" : "Tend"))}
+          </span>
+        )}
         {descendant && detail && (
           <a
             className="issue-link"
@@ -840,6 +845,15 @@ export function Chat({
     const detail = message.issue;
     const descendant =
       !!detail && detail.issue_id !== (canonicalIssue ?? issue);
+    if (detail?.kind === "takeover") {
+      return (
+        <IssueTakeoverEvent
+          key={message.id}
+          message={detail}
+          descendant={descendant}
+        />
+      );
+    }
     if (detail?.kind === "run" && detail.run_id) {
       return (
         <RunRow

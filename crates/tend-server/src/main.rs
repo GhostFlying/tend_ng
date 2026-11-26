@@ -23,7 +23,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = 256 * 1024;
 
 fn main() -> Result<()> {
@@ -34,6 +34,7 @@ fn main() -> Result<()> {
     let mut web_dir = None;
     let mut web_origin = None;
     let mut router_effort = None;
+    let mut router_name = None;
     let mut discussion_config = None;
     let mut router_model = None;
     let mut program = OsString::from("codex");
@@ -71,6 +72,15 @@ fn main() -> Result<()> {
                     .map_err(|_| anyhow!("invalid Router model"))?;
                 ensure!(!model.trim().is_empty(), "Router model must not be empty");
                 router_model = Some(model);
+            }
+            Some("--router-name") => {
+                let name = args
+                    .next()
+                    .context("--router-name needs a value")?
+                    .into_string()
+                    .map_err(|_| anyhow!("invalid Router name"))?;
+                ensure!(!name.trim().is_empty(), "Router name must not be empty");
+                router_name = Some(name.trim().to_owned());
             }
             Some("--web-dir") => {
                 let directory = PathBuf::from(args.next().context("--web-dir needs a directory")?);
@@ -135,8 +145,11 @@ fn main() -> Result<()> {
     thread::spawn(move || schedule(placement));
     github::spawn(Store::open(&db)?, github_cli.clone());
     github::spawn_discovery(Store::open(&db)?, github_cli);
-    let router_profile =
+    let mut router_profile =
         json!({"id": "router", "model": &router_model, "reasoning_effort": &router_effort});
+    if let Some(name) = &router_name {
+        router_profile["name"] = json!(name);
+    }
     router::spawn(router::Config {
         db,
         cwd,
@@ -144,6 +157,7 @@ fn main() -> Result<()> {
         args: app_args,
         effort: router_effort,
         model: router_model,
+        name: router_name,
         discussion,
     });
     eprintln!("Tend Server listening on {}", server.server_addr());

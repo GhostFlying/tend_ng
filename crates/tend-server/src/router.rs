@@ -151,6 +151,7 @@ pub struct Config {
     pub args: Vec<OsString>,
     pub effort: Option<String>,
     pub model: Option<String>,
+    pub name: Option<String>,
     pub discussion: std::sync::Arc<crate::discussion::Service>,
 }
 
@@ -322,6 +323,7 @@ fn consume(config: &Config, chat: &str, mut store: Store) -> Result<()> {
             &mut DispatchHandler {
                 store: &mut store,
                 attempt_id: &attempt_id,
+                dispatcher_name: config.name.as_deref(),
             },
         )?;
         finish(&mut store, &input, turn)?;
@@ -356,6 +358,7 @@ fn replay_context(store: &Store, input: &Input, attempt_number: i64) -> Result<S
 struct DispatchHandler<'a> {
     store: &'a mut Store,
     attempt_id: &'a str,
+    dispatcher_name: Option<&'a str>,
 }
 
 impl TurnHandler for DispatchHandler<'_> {
@@ -538,6 +541,7 @@ impl DispatchHandler<'_> {
                 call,
                 &work,
                 call.tool == "tend_record_issue",
+                self.dispatcher_name,
             )?,
             "Dispatch call does not match its saved origin or intent",
         )

@@ -4,7 +4,7 @@
 
 ## 默认按要求派发，必要时指名
 
-**已确认。** 主 Chat 的 Router 直接绑定具名 Agent。Router 派发顶层 Issue，Server 从 `issue-router` 选择 Issue Agent。Issue Agent 通过工作子 Issue 委派给 Work Agent，Server 在该顶层 Issue 所属的 Runner 上按 repo、category 和 capability 等要求匹配。派发方可以查询合格候选并指名。按要求派发和指名派发共用匹配逻辑。 [Issue 树的 Runner 归属](server-runner.md#issue-树的-runner-归属)
+**已确认。** 主 Chat 的 Router 使用独立的 Server 配置，显示名可选，不参与 Runner 候选匹配。Router 派发顶层 Issue，Server 从 `issue-router` 选择 Issue Agent。Issue Agent 通过工作子 Issue 委派给 Work Agent，Server 在该顶层 Issue 所属的 Runner 上按 repo、category 和 capability 等要求匹配。派发方可以查询合格候选并指名。按要求派发和指名派发共用匹配逻辑。 [Issue 树的 Runner 归属](server-runner.md#issue-树的-runner-归属)
 
 1. **Runner 上报具体配置。** 本机保存执行与访问配置，Server 从 Runner 上报构建清单。顶层 Issue 首次选择时，多台 Runner 提供的合格配置可以共同参与匹配。同名配置有差异时按 Runner 和配置区分。
 2. **派发方提交任务要求。** 顶层 Issue 的协调派发携带目标、约束及已知的工作要求。实际使用 repo 或既有 workspace 的子 Issue 填写相应条件。用 `category` 表达用途和配置的默认选择，用 `required_capabilities` 提出实际必需的能力。用户明确指名时保留原选择及其来源。

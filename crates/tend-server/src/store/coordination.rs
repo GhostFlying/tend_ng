@@ -502,6 +502,7 @@ fn delegate(
         &agent,
         &work.objective,
         None,
+        Some(&agent),
     )?;
     if requested == "review" && !runner.shared_reviews
         || matching_task_agent(
@@ -874,6 +875,7 @@ mod tests {
                 run_id: None,
                 source_message_id: None,
                 forwarded_from: None,
+                dispatch_provenance: None,
                 created_at: None,
             },
         }

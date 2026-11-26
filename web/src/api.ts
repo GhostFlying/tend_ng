@@ -213,18 +213,21 @@ export type AttentionStatus = {
   issue_reply?: string;
 };
 
-type IssueMessage = {
+export type IssueMessage = {
   id: string;
   issue_id: string;
   short_number?: number;
   issue_title: string;
-  kind: "user" | "agent" | "dispatch" | "relay" | "run";
+  kind: "user" | "agent" | "dispatch" | "relay" | "run" | "takeover";
   author: string;
   text: string;
   reply_to: string | null;
   run_id: string | null;
   source_message_id: string | null;
   forwarded_from?: string;
+  dispatch_provenance?:
+    | { origin: "main_chat" | "issue_delegation"; agent_name?: string }
+    | { origin: "other_chat" };
 };
 
 export type Page = {

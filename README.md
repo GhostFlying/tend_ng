@@ -46,6 +46,8 @@ In a second shell, create `.local/runner/config.json`. Replace the example repos
 
 Each Agent may set `model`, `reasoning_effort`, `description`, and verified capabilities such as `image_gen`. Configure the Router independently with `--router-model` and `--router-effort` when needed. Omitted model settings use the local Codex configuration.
 
+To name the main-session Router, add `--router-name <name>` to the Tend Server startup arguments before `--app-server`. The agreed name for Tend is `--router-name Tend`. The Server records that name on new main-session dispatches after it starts with the flag. If unset, the UI shows only main-session provenance. The setting does not change Router execution, the `router` profile ID, other Chats or earlier dispatches.
+
 Set `CODEX_HOME` in the service environment to use a dedicated default Codex home. To run selected Agents with a different home, name a local launcher in `app_servers` and set `app_server` on those Agents. This Runner configuration fragment selects an Ark home for the coordinator.
 
 ```json

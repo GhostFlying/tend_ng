@@ -32,7 +32,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 33;
+pub(crate) const SCHEMA_VERSION: i64 = 34;
 
 pub struct Store {
     db: Connection,
@@ -237,6 +237,9 @@ impl Store {
         }
         if version < 33 {
             discussion::migrate_archive(&tx)?;
+        }
+        if version < 34 {
+            issue_chat::migrate_dispatch_and_takeover(&tx)?;
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
         tx.execute_batch(

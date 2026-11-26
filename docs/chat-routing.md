@@ -12,7 +12,9 @@ Router 的个人助理职责、主 Chat 与 Issue Chat 的对话边界、Attenti
 
 ## Router 托管与恢复
 
-**已确认。** Server 使用本机 Codex App Server 托管绑定主 Chat 的具名 Router。主 Chat 输入、各 Issue 上报及归属未定的事实在 Server 本地入队，由 Router 按需消费。工作 Runner 全部离线时，Router 仍可查阅已同步的工作事实、答复用户和提交委派。原委派可以在合格 Runner 恢复时继续分配。
+**已确认。** Server 使用本机 Codex App Server 托管绑定主 Chat 的 Router。主 Chat 输入、各 Issue 上报及归属未定的事实在 Server 本地入队，由 Router 按需消费。工作 Runner 全部离线时，Router 仍可查阅已同步的工作事实、答复用户和提交委派。原委派可以在合格 Runner 恢复时继续分配。
+
+部署方可通过 Server 的 `--router-name` 显式指定主会话助手名称。名称在创建派发时随原消息和目标一起持久保存。未指定或无历史证据时，Issue 时间线只显示「来自主会话」。`router` 是角色 ID，模型、effort、线程、Runner 清单及 Issue Owner 均不能作为历史派发者名称。
 
 Server 从持久记录恢复 Chat 收件、历史读取和 Runner 同步，Router 在本机继续启动或恢复。Router 的 App Server 暂不可用时，保留原输入并显示已收到、待处理。Server 持久保存已提交的回复、派发和操作回执。恢复 Router 时沿原输入和可查的执行证据接续，session 可复用或重建。 [本地受理与业务结算](agent-tools.md#本地受理与业务结算)
 
@@ -91,6 +93,8 @@ Router 按交付约定和当前对话分别转述各 Issue 的结果，也可以
 ## Issue Chat 的留言与执行过程
 
 **已确认。** Issue Chat 里的 Agent 留言由显式调用留言工具产生。用户直接在 Issue 中提问时，Owner 用同一个工具答复并关联原留言。留言按所属 Issue 与原作者持久保存并同步到 Server。派发、交付和 Issue 状态按各自的已提交事实展示。 [Agent 工具与本地受理](agent-tools.md)
+
+派发保留原目标和 Chat 或 Issue 链接。Chat 派发沿原消息区分主会话与其他会话，只有来自主会话且保存了名称才显示名称。Issue 委派展示原操作所属 assignment 中的委派者，不要求委派者是目标的树形父级，例如绑定审阅可由同级作者发起。Runner 的接受确认是另一条只读接手事件，不是回复目标或 Owner 输入，不代表已有 Run。 [派发来源与确认接手](plans/issue-timeline-dispatch-provenance.md)
 
 过程说明、工具调用与执行输出保留在原 rollout。Issue Chat 在对应的执行位置显示「查看执行过程」入口，默认收起。打开消息页只从 Server 读取本页需要的消息和执行引用。用户点开入口时，Web 通过共用 API 向原 Run 所属 Runner 读取这段执行过程。已加载内容可收起，展开时也可以按需刷新。原 Runner 暂不可达时，在对应入口显示读取状态，已同步的留言和交付仍可正常阅读。 [按需读取 rollout](server-runner.md#按需读取-rollout)
 

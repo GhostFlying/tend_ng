@@ -553,6 +553,16 @@ a {
   color: var(--label);
 }
 
+.takeover-row {
+  min-width: 0;
+  padding-inline-start: 12px;
+  border-left: 2px solid var(--border-soft);
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 22px;
+  overflow-wrap: anywhere;
+}
+
 .run-row {
   min-width: 0;
   border-left: 2px solid var(--border-soft);

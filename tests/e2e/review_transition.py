@@ -129,6 +129,18 @@ def exercise(args, root):
         [ids] = wait_for(lambda: sql(
             "server", "SELECT v.author_task_id, v.review_task_id, v.review_issue_id, i.parent_issue_id "
                       "FROM tend_reviews v JOIN issues i ON i.id = v.author_issue_id"), bool)
+        _, _, review_issue, parent = ids
+        [(operation, sender, owner_issue)] = sql(
+            "server", "SELECT v.request_id, json_extract(a.contract, '$.placement.agent.id'), t.issue_id "
+                      "FROM tend_reviews v JOIN runner_operations op ON op.id = v.request_id "
+                      "JOIN runner_assignments a ON a.id = json_extract(op.operation, '$.assignment_id') "
+                      "JOIN tasks t ON t.id = a.task_id "
+                      "WHERE v.review_issue_id = ? AND v.author_issue_id = t.issue_id", review_issue)
+        assert cli("issue", "read", review_issue)["parent_issue_id"] == parent != owner_issue
+        [dispatch] = [row for row in cli("issue", "messages", review_issue)["messages"] if row["kind"] == "dispatch"]
+        assert dispatch["id"] == operation and dispatch["source_message_id"] is None
+        assert dispatch["dispatch_provenance"] == {"origin": "issue_delegation", "agent_name": sender}
+        assert sender == "worker"
         mark("allow-author-stop-1")
         gate("review-running-1")
         mark("deliver-review-1")

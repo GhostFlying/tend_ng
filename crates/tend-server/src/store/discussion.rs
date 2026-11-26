@@ -414,7 +414,7 @@ impl Store {
         };
         let mut st = self.db.prepare(
             "SELECT seq,id,kind,author,text,created_at,reply_to FROM issue_messages
-             WHERE issue_id=?1 AND seq<?2 ORDER BY seq DESC LIMIT 26",
+             WHERE issue_id=?1 AND seq<?2 AND kind != 'takeover' ORDER BY seq DESC LIMIT 26",
         )?;
         let mut messages = st
             .query_map(params![issue, before], |r| {

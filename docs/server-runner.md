@@ -54,6 +54,8 @@ slot 的运行统计只包含 Runner 已确认正在执行的 Agent。预分配�
 
 任务已分配和 Runner 已持久接收是两个事实。心跳变旧影响后续分配，已接收的任务按本地契约继续。原 Runner 可能已接收时，沿原派发对账。原派发已失效且有证据确认未持久接收时，尚未绑定 Runner 的顶层 Issue 可以重新选择 Runner。
 
+Server 在首次应用 `ClaimDecision::Accepted` 的事务内，按 assignment ID 追加一条只读 Issue 时间线事件，名称取自该 assignment 的冻结合同。增量重传和全量对账沿原回执确认，不重复追加。新接续 assignment 有自己的接受回执，同一 assignment 下的新 Run 不写接手事件。旧库不为既有接受记录推测确认时间或插入历史事件。
+
 Runner 取件按自己的待投递记录查询。心跳可与同步一起上报，按需要保存最新可用性观察。
 
 旧 Tend 的 `runner.claim` 由 Runner 发起，Server 在领取时挑选工作。部分空领取曾进入写事务查找候选与恢复路径，后来添加了只读预查。新设计需保持取件和原任务查询有界，候选计算与实际分配围绕当前任务及 Runner 的事实进行。 [旧领取预查](https://github.com/GhostFlying/tend/blob/83bc15ae/internal/app/claim_preflight.go#L39-L75)

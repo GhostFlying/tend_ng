@@ -2,6 +2,8 @@
 
 **已确认。** Issue 保存持续的目标、Owner 和工作事实。Task 是可由 Runner 独立推进的委托。主动等待暂停当前执行并让出 slot，Task 在待续跑期间保持原身份与目标。
 
+时间线里的派发者、历史接手 Agent 和当前 Owner 是不同事实。只在 Server 提交 Runner 的接受回执时展示该 assignment 合同中的接手 Agent。预分配和取件不能提前创建接手事件，后续 Owner 或 Run 也不改写历史。 [派发与投递](server-runner.md#分配与投递)
+
 ## 工作委派与 Issue 结案
 
 Issue Agent 按用户原目标、授权和停点委派与验收。它通过工作子 Issue 委派实际工作，由 Server 分配 Work Agent，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。
