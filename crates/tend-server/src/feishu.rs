@@ -627,30 +627,33 @@ fn fetch_context(
                     complete = false;
                     continue;
                 }
-                if at < lower {
+                if let Some(thread) = thread
+                    && lower == job.first_at
+                    && at.div_euclid(60) == job.first_at.div_euclid(60)
+                {
+                    // A thread query has no precise start. A tied minute
+                    // needs a provider position even when the stored anchor
+                    // is itself rounded to the beginning of that minute.
+                    match thread_position(&job.evidence.anchor.href, thread)
+                        .zip(thread_position(&message.evidence.href, thread))
+                    {
+                        Some((anchor, reply)) if reply > anchor => {}
+                        Some(_) => continue,
+                        None => {
+                            complete = false;
+                            continue;
+                        }
+                    }
+                } else if at < lower {
                     if !coarse || at + 59 < lower {
                         continue;
                     }
-                    // Chat applies its exact bounds before formatting. A
-                    // nested thread expansion is not constrained by those
-                    // bounds. Thread listing instead needs a reliable
-                    // provider position in the same conversation.
-                    if !(thread.is_none() && top_level && from >= lower) {
-                        let position =
-                            thread.filter(|_| lower == job.first_at).and_then(|thread| {
-                                Some((
-                                    thread_position(&job.evidence.anchor.href, thread)?,
-                                    thread_position(&message.evidence.href, thread)?,
-                                ))
-                            });
-                        match position {
-                            Some((anchor, reply)) if reply > anchor => {}
-                            Some(_) => continue,
-                            None => {
-                                complete = false;
-                                continue;
-                            }
-                        }
+                    // The chat endpoint filters top-level rows before
+                    // formatting. Its nested expansions do not share the
+                    // precise lower bound.
+                    if thread.is_some() || !top_level || from < lower {
+                        complete = false;
+                        continue;
                     }
                 }
                 found.push(message);

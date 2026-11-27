@@ -321,7 +321,9 @@ fn fold_proven_replies(
         for mention in old.mentions.into_iter().chain([old.anchor]) {
             direct.entry(mention.id.clone()).or_insert(mention);
         }
-        saved.replies.extend(old.replies);
+        // Do not import the provisional reply cache. It was captured against
+        // a different anchor and may predate a tombstone seen by this pass.
+        // The selected snapshots still retain exactly what the user saw.
         db.execute(
             "UPDATE feishu_suggestions SET last_at=MAX(last_at,(SELECT last_at FROM feishu_suggestions WHERE id=?2)) WHERE id=?1",
             params![job.id,former],
@@ -350,18 +352,6 @@ fn fold_proven_replies(
         .query_map([&job.id], |r| r.get::<_, String>(0))?
         .collect::<rusqlite::Result<_>>()?;
     saved.replies.retain(|e| !direct_ids.contains(&e.id));
-    saved.replies.sort_by(|a, b| {
-        a.id.cmp(&b.id)
-            .then_with(|| b.updated_at.cmp(&a.updated_at))
-    });
-    saved.replies.dedup_by(|a, b| a.id == b.id);
-    saved
-        .replies
-        .sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
-    if saved.replies.len() > 12 {
-        saved.replies.drain(..saved.replies.len() - 12);
-        saved.context_status = "partial".into();
-    }
     Ok(true)
 }
 

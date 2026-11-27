@@ -11,6 +11,7 @@ const {
   TEND_FEISHU_ALIAS: alias,
   TEND_FEISHU_PRIOR_CHAT: priorChat,
   TEND_FEISHU_PRIOR_MESSAGE: priorMessage,
+  TEND_FEISHU_CACHED_DETAIL: cachedDetail,
 } = process.env;
 const errors = [];
 const browser = await chromium.launch({ channel: "chromium" });
@@ -123,6 +124,54 @@ try {
             .getAttribute("href"),
           `/discussions?chat=${priorChat}`,
         );
+        if (cachedDetail) {
+          const stale = JSON.parse(cachedDetail);
+          stale.evidence.assessment.headline = "分页已缓存的临时建议";
+          // Replay only the stale page. The detail request still goes to the
+          // real Server and resolves its old ID to the current suggestion.
+          await page.route(
+            /\/api\/v1\/feishu-suggestions(?:\?.*)?$/,
+            async (route) => {
+              if (new URL(route.request().url()).searchParams.has("before")) {
+                await route.fulfill({
+                  json: { suggestions: [stale], next_before: null },
+                });
+                return;
+              }
+              const response = await route.fetch();
+              const first = await response.json();
+              first.suggestions = first.suggestions.filter(
+                (item) => !item.aliases.includes(alias),
+              );
+              first.next_before = "cached-fixture";
+              await route.fulfill({ json: first });
+            },
+          );
+          await page.goto(`${base}/feishu-suggestions`);
+          await list.getByRole("button", { name: "更多建议" }).click();
+          await list
+            .getByRole("link", { name: /分页已缓存的临时建议/ })
+            .click();
+          await detail
+            .getByRole("heading", { name: "确认周五发布负责人" })
+            .waitFor();
+          assert.equal(
+            await detail
+              .getByRole("heading", { name: "分页已缓存的临时建议" })
+              .count(),
+            0,
+          );
+          await detail.getByRole("link", { name: /返回建议列表/ }).click();
+          await list
+            .getByRole("link", { name: /确认周五发布负责人/ })
+            .waitFor();
+          assert.equal(
+            await list
+              .getByRole("link", { name: /分页已缓存的临时建议/ })
+              .count(),
+            0,
+          );
+        }
       }
     }
     await context.close();

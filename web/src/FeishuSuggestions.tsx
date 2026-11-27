@@ -91,7 +91,10 @@ export function FeishuSuggestions({
     cards: FeishuCard[];
     next: string | null;
   } | null>(null);
-  const [outside, setOutside] = useState<FeishuCard | null>(null);
+  const [outside, setOutside] = useState<{
+    requested: string;
+    card: FeishuCard;
+  } | null>(null);
   const [tab, setTab] = useState<Tab>("open");
   const [error, setError] = useState("");
   const [selectedError, setSelectedError] = useState("");
@@ -104,12 +107,17 @@ export function FeishuSuggestions({
     if (!cards.some((item) => item.evidence.id === card.evidence.id))
       cards.push(card);
   }
-  const superseded = new Set(cards.flatMap((card) => card.aliases));
+  // A paginated card is only cached, so a fresh detail may resolve its
+  // ID to an uncached canonical card. Let that response retire the stale row.
+  const freshDetail = outside?.requested === selected ? outside?.card : null;
+  const superseded = new Set([
+    ...cards.flatMap((card) => card.aliases),
+    ...(freshDetail?.aliases ?? []),
+  ]);
   const visible = cards.filter((card) => !superseded.has(card.evidence.id));
   const filtered = visible.filter((card) => tabOf(card) === tab);
   const selectedCard =
-    visible.find((card) => matchesId(card, selected)) ||
-    (outside && matchesId(outside, selected) ? outside : null);
+    freshDetail ?? visible.find((card) => matchesId(card, selected)) ?? null;
   const active = selected ? selectedCard : (filtered[0] ?? null);
   const next = extra ? extra.next : data?.next_before;
 
@@ -130,7 +138,26 @@ export function FeishuSuggestions({
           try {
             const card = await feishuCard(selected, controller.signal);
             if (controller.signal.aborted) return;
-            setOutside(card);
+            setOutside({ requested: selected, card });
+            setExtra((page) => {
+              if (
+                !page?.cards.some((item) =>
+                  card.aliases.includes(item.evidence.id),
+                )
+              )
+                return page;
+              return {
+                ...page,
+                cards: [
+                  ...page.cards.filter(
+                    (item) =>
+                      item.evidence.id !== card.evidence.id &&
+                      !card.aliases.includes(item.evidence.id),
+                  ),
+                  card,
+                ],
+              };
+            });
             setSelectedError("");
           } catch (error) {
             if (controller.signal.aborted) return;
@@ -138,6 +165,7 @@ export function FeishuSuggestions({
             setSelectedError(errorText(error));
           }
         } else {
+          setOutside(null);
           setSelectedError("");
         }
       } catch (error) {

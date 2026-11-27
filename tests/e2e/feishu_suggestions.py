@@ -199,7 +199,10 @@ def run(args, root):
         documents = card("om_docs_anchor")["evidence"]["id"]
         resolved = judged("om_docs_anchor")
         release = judged("om_release_anchor")
-        judged("om_other_topic")
+        rounded_anchor = judged("om_other_topic")
+        assert rounded_anchor["evidence"]["anchor"]["created_at"] % 60 == 0
+        assert [m["id"] for m in rounded_anchor["evidence"]["replies"]] == ["om_other_later"]
+        assert rounded_anchor["evidence"]["context_status"] == "partial"
         assert [m["id"] for m in qa["evidence"]["replies"]] == ["om_qa_reply"]
         assert qa["evidence"]["anchor"]["created_at"] % 60 == 30
         assert qa["evidence"]["replies"][0]["created_at"] == qa["evidence"]["anchor"]["created_at"] // 60 * 60
@@ -226,18 +229,20 @@ def run(args, root):
 
         # Simulate the passage of the context poll interval. A new reply is
         # deliberately NOT an @mention and must still advance the same card.
-        set_state("recover", progress=True, deep_context=True, hold_release=True)
-        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id IN (?,?)", id, documents)
+        set_state("recover", progress=True, provisional_only=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id=?", id)
         use("sync")
-        wait_for((root / "release-context-held").exists, bool)
-        provisional = card("om_release_final")
-        assert provisional and not provisional["evidence"]["replies"]
+        provisional = judged("om_release_final")
+        assert [m["id"] for m in provisional["evidence"]["replies"]] == ["om_release_deleted"]
         provisional_id, provisional_rev = provisional["evidence"]["id"], provisional["evidence"]["revision"]
         prior_discussion = use("discuss", provisional_id, provisional_rev)["chat_id"]
         use("handoff", provisional_id, provisional_rev)
         prior_handoff = wait_for(lambda: status(provisional_id, provisional_rev),
                                  lambda r: r and r["request"]["status"] == "sent")
-        (root / "release-context-unblock").touch()
+        release_id = release["evidence"]["id"]
+        set_state("recover", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id IN (?,?)", release_id, documents)
+        use("sync")
         advanced = wait_for(lambda: use("read", id),
                             lambda c: c["evidence"]["revision"] > revision and c["evidence"]["assessment"])
         updated = advanced["evidence"]["revision"]
@@ -248,7 +253,6 @@ def run(args, root):
         assert use("discuss", id, updated, existing)["chat_id"] == existing
         assert use("discuss", id, revision, existing)["chat_id"] == existing
         assert next(a for a in use("read", id)["discussions"] if a["chat_id"] == existing)["revision"] == updated
-        release_id = release["evidence"]["id"]
         nested = wait_for(lambda: use("read", release_id), lambda c: len(c["evidence"]["mentions"]) == 3)
         assert [m["id"] for m in nested["evidence"]["mentions"]] == ["om_release_anchor", "om_release_update", "om_release_final"]
         assert [m["id"] for m in nested["evidence"]["replies"]] == ["om_release_parent"]
@@ -261,6 +265,9 @@ def run(args, root):
         assert status(provisional_id, provisional_rev) == prior_handoff
         assert use("handoff", provisional_id, provisional_rev) == prior_handoff
         assert cli("discussion", "read", prior_discussion)["references"][0]["suggestion_id"] == provisional_id
+        originals = sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE suggestion_id=? ORDER BY chat_id", provisional_id)
+        assert len(originals) == 2 and all("om_release_deleted" in evidence for evidence, in originals)
+        print("PASS deletion read during fold is absent from current advice but both selected old snapshots remain unchanged", flush=True)
         assert sql(db, "SELECT suggestion_id FROM feishu_mentions WHERE message_id='om_release_final'") == [(release_id,)]
         print("PASS minute-precision chat and thread evidence; a late-discovered non-mention parent folds its @ child into the original card without rewriting receipts", flush=True)
 
@@ -285,6 +292,7 @@ def run(args, root):
                 **env, "TEND_SCREENSHOTS": str(args.screenshots), "TEND_FEISHU_CARD": id,
                 "TEND_FEISHU_ALIAS": provisional_id, "TEND_FEISHU_PRIOR_CHAT": prior_discussion,
                 "TEND_FEISHU_PRIOR_MESSAGE": prior_handoff["request"]["message_id"],
+                "TEND_FEISHU_CACHED_DETAIL": json.dumps(provisional, ensure_ascii=False),
             }, check=True, timeout=80)
 
         consult = cli("chat", "send", existing, "仅记录用户补充：回滚阈值保留待确认，不实施。")["message_id"]

@@ -4,7 +4,6 @@ import json
 import os
 from pathlib import Path
 import sys
-import time
 
 root = Path(__file__).parent
 state = json.loads((root / "feishu-scenario.json").read_text())
@@ -156,7 +155,15 @@ elif args[:2] == ["im", "+threads-messages-list"]:
         page(rows)
     else:
         assert arg("--thread") == "omt_qa_other"
-        page([])
+        earlier = msg("other_early", "qa", "移动端发布协作", "旧消息不能支撑新结论", epoch-5400,
+                      thread="qa_other", position=100)
+        unknown = msg("other_unknown", "qa", "移动端发布协作", "位置不明不能用作后续", epoch-5400,
+                      thread="qa_other", position=101)
+        unknown.pop("message_app_link")
+        unknown.pop("message_position")
+        later = msg("other_later", "qa", "移动端发布协作", "位置已核实的后续", epoch-5400,
+                    thread="qa_other", position=103)
+        page([earlier, unknown, later])
 elif args[:2] == ["im", "+chat-messages-list"]:
     assert arg("--as") == "user" and arg("--start")
     assert arg("--order") == "asc"
@@ -180,18 +187,21 @@ elif args[:2] == ["im", "+chat-messages-list"]:
             page([further])
     else:
         assert arg("--chat-id") == "oc_release"
-        if state.get("hold_release") and not (root / "release-context-unblock").exists():
-            (root / "release-context-held").touch()
-            till = time.monotonic()+20
-            while not (root / "release-context-unblock").exists():
-                assert time.monotonic() < till
-                time.sleep(0.025)
         if state.get("progress"):
             parent = msg("release_parent", "release", "发布支持", "先给负责人一个确认窗口。", epoch - 240,
                          author="顾宁", position=122, reply_to="release_anchor")
             child = msg("release_final", "release", "发布支持", "@你 顾宁继续跟进负责人。", epoch-120,
                         mentions=mark, author="顾宁", position=123, reply_to="release_parent")
-            page([parent, child])
+            further = msg("release_deleted", "release", "发布支持", "这段草稿后来撤回。", epoch-60,
+                          author="顾宁", position=124, reply_to="release_final")
+            if state.get("provisional_only"):
+                # Before the original topic can see B, the child card can
+                # still see a direct reply to its own anchor.
+                since = datetime.fromisoformat(arg("--start")).timestamp()
+                page([further] if since >= epoch-240 else [])
+            else:
+                further["deleted"] = True
+                page([parent, child, further])
         else:
             page([])
 else:
