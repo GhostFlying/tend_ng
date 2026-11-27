@@ -382,8 +382,20 @@ pub fn native_snapshot(
     snapshot(file, thread, Scope::Turn(turn), active)
 }
 
+/// Byte-compatible records for a pre-child Server's snapshot digest. This
+/// is the old root-only parser policy, not the current accounting policy.
+pub fn native_snapshot_legacy(
+    file: File,
+    thread: &str,
+    turn: &str,
+    active: bool,
+) -> Result<Vec<protocol::NativeTokenRecord>, protocol::TokenSourceGap> {
+    snapshot(file, thread, Scope::LegacyTurn(turn), active)
+}
+
 enum Scope<'a> {
     Turn(&'a str),
+    LegacyTurn(&'a str),
     Child {
         session: &'a str,
         root_turn: &'a str,
@@ -407,7 +419,7 @@ fn snapshot(
     let mut line = Vec::new();
     let mut model = TurnModel::default();
     let mut model_turn = match scope {
-        Scope::Turn(turn) => turn.to_owned(),
+        Scope::Turn(turn) | Scope::LegacyTurn(turn) => turn.to_owned(),
         Scope::Child { .. } => String::new(),
     };
     loop {
@@ -476,11 +488,15 @@ fn snapshot(
         };
         // A fork can contain copied ancestor evidence. Only the exact
         // original thread and turn can contribute to this binding.
+        let legacy = matches!(scope, Scope::LegacyTurn(_));
         if record_thread != thread {
+            if legacy {
+                return Err(SourceCorrupt);
+            }
             continue;
         }
         let child = match scope {
-            Scope::Turn(turn) if record_turn == turn => None,
+            Scope::Turn(turn) | Scope::LegacyTurn(turn) if record_turn == turn => None,
             Scope::Child { session, root_turn }
                 if payload["session_id"] == session
                     && payload["root_turn_id"] == root_turn
@@ -496,11 +512,23 @@ fn snapshot(
         };
         let response = payload["response_id"]
             .as_str()
-            .filter(|id| valid_native_id(id))
+            .filter(|id| {
+                if legacy {
+                    !id.is_empty() && id.len() <= 256
+                } else {
+                    valid_native_id(id)
+                }
+            })
             .ok_or(SourceCorrupt)?;
         let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone())
             .ok()
-            .map(TokenCounts::without_unproven_optional_zeros);
+            .map(|counts| {
+                if legacy {
+                    counts
+                } else {
+                    counts.without_unproven_optional_zeros()
+                }
+            });
         let valid = serde_json::from_value::<NativeRecord>(payload.clone())
             .is_ok_and(|record| record.valid());
         let cursor = protocol::native_request_cursor(
@@ -536,7 +564,7 @@ fn snapshot(
             }
         }
     }
-    if records.is_empty() && matches!(scope, Scope::Turn(_)) {
+    if records.is_empty() && matches!(scope, Scope::Turn(_) | Scope::LegacyTurn(_)) {
         return Err(NoNativeRecords);
     }
     // A file truncated after metadata has an unscanned tail even if its
@@ -830,6 +858,28 @@ mod tests {
 
     fn notice(last: i64, cursor: i64) -> Value {
         json!({"total":{"totalTokens":cursor}, "last": {"totalTokens":last,"cachedInputTokens":0}})
+    }
+
+    #[test]
+    fn old_root_snapshot_retains_optional_defaults_for_its_digest() -> anyhow::Result<()> {
+        let fixture = Fixture::new()?;
+        let path = fixture.0.join("legacy.jsonl");
+        fs::write(
+            &path,
+            format!("{}\n", record("thread", "turn", "response", 10, 10)),
+        )?;
+        let legacy = native_snapshot_legacy(File::open(&path)?, "thread", "turn", false).unwrap();
+        assert_eq!(legacy[0].counts.unwrap().cached_input_tokens, Some(0));
+        let encoded = serde_json::to_value((&legacy, false))?;
+        assert!(encoded[0][0].get("child").is_none());
+        assert_eq!(encoded[0][0]["counts"]["cached_input_tokens"], 0);
+        let updated = native_snapshot(File::open(&path)?, "thread", "turn", false).unwrap();
+        assert_eq!(updated[0].counts.unwrap().cached_input_tokens, None);
+        assert!(matches!(
+            native_snapshot_legacy(File::open(&path)?, "other", "turn", false),
+            Err(TokenSourceGap::SourceCorrupt)
+        ));
+        Ok(())
     }
 
     #[test]

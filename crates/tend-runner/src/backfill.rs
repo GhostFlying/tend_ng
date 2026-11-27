@@ -90,7 +90,7 @@ impl Worker {
     }
 }
 
-use crate::usage::{ChildRollouts, Rollouts, rollout_index};
+use crate::usage::{ChildRollouts, Rollouts, native_snapshot_legacy, rollout_index};
 struct Snapshot {
     item: i64,
     digest: String,
@@ -203,7 +203,14 @@ impl Scanner {
                     io::ErrorKind::NotFound => SourceMissing,
                     _ => SourceUnreadable,
                 })
-                .and_then(|file| native_snapshot(file, &work.thread_id, &work.turn_id, active)),
+                .and_then(|file| {
+                    let read = if work.include_children {
+                        native_snapshot
+                    } else {
+                        native_snapshot_legacy
+                    };
+                    read(file, &work.thread_id, &work.turn_id, active)
+                }),
             Some(None) => Err(SourceAmbiguous),
             None => Err(SourceMissing),
         };

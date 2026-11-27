@@ -154,6 +154,18 @@ impl RequestMeter {
             && model.is_none_or(TokenModel::valid)
     }
 
+    /// Apply only after corroborating the response identity. An older wire
+    /// observation can contain only optional defaults and no model evidence.
+    pub fn normalized(mut self) -> Self {
+        if !self.provider_counts {
+            self.counts = self.counts.without_unproven_optional_zeros();
+        }
+        if self.counts.missing() && self.model.is_none() {
+            self.model = Some(TokenModel::Unresolved);
+        }
+        self
+    }
+
     pub fn merge(&self, other: &Self) -> Option<Self> {
         Some(Self {
             counts: self.counts.merge_reported(

@@ -235,7 +235,8 @@ fn verifies_original_identity_and_counts_each_run_once_even_when_batches_reorder
     let child = native_run("child-run", "child-a");
     let grand = native_run("grand-run", "grand-a");
     let outside = native_run("outside-run", "outside-a");
-    let parent_usage = observation(&parent, 50, Some(20));
+    let mut parent_usage = observation(&parent, 50, Some(20));
+    parent_usage.provider_counts = true;
     let child_usage = observation(&child, 70, Some(25));
     let outside_usage = observation(&outside, 60, Some(50));
 
@@ -1120,6 +1121,60 @@ fn legacy_root_page_is_partial_and_child_audit_uses_native_keys() -> Result<()> 
         assert_eq!(row["response_id"], "shared-response");
         assert_eq!(row["root_thread_id"], root.thread_id);
         assert_eq!(row["root_turn_id"], root.turn_id);
+    }
+    Ok(())
+}
+
+#[test]
+fn verified_ingress_normalizes_legacy_defaults_before_and_after_backfill() -> Result<()> {
+    use protocol::{TokenConflictPolicy::Quarantine, TokenUsageScope::All};
+    for scan_first in [false, true] {
+        let fixture = Fixture::new()?;
+        let mut store = Store::initialize(&fixture.file())?;
+        base(&store.db)?;
+        issue(&store.db, "issue", None)?;
+        assignment(&store.db, "task", "issue", "runner")?;
+        let run = native_run("run", "task");
+        sync(&mut store, "runner", std::slice::from_ref(&run), &[])?;
+
+        let mut legacy_wire = observation(&run, 0, Some(7));
+        legacy_wire.last.cache_write_input_tokens = Some(0);
+        legacy_wire.last.reasoning_output_tokens = Some(0);
+        let check = |store: &Store, expected: Value| -> Result<()> {
+            let direct = &view(store, "issue")?["direct"];
+            assert_eq!(direct["reported_requests"], 1);
+            assert_eq!(direct["total_tokens"]["tokens"], "7");
+            assert_eq!(direct["cache_write_input_tokens"]["tokens"], expected);
+            assert_eq!(direct["reasoning_output_tokens"]["tokens"], expected);
+            Ok(())
+        };
+
+        if !scan_first {
+            sync(
+                &mut store,
+                "runner",
+                &[],
+                std::slice::from_ref(&legacy_wire),
+            )?;
+            check(&store, Value::Null)?;
+        }
+        backfill_job(&mut store, "scan", All, Quarantine)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        deliver(&mut store, "runner", &page(work.item, 0, &[(0, 7)], true))?;
+        let mut exact = legacy_wire.clone();
+        exact.event_id.push_str("-raw");
+        exact.provider_counts = true;
+        sync(
+            &mut store,
+            "runner",
+            &[],
+            std::slice::from_ref(&legacy_wire),
+        )?;
+        check(&store, Value::Null)?;
+        sync(&mut store, "runner", &[], &[exact, legacy_wire])?;
+        check(&store, json!("0"))?;
+        store.rebuild_token_usage(&All)?;
+        check(&store, json!("0"))?;
     }
     Ok(())
 }

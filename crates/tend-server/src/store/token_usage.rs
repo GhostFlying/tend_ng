@@ -275,14 +275,15 @@ fn persist_verified_request(
     usage: &RunTokenUsage,
     tally: &mut Tally,
 ) -> Result<()> {
-    if backfill::live(db, usage, tally)? {
-        return Ok(());
-    }
     let meter = RequestMeter {
         counts: usage.last,
         model: usage.model.clone(),
         provider_counts: usage.provider_counts,
-    };
+    }
+    .normalized();
+    if backfill::live(db, usage, &meter, tally)? {
+        return Ok(());
+    }
     let last = serde_json::to_string(&meter)?;
     let key = params![usage.thread_id, usage.turn_id, usage.response_id];
     if db.prepare_cached(
@@ -299,7 +300,7 @@ fn persist_verified_request(
     // evidence. For an identity conflict within the same Run, neither counts.
     if previous.0 == usage.run_id && previous.1 != last && previous.2.is_none() {
         let old: RequestMeter = serde_json::from_str(&previous.1)?;
-        if let Some(merged) = old.merge(&meter) {
+        if let Some(merged) = old.clone().normalized().merge(&meter) {
             if old != merged {
                 db.prepare_cached(
                     "UPDATE token_requests SET last = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",

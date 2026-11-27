@@ -50,3 +50,10 @@
 - 审计保留子响应完整原生键，独立保留 Run 的根 thread/turn，同响应 ID 的不同子 turn 不会合并审计条目。
 
 原生验证可执行 `python3 -B tests/e2e/system_agent_token_usage_native.py <server> <cli> <codex> <scratch>`，只使用隔离 Codex home、合成飞书材料和回环 Responses 服务。上一版 Runner 对照可用 `system_agent_token_usage.py --legacy-runner <旧 Runner>`。
+
+### 混版本边界复审
+
+- 在校验原 Runner/Run/turn 后统一解释计量来源。旧 Runner 的标准化可选默认零在直接写入和历史键上的迟到实时合并均视为未知。供应商原始字段证明的零不受影响。迁移不扫描或改写历史请求。
+- 上游 Server 未声明子覆盖协议时，根回合用旧版原件读取、分页和摘要，避免同一旧作业在更换 Runner 二进制时误报原件变化。隔离验证同库、同原件、同作业的跨 32 键分页续接。
+
+`python3 -B tests/e2e/token_usage_mixed_versions.py <当前 Server> <旧 Server> <CLI> <当前 Runner> <旧 Runner>` 使用隔离的进程和合成原件验证双向混版。旧 Server 测试在固定第 1 页已提交后更换 Runner，断言原 job、原摘要和原件字节保持不变。

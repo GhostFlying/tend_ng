@@ -257,6 +257,7 @@ fn project(
 pub(super) fn live(
     db: &Connection,
     usage: &protocol::RunTokenUsage,
+    meter: &RequestMeter,
     tally: &mut Tally,
 ) -> Result<bool> {
     let key = (&*usage.thread_id, &*usage.turn_id, &*usage.response_id);
@@ -294,24 +295,25 @@ pub(super) fn live(
     );
     match evidence.server {
         None => {
-            evidence.server = Some(usage.last);
-            evidence.server_model = usage.model.clone();
-            evidence.server_provider_counts = usage.provider_counts;
+            evidence.server = Some(meter.counts);
+            evidence.server_model = meter.model.clone();
+            evidence.server_provider_counts = meter.provider_counts;
         }
         Some(first) => {
+            let first = RequestMeter {
+                counts: first,
+                model: evidence.server_model.clone(),
+                provider_counts: evidence.server_provider_counts,
+            }
+            .normalized();
             if evidence.server_conflict.is_none()
-                && let Some(merged) = first.merge_reported(
-                    evidence.server_provider_counts,
-                    usage.last,
-                    usage.provider_counts,
-                )
+                && let Some(merged) = first.merge(meter)
             {
-                evidence.server = Some(merged);
-                evidence.server_provider_counts |= usage.provider_counts;
-                evidence.server_model =
-                    TokenModel::merge(evidence.server_model, usage.model.clone());
+                evidence.server = Some(merged.counts);
+                evidence.server_provider_counts = merged.provider_counts;
+                evidence.server_model = merged.model;
             } else {
-                evidence.server_conflict.get_or_insert(usage.last);
+                evidence.server_conflict.get_or_insert(meter.counts);
             }
         }
     }
