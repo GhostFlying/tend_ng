@@ -255,6 +255,8 @@ for line in sys.stdin:
                     answer = "飞书来源请核对 Android 灰度窗口。测试范围和回滚值仍待确认。没有实施授权。"
                     if "om_docs_anchor" in context:
                         answer = "飞书文档项已关闭，仅供主 Chat 参考。没有实施授权。"
+                    elif "om_release_final" in context:
+                        answer = "记录发布负责人消息，尚待确认。没有实施授权。"
                     else:
                         assert "om_qa_anchor" in context
                     if additions:

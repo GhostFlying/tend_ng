@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 
 root = Path(__file__).parent
 state = json.loads((root / "feishu-scenario.json").read_text())
@@ -36,6 +37,8 @@ def msg(key, chat, name, text, at, *, mentions=None, author="林青", sender="ou
     }
     if thread:
         output["thread_id"] = f"omt_{thread}"
+        output["message_app_link"] = ("https://applink.feishu.cn/client/thread/open?"
+                                      f"openthreadid=omt_{thread}&openchatid=oc_{chat}&thread_position={position}")
     elif reply_to:
         output["reply_to"] = f"om_{reply_to}"
     return output
@@ -53,10 +56,10 @@ mark = [{"id": owner, "key": "@_user_1", "name": "本人"}]
 qa = msg("qa_anchor", "qa", "移动端发布协作", "@你 今天能确认 Android 灰度窗口吗？先沿用 5%，需要补上回滚阈值。",
          epoch - 1800, mentions=mark, thread="qa")
 qa_reply = msg("qa_reply", "qa", "移动端发布协作", "候选包已通过冒烟测试。灰度比例先维持 5%，回滚阈值还在等 QA 答复。",
-               epoch - 1200, author="沈言", thread="qa", position=124)
+               (epoch - 1800) // 60 * 60 + 45, author="沈言", thread="qa", position=124)
 docs = msg("docs_anchor", "docs", "研发体验", "@你 能看一下新文档的本地启动流程吗？", epoch - 3000, mentions=mark, author="周韵")
 docs_reply = msg("docs_reply", "docs", "研发体验", "本地启动步骤已补齐，示例经两位同学核对，文档项可以关闭。",
-                 epoch - 900, reply_to="docs_anchor", author="周韵", position=128)
+                 (epoch - 3000) // 60 * 60 + 45, reply_to="docs_anchor", author="周韵", position=337)
 if args == ["whoami"]:
     print(json.dumps({"brand": "feishu", "identity": "user", "available": True, "onBehalfOf": {
         "openId": "ou_other" if state["mode"] == "wrong-user" else owner,
@@ -73,7 +76,10 @@ elif args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     def search_page(messages, *, more=False, token=""):
         (root / "feishu-hydration.json").write_text(json.dumps(messages, ensure_ascii=False))
         items = [{"meta_data": {"message_id": m["message_id"], "chat_id": m["chat_id"],
-                               "create_time": m["create_time"], "update_time": m["update_time"]}}
+                               "create_time": (int(datetime.fromisoformat(m["create_time"] + "+00:00").timestamp()) + 30
+                                               if m["message_id"] in ("om_docs_anchor", "om_qa_anchor")
+                                               else m["create_time"]),
+                               "update_time": m["update_time"]}}
                  for m in messages]
         print(json.dumps({"ok": True, "identity": "user", "data": {
             "items": items, "has_more": more, "page_token": token}}))
@@ -101,7 +107,7 @@ elif args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
     release2 = msg("release_update", "release", "发布支持", "@你 已经确认发布窗口，负责人还需要明确。",
                    epoch - 3600, mentions=mark, author="顾宁", position=122, reply_to="release_anchor")
     release3 = msg("release_final", "release", "发布支持", "@你 顾宁继续跟进负责人。",
-                   epoch - 120, mentions=mark, author="顾宁", position=123, reply_to="release_update")
+                   epoch - 120, mentions=mark, author="顾宁", position=123, reply_to="release_parent")
     all_only = msg("all", "qa", "移动端发布协作", "@全员 不应进入建议", epoch - 1300,
                    mentions=[{"id": "all", "name": "所有人"}])
     self_post = msg("self", "qa", "移动端发布协作", "@你 不应采集本人发言", epoch - 1500, mentions=mark, sender=owner)
@@ -133,7 +139,13 @@ elif args[:3] == ["im", "chats", "get"]:
 elif args[:2] == ["im", "+threads-messages-list"]:
     assert arg("--as") == "user" and arg("--order") == "asc"
     if arg("--thread") == "omt_qa":
-        rows = [qa_reply, qa]
+        before = msg("qa_before", "qa", "移动端发布协作", "这是锚点前的历史消息",
+                     epoch-1800, thread="qa", position=119)
+        ambiguous = msg("qa_ambiguous", "qa", "移动端发布协作", "无法核实是锚点之后",
+                        epoch-1800, thread="qa", position=121)
+        ambiguous.pop("message_app_link")
+        ambiguous.pop("message_position")
+        rows = [before, qa, ambiguous, qa_reply]
         if state.get("progress"):
             rows.insert(0, msg("qa_next", "qa", "移动端发布协作", "新进展：QA 要求验收设备覆盖 Android 12 和 15，阈值继续待确认。",
                                epoch - 300, author="沈言", thread="qa", position=127))
@@ -154,7 +166,8 @@ elif args[:2] == ["im", "+chat-messages-list"]:
         number = int(token.removeprefix("doc-page-")) if token else 1
         # Real formatting does not have root_id or parent_id for these
         # ordinary replies. On the fifth page C only refers to B on page two.
-        noise = [msg(f"noise_{number}_{i}", "docs", "研发体验", "不相关的群聊", epoch-2400+i,
+        noise = [msg(f"noise_{number}_{i}", "docs", "研发体验", "不相关的群聊",
+                     (epoch-3000)//60*60+31+i//4 if number==1 else epoch-2400+i,
                      position=150+number*100+i) for i in range(49)]
         if number < last:
             seeds = [docs] if number == 1 else [docs_reply] if number == 2 else []
@@ -167,6 +180,19 @@ elif args[:2] == ["im", "+chat-messages-list"]:
             page([further])
     else:
         assert arg("--chat-id") == "oc_release"
-        page([])
+        if state.get("hold_release") and not (root / "release-context-unblock").exists():
+            (root / "release-context-held").touch()
+            till = time.monotonic()+20
+            while not (root / "release-context-unblock").exists():
+                assert time.monotonic() < till
+                time.sleep(0.025)
+        if state.get("progress"):
+            parent = msg("release_parent", "release", "发布支持", "先给负责人一个确认窗口。", epoch - 240,
+                         author="顾宁", position=122, reply_to="release_anchor")
+            child = msg("release_final", "release", "发布支持", "@你 顾宁继续跟进负责人。", epoch-120,
+                        mentions=mark, author="顾宁", position=123, reply_to="release_parent")
+            page([parent, child])
+        else:
+            page([])
 else:
     raise AssertionError(f"unexpected command {args!r}")

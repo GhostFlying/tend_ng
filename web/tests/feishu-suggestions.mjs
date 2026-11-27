@@ -8,6 +8,9 @@ const {
   TEND_TOKEN: token,
   TEND_SCREENSHOTS: output,
   TEND_FEISHU_CARD: id,
+  TEND_FEISHU_ALIAS: alias,
+  TEND_FEISHU_PRIOR_CHAT: priorChat,
+  TEND_FEISHU_PRIOR_MESSAGE: priorMessage,
 } = process.env;
 const errors = [];
 const browser = await chromium.launch({ channel: "chromium" });
@@ -67,7 +70,7 @@ try {
         .getByRole("link", { name: /飞书原文/ })
         .first()
         .getAttribute("href"),
-      /^https:\/\/applink\.feishu\.cn\/client\/chat\/open/,
+      /^https:\/\/applink\.feishu\.cn\/client\/(chat|thread)\/open/,
     );
     assert.equal(
       await detail.getByRole("button", { name: "转交主 Chat" }).count(),
@@ -103,6 +106,24 @@ try {
       await receipt.click();
       await page.waitForURL(base + href);
       await page.getByText(/飞书文档项已关闭，仅供主 Chat 参考/).waitFor();
+      if (alias) {
+        await page.goto(`${base}/feishu-suggestions?id=${alias}`);
+        await detail
+          .getByRole("heading", { name: "确认周五发布负责人" })
+          .waitFor();
+        assert.equal(
+          await detail
+            .getByRole("link", { name: /合并前材料.*主 Chat/ })
+            .getAttribute("href"),
+          `/#message-${priorMessage}`,
+        );
+        assert.equal(
+          await detail
+            .getByRole("link", { name: /继续讨论.*合并前材料/ })
+            .getAttribute("href"),
+          `/discussions?chat=${priorChat}`,
+        );
+      }
     }
     await context.close();
   }

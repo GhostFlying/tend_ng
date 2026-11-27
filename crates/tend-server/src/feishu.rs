@@ -511,6 +511,34 @@ fn refresh_context(store: &mut Store, config: &Config) -> Result<()> {
     Ok(())
 }
 
+fn minute_label(value: &Value) -> bool {
+    value.as_str().is_some_and(|label| {
+        label.len() == 16
+            && label
+                .as_bytes()
+                .get(10)
+                .is_some_and(|b| matches!(b, b' ' | b'T'))
+            && label.as_bytes().get(13) == Some(&b':')
+    })
+}
+
+fn thread_position(href: &str, expected: &str) -> Option<u64> {
+    let url = url::Url::parse(href).ok()?;
+    if url.path() != "/client/thread/open" {
+        return None;
+    }
+    let mut topic = false;
+    let mut position = None;
+    for (key, value) in url.query_pairs() {
+        match key.as_ref() {
+            "openthreadid" | "open_thread_id" if value == expected => topic = true,
+            "thread_position" => position = value.parse().ok(),
+            _ => {}
+        }
+    }
+    topic.then_some(position).flatten()
+}
+
 fn fetch_context(
     store: &Store,
     config: &Config,
@@ -562,6 +590,7 @@ fn fetch_context(
     let mut pages = job.cursor.as_ref().map_or(0, |c| c.pages);
     let mut found = Vec::new();
     let mut deleted = HashSet::new();
+    let lower = job.first_at.max(now - RETENTION);
     for _ in 0..CONTEXT_PAGE_BUDGET {
         let mut query = args.clone();
         if let Some(token) = &token {
@@ -573,24 +602,58 @@ fn fetch_context(
         for row in rows(&page)? {
             complete &= row["thread_replies_error"] != true && row["thread_has_more"] != true;
             let embedded = row["thread_replies"].as_array().into_iter().flatten();
-            for raw in std::iter::once(row).chain(embedded) {
+            for (raw, top_level) in
+                std::iter::once((row, true)).chain(embedded.map(|row| (row, false)))
+            {
                 if raw["deleted"] == true {
                     if let Some(id) = raw["message_id"].as_str() {
                         deleted.insert(id.to_owned());
                     }
                     continue;
                 }
-                match parse_message(store, raw, Some(&job.chat_id)) {
-                    Ok(message)
-                        if message.chat_id == job.chat_id
-                            && message.evidence.created_at >= job.first_at.max(now - RETENTION)
-                            && message.evidence.created_at <= through =>
-                    {
-                        found.push(message)
-                    }
-                    Ok(_) => {}
-                    Err(_) => complete = false,
+                let Ok(message) = parse_message(store, raw, Some(&job.chat_id)) else {
+                    complete = false;
+                    continue;
+                };
+                if message.chat_id != job.chat_id || message.evidence.id == job.evidence.anchor.id {
+                    continue;
                 }
+                let at = message.evidence.created_at;
+                let coarse = minute_label(&raw["create_time"]);
+                if at > through {
+                    continue;
+                }
+                if now > through && thread.is_some() && coarse && at + 59 > through {
+                    complete = false;
+                    continue;
+                }
+                if at < lower {
+                    if !coarse || at + 59 < lower {
+                        continue;
+                    }
+                    // Chat applies its exact bounds before formatting. A
+                    // nested thread expansion is not constrained by those
+                    // bounds. Thread listing instead needs a reliable
+                    // provider position in the same conversation.
+                    if !(thread.is_none() && top_level && from >= lower) {
+                        let position =
+                            thread.filter(|_| lower == job.first_at).and_then(|thread| {
+                                Some((
+                                    thread_position(&job.evidence.anchor.href, thread)?,
+                                    thread_position(&message.evidence.href, thread)?,
+                                ))
+                            });
+                        match position {
+                            Some((anchor, reply)) if reply > anchor => {}
+                            Some(_) => continue,
+                            None => {
+                                complete = false;
+                                continue;
+                            }
+                        }
+                    }
+                }
+                found.push(message);
             }
         }
         token = match page["has_more"].as_bool() {
@@ -636,15 +699,23 @@ fn fetch_context(
         .collect();
     known.extend(replies.keys().cloned());
     found.retain(|m| !seeds.contains(&m.evidence.id) && !deleted.contains(&m.evidence.id));
+    let mut proven_edges = Vec::new();
     loop {
         let before = known.len();
         found.retain(|m| {
             let same_thread =
                 thread.is_some_and(|id| m.thread_id.as_deref().is_none_or(|value| value == id));
-            let replied = [m.root_id.as_ref(), m.parent_id.as_ref()]
+            let mut replied = false;
+            for parent in [m.root_id.as_ref(), m.parent_id.as_ref()]
                 .into_iter()
                 .flatten()
-                .any(|id| known.contains(id));
+                .filter(|id| known.contains(*id))
+            {
+                if parent != &m.evidence.id {
+                    replied = true;
+                    proven_edges.push((m.evidence.id.clone(), parent.clone()));
+                }
+            }
             if same_thread || replied || known.contains(&m.evidence.id) {
                 known.insert(m.evidence.id.clone());
                 if replies
@@ -686,6 +757,7 @@ fn fetch_context(
     });
     Ok(ContextResult {
         replies,
+        proven_edges,
         complete: complete && next.is_none(),
         next,
     })

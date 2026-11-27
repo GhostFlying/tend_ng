@@ -11,6 +11,7 @@ use protocol::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 pub const RETENTION: i64 = 7 * 24 * 60 * 60;
 
@@ -49,6 +50,12 @@ pub fn migrate(db: &Connection) -> Result<()> {
             PRIMARY KEY(owner,suggestion_id,chat_id)
          );
          CREATE UNIQUE INDEX IF NOT EXISTS feishu_discussion_new ON feishu_discussion_links(owner,suggestion_id) WHERE is_default=1;
+         CREATE TABLE IF NOT EXISTS feishu_suggestion_aliases (
+            owner TEXT NOT NULL, former_id TEXT NOT NULL,
+            suggestion_id TEXT NOT NULL REFERENCES feishu_suggestions(id) ON DELETE CASCADE,
+            PRIMARY KEY(owner,former_id)
+         );
+         CREATE INDEX IF NOT EXISTS feishu_suggestion_aliases_target ON feishu_suggestion_aliases(suggestion_id);
          CREATE TABLE IF NOT EXISTS feishu_handoff_bridges (
             owner TEXT NOT NULL, suggestion_id TEXT NOT NULL, revision INTEGER NOT NULL,
             chat_id TEXT NOT NULL UNIQUE REFERENCES discussions(chat_id),
@@ -81,6 +88,7 @@ pub struct ContextCursor {
 
 pub struct ContextResult {
     pub replies: Vec<FeishuEvidence>,
+    pub proven_edges: Vec<(String, String)>,
     pub complete: bool,
     pub next: Option<ContextCursor>,
 }
@@ -235,6 +243,16 @@ fn add_mention(db: &Connection, owner: &str, m: &FeishuMessage, now: i64) -> Res
         save_changed(db, &mut saved, now, true)?;
         id
     } else {
+        if m.thread_id.is_none() && known_reply.is_some() {
+            // The missing parent may already be a real follow-up to an older
+            // card in this chat. Revisit that chat now even when its normal
+            // context poll just ran. Keep any already accepted cursor.
+            db.execute(
+                "UPDATE feishu_suggestions SET checked_at=0 WHERE owner=?1 AND chat_id=?2
+                   AND first_at>=?3 AND first_at<=?4 AND (topic IS NULL OR substr(topic,1,4)!='omt_')",
+                params![owner,m.chat_id,now-RETENTION,e.created_at],
+            )?;
+        }
         let id = protocol::new_id();
         let saved = FeishuSuggestionEvidence {
             id: id.clone(),
@@ -258,6 +276,93 @@ fn add_mention(db: &Connection, owner: &str, m: &FeishuMessage, now: i64) -> Res
         params![owner, e.id, id, e.created_at],
     )?;
     Ok(())
+}
+
+/// A later direct mention can have a parent that was not itself an @mention.
+/// A scan may have to open a provisional card before context proves the link.
+/// Fold only the provisional ordinary-reply topic actually evidenced by an
+/// edge in this chat, leaving explicit thread topics and receipts untouched.
+fn fold_proven_replies(
+    db: &Connection,
+    owner: &str,
+    job: &ContextJob,
+    saved: &mut FeishuSuggestionEvidence,
+    edges: &[(String, String)],
+) -> Result<bool> {
+    let mut old_ids = BTreeSet::new();
+    let mut query = db.prepare_cached(
+        "SELECT s.id FROM feishu_mentions m JOIN feishu_suggestions s ON s.id=m.suggestion_id
+         WHERE m.owner=?1 AND m.message_id=?2 AND s.owner=?1 AND s.chat_id=?3 AND s.id<>?4
+           AND s.topic=?5 AND s.first_at>=?6",
+    )?;
+    for (reply, parent) in edges {
+        if parent.starts_with("om_")
+            && let Some(id) = query
+                .query_row(
+                    params![owner, reply, job.chat_id, job.id, parent, job.first_at],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+        {
+            old_ids.insert(id);
+        }
+    }
+    if old_ids.is_empty() {
+        return Ok(false);
+    }
+
+    let mut direct: HashMap<_, _> = saved
+        .mentions
+        .drain(..)
+        .map(|e| (e.id.clone(), e))
+        .collect();
+    for former in old_ids {
+        let old = read_evidence(db, owner, &former)?.expect("selected Feishu source card");
+        for mention in old.mentions.into_iter().chain([old.anchor]) {
+            direct.entry(mention.id.clone()).or_insert(mention);
+        }
+        saved.replies.extend(old.replies);
+        db.execute(
+            "UPDATE feishu_suggestions SET last_at=MAX(last_at,(SELECT last_at FROM feishu_suggestions WHERE id=?2)) WHERE id=?1",
+            params![job.id,former],
+        )?;
+        db.execute(
+            "UPDATE feishu_mentions SET suggestion_id=?2 WHERE owner=?1 AND suggestion_id=?3",
+            params![owner, job.id, former],
+        )?;
+        db.execute("UPDATE feishu_suggestion_aliases SET suggestion_id=?2 WHERE owner=?1 AND suggestion_id=?3",params![owner,job.id,former])?;
+        db.execute(
+            "INSERT INTO feishu_suggestion_aliases VALUES(?1,?2,?3)",
+            params![owner, former, job.id],
+        )?;
+        // Discussion links, snapshots and handoff bridges are independent
+        // records and continue to be addressed by the original ID/revision.
+        db.execute("DELETE FROM feishu_suggestions WHERE id=?1", [former])?;
+    }
+    let mut mentions: Vec<_> = direct.into_values().collect();
+    mentions.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    mentions.drain(..mentions.len().saturating_sub(12));
+    saved.mentions = mentions;
+
+    let mut direct_ids =
+        db.prepare_cached("SELECT message_id FROM feishu_mentions WHERE suggestion_id=?1")?;
+    let direct_ids: HashSet<_> = direct_ids
+        .query_map([&job.id], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    saved.replies.retain(|e| !direct_ids.contains(&e.id));
+    saved.replies.sort_by(|a, b| {
+        a.id.cmp(&b.id)
+            .then_with(|| b.updated_at.cmp(&a.updated_at))
+    });
+    saved.replies.dedup_by(|a, b| a.id == b.id);
+    saved
+        .replies
+        .sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
+    if saved.replies.len() > 12 {
+        saved.replies.drain(..saved.replies.len() - 12);
+        saved.context_status = "partial".into();
+    }
+    Ok(true)
 }
 
 impl Store {
@@ -426,8 +531,9 @@ impl Store {
             saved.context_status = if result.complete { "ready" } else { "partial" }.into();
             let changed = saved.replies != result.replies;
             saved.replies = result.replies;
+            let folded = fold_proven_replies(&tx, owner, job, &mut saved, &result.proven_edges)?;
             next = result.next;
-            changed
+            changed || folded
         } else {
             // Expired or invalid continuation tokens are retried from a fresh window.
             saved.context_status = "unavailable".into();
@@ -547,7 +653,9 @@ impl Store {
     pub fn feishu_detail(&self, owner: &str, id: &str) -> Result<Option<Value>> {
         let mut stmt = self.db.prepare(
             "SELECT evidence,updated_at,ignored_material_revision,assessment_state,material_revision FROM feishu_suggestions
-             WHERE owner=?1 AND id=?2 AND first_at>=unixepoch()-?3",
+             WHERE owner=?1 AND id=COALESCE(
+               (SELECT suggestion_id FROM feishu_suggestion_aliases WHERE owner=?1 AND former_id=?2),?2)
+               AND first_at>=unixepoch()-?3",
         )?;
         let mut rows = stmt.query(params![owner, id, RETENTION])?;
         rows.next()?
@@ -558,29 +666,44 @@ impl Store {
     fn feishu_card(&self, owner: &str, row: &rusqlite::Row<'_>) -> Result<Value> {
         let evidence: FeishuSuggestionEvidence = serde_json::from_str(&row.get::<_, String>(0)?)?;
         let ignored = row.get::<_, Option<i64>>(2)? == Some(row.get::<_, i64>(4)?);
+        let mut aliases = self.db.prepare_cached(
+            "SELECT former_id FROM feishu_suggestion_aliases WHERE owner=?1 AND suggestion_id=?2 ORDER BY former_id",
+        )?;
+        let aliases = aliases
+            .query_map(params![owner, evidence.id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut query = self.db.prepare(
             "SELECT l.chat_id,l.revision,d.title,d.archived,
-                 EXISTS(SELECT 1 FROM discussion_references r WHERE r.chat_id=l.chat_id AND r.id=('feishu:'||l.suggestion_id))
+                 EXISTS(SELECT 1 FROM discussion_references r WHERE r.chat_id=l.chat_id AND r.id=('feishu:'||l.suggestion_id)),l.suggestion_id
                FROM feishu_discussion_links l JOIN discussions d ON d.chat_id=l.chat_id
-              WHERE l.owner=?1 AND l.suggestion_id=?2 ORDER BY d.updated_at DESC",
+              WHERE l.owner=?1 AND (l.suggestion_id=?2 OR l.suggestion_id IN (
+                SELECT former_id FROM feishu_suggestion_aliases WHERE owner=?1 AND suggestion_id=?2))
+              ORDER BY d.updated_at DESC,l.suggestion_id",
         )?;
         let discussions = query.query_map(params![owner,evidence.id], |r| Ok(json!({
             "chat_id":r.get::<_,String>(0)?,"revision":r.get::<_,i64>(1)?,"title":r.get::<_,String>(2)?,
-            "archived":r.get::<_,bool>(3)?,"attached":r.get::<_,bool>(4)?
+            "archived":r.get::<_,bool>(3)?,"attached":r.get::<_,bool>(4)?,"suggestion_id":r.get::<_,String>(5)?
         })))?.collect::<rusqlite::Result<Vec<_>>>()?;
         let mut handoffs = Vec::new();
         let mut query = self.db.prepare(
-            "SELECT revision,chat_id FROM feishu_handoff_bridges WHERE owner=?1 AND suggestion_id=?2 ORDER BY revision DESC",
+            "SELECT revision,chat_id,suggestion_id FROM feishu_handoff_bridges WHERE owner=?1
+              AND (suggestion_id=?2 OR suggestion_id IN (
+                SELECT former_id FROM feishu_suggestion_aliases WHERE owner=?1 AND suggestion_id=?2))
+              ORDER BY (suggestion_id=?2) DESC,revision DESC,suggestion_id",
         )?;
         for row in query.query_map(params![owner, evidence.id], |r| {
-            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })? {
-            let (revision, chat) = row?;
-            handoffs.push(json!({"revision":revision,"handoff":discussion::quick_status(&self.db,&chat,&bridge_operation(&chat))?}));
+            let (revision, chat, suggestion) = row?;
+            handoffs.push(json!({"revision":revision,"suggestion_id":suggestion,"handoff":discussion::quick_status(&self.db,&chat,&bridge_operation(&chat))?}));
         }
         Ok(json!({
             "evidence":evidence,"updated_at":row.get::<_,i64>(1)?,"ignored":ignored,
-            "assessment_status":row.get::<_,String>(3)?,"discussions":discussions,"handoffs":handoffs,
+            "assessment_status":row.get::<_,String>(3)?,"discussions":discussions,"handoffs":handoffs,"aliases":aliases,
         }))
     }
 

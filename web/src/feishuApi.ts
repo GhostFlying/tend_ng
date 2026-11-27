@@ -29,14 +29,20 @@ export type FeishuCard = {
   updated_at: number;
   ignored: boolean;
   assessment_status: "pending" | "assessed" | "failed";
+  aliases: string[];
   discussions: {
+    suggestion_id: string;
     chat_id: string;
     title: string;
     revision: number;
     attached: boolean;
     archived: boolean;
   }[];
-  handoffs: { revision: number; handoff: QuickHandoff }[];
+  handoffs: {
+    suggestion_id: string;
+    revision: number;
+    handoff: QuickHandoff;
+  }[];
 };
 
 export type FeishuFeed = {

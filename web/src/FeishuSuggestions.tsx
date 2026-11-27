@@ -75,6 +75,10 @@ function ScanStatus({ scan }: { scan: FeishuFeed["scan"] }) {
   );
 }
 
+function matchesId(card: FeishuCard, id: string | null) {
+  return id !== null && (card.evidence.id === id || card.aliases.includes(id));
+}
+
 export function FeishuSuggestions({
   selected,
   onReachable,
@@ -100,10 +104,12 @@ export function FeishuSuggestions({
     if (!cards.some((item) => item.evidence.id === card.evidence.id))
       cards.push(card);
   }
-  const filtered = cards.filter((card) => tabOf(card) === tab);
+  const superseded = new Set(cards.flatMap((card) => card.aliases));
+  const visible = cards.filter((card) => !superseded.has(card.evidence.id));
+  const filtered = visible.filter((card) => tabOf(card) === tab);
   const selectedCard =
-    cards.find((card) => card.evidence.id === selected) ||
-    (outside?.evidence.id === selected ? outside : null);
+    visible.find((card) => matchesId(card, selected)) ||
+    (outside && matchesId(outside, selected) ? outside : null);
   const active = selected ? selectedCard : (filtered[0] ?? null);
   const next = extra ? extra.next : data?.next_before;
 
@@ -119,7 +125,7 @@ export function FeishuSuggestions({
         onReachable(true);
         if (
           selected &&
-          !feed.suggestions.some((item) => item.evidence.id === selected)
+          !feed.suggestions.some((item) => matchesId(item, selected))
         ) {
           try {
             const card = await feishuCard(selected, controller.signal);
@@ -341,10 +347,13 @@ function SuggestionDetail({
   const [target, setTarget] = useState("");
   const ev = card.evidence;
   const { id, revision, anchor, replies, assessment } = ev;
-  const handoff = card.handoffs.find((item) => item.revision === revision)
-    ?.handoff.request;
+  const handoff = card.handoffs.find(
+    (item) => item.suggestion_id === id && item.revision === revision,
+  )?.handoff.request;
   const remaining = card.handoffs.filter(
-    (item) => item.revision !== revision && item.handoff.request,
+    (item) =>
+      (item.suggestion_id !== id || item.revision !== revision) &&
+      item.handoff.request,
   );
 
   async function act(action: () => Promise<unknown>) {
@@ -535,47 +544,64 @@ function SuggestionDetail({
         <div className="fs-links">
           {card.discussions.map((discussion) => (
             <a
-              key={discussion.chat_id}
+              key={`${discussion.suggestion_id}:${discussion.chat_id}`}
               href={discussionLink(discussion.chat_id)}
             >
               {discussion.attached ? "继续讨论" : "历史讨论"} ·{" "}
               {discussion.title}
-              {discussion.revision < revision ? "（旧版材料）" : ""}
+              {discussion.suggestion_id !== id
+                ? "（合并前材料）"
+                : discussion.revision < revision
+                  ? "（旧版材料）"
+                  : ""}
             </a>
           ))}
-          {remaining.map(({ revision: oldRevision, handoff: oldHandoff }) => {
-            const result = oldHandoff.request;
-            if (result?.message_id) {
+          {remaining.map(
+            ({
+              suggestion_id: oldId,
+              revision: oldRevision,
+              handoff: oldHandoff,
+            }) => {
+              const result = oldHandoff.request;
+              const key = `${oldId}:${oldRevision}`;
+              const label =
+                oldId === id ? `第 ${oldRevision} 版` : "合并前材料";
+              if (result?.message_id) {
+                return (
+                  <a key={key} href={`/#message-${result.message_id}`}>
+                    查看{label}的主 Chat 转交 ↗
+                  </a>
+                );
+              }
               return (
-                <a key={oldRevision} href={`/#message-${result.message_id}`}>
-                  查看第 {oldRevision} 版的主 Chat 转交 ↗
-                </a>
+                <div key={key} className="fs-old-handoff">
+                  {result?.status === "failed" ? (
+                    <>
+                      <span>{label}转交未送达</span>
+                      <button
+                        className="fs-button"
+                        type="button"
+                        disabled={busy}
+                        onClick={() =>
+                          void act(() =>
+                            feishuHandoff(
+                              oldId,
+                              oldRevision,
+                              result.generation,
+                            ),
+                          )
+                        }
+                      >
+                        重试旧版转交
+                      </button>
+                    </>
+                  ) : (
+                    <span>正在生成{label}的转交</span>
+                  )}
+                </div>
               );
-            }
-            return (
-              <div key={oldRevision} className="fs-old-handoff">
-                {result?.status === "failed" ? (
-                  <>
-                    <span>第 {oldRevision} 版转交未送达</span>
-                    <button
-                      className="fs-button"
-                      type="button"
-                      disabled={busy}
-                      onClick={() =>
-                        void act(() =>
-                          feishuHandoff(id, oldRevision, result.generation),
-                        )
-                      }
-                    >
-                      重试旧版转交
-                    </button>
-                  </>
-                ) : (
-                  <span>正在生成第 {oldRevision} 版的转交</span>
-                )}
-              </div>
-            );
-          })}
+            },
+          )}
         </div>
       )}
       <section className="fs-sources" aria-label="来源与后续">
