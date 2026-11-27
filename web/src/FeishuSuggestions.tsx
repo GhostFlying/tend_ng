@@ -224,7 +224,9 @@ export function FeishuSuggestions({
           <p>只收集明确 @ 你的消息；同一话题有新进展时更新，不打扰主 Chat。</p>
         </div>
         <div className="fs-scan">
-          <div>{data && <ScanStatus scan={data.scan} />}</div>
+          <div className="fs-scan-copy">
+            {data && <ScanStatus scan={data.scan} />}
+          </div>
           {data && data.scan.phase !== "disabled" && (
             <button
               type="button"
@@ -457,10 +459,10 @@ function SuggestionDetail({
       ) : (
         <p className="fs-overview">
           {!assessor
-            ? "当前仅展示来源材料。"
+            ? "未配置分析 Agent，可查看飞书原文。"
             : card.assessment_status === "failed"
-              ? "研判暂不可用，可先查看来源材料。"
-              : "正在等待研判，可先查看来源材料。"}
+              ? "分析未成功，仍可查看飞书原文。"
+              : "已收录，等待 Agent 分析。现在可以查看飞书原文。"}
         </p>
       )}
       <div className="fs-actions">

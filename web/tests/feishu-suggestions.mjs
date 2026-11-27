@@ -48,6 +48,7 @@ try {
       .getByRole("link", { name: "飞书建议" })
       .click();
     await page.waitForURL(`${base}/feishu-suggestions`);
+    assert.equal(await page.title(), "Tend");
     await page
       .getByRole("heading", { name: "飞书建议", exact: true })
       .waitFor();
@@ -65,7 +66,7 @@ try {
       .getByRole("heading", { name: "确认 Android 灰度窗口与回滚阈值" })
       .waitFor();
     assert.match(await detail.innerText(), /Android 12 和 15/);
-    assert.match(await detail.innerText(), /上次成功扫描|来源与后续/);
+    assert.match(await detail.innerText(), /来源与后续/);
     assert.match(
       await detail
         .getByRole("link", { name: /飞书原文/ })
@@ -82,6 +83,7 @@ try {
       1,
     );
     await shot(page, mobile ? "feishu-mobile-detail" : "feishu-desktop");
+    await checkScanAndAssessment(page, detail, mobile);
     await detail.getByRole("button", { name: "带入讨论" }).click();
     await detail
       .getByLabel("选择已有讨论")
@@ -181,8 +183,95 @@ try {
 }
 assert.deepEqual(errors, []);
 console.log(
-  "PASS Chromium desktop and mobile rendering and navigation, both user actions visible, real Web attach and ignore restoration",
+  "PASS Chromium desktop and 390px scan alignment, wrapped status, assessment copy, navigation, real Web attach and ignore restoration",
 );
+
+async function checkScanAndAssessment(page, detail, mobile) {
+  const scan = page.locator(".fs-scan");
+  await scan.getByText(/^上次成功扫描 /).waitFor();
+  const button = scan.getByRole("button", { name: "扫描新消息" });
+  const buttonWidth = (await assertScanRow(scan, button)).width;
+  const feedUrl = "**/api/v1/feishu-suggestions";
+  let state;
+  // Keep the real fixture response except for the status fields under test.
+  // This makes each branch stable even if the fixture assessor runs another job.
+  await page.route(feedUrl, async (route) => {
+    const response = await route.fetch();
+    const feed = await response.json();
+    const card = feed.suggestions.find((item) => item.evidence.id === id);
+    card.evidence.assessment = null;
+    card.assessment_status = state === "failed" ? "failed" : "pending";
+    if (state === "pending") {
+      card.evidence.context_status = "pending";
+      card.evidence.replies = [];
+      feed.scan.phase = "failed";
+      feed.scan.gap = "identity";
+    }
+    if (state === "unconfigured") feed.assessor = null;
+    await route.fulfill({ response, json: feed });
+  });
+  try {
+    for (const [variant, copy] of [
+      ["pending", "已收录，等待 Agent 分析。现在可以查看飞书原文。"],
+      ["failed", "分析未成功，仍可查看飞书原文。"],
+      ["unconfigured", "未配置分析 Agent，可查看飞书原文。"],
+    ]) {
+      state = variant;
+      await page.reload();
+      await detail.getByText(copy, { exact: true }).waitFor();
+      await detail
+        .getByRole("link", { name: /飞书原文/ })
+        .first()
+        .waitFor();
+      if (state !== "pending") continue;
+      const gap = scan.getByText(/本机飞书身份不可用/);
+      await gap.waitFor();
+      if (mobile) {
+        assert.ok(
+          await gap.evaluate((element) => {
+            const range = document.createRange();
+            range.selectNodeContents(element);
+            return range.getClientRects().length > 1;
+          }),
+          "the scan gap should wrap at 390px",
+        );
+      }
+      assert.equal((await assertScanRow(scan, button)).width, buttonWidth);
+      await button.click({ trial: true });
+      await shot(page, mobile ? "feishu-scan-390px" : "feishu-scan-desktop");
+    }
+  } finally {
+    await page.unroute(feedUrl);
+  }
+  await page.reload();
+  await detail
+    .getByRole("heading", { name: "确认 Android 灰度窗口与回滚阈值" })
+    .waitFor();
+}
+
+async function assertScanRow(scan, button) {
+  const status = await scan.locator(".fs-scan-copy").boundingBox();
+  const action = await button.boundingBox();
+  const row = await scan.boundingBox();
+  assert.ok(
+    status && action && row,
+    "scan status and button should be visible",
+  );
+  const center = ({ y, height }) => y + height / 2;
+  assert.ok(
+    Math.abs(center(status) - center(action)) <= 1,
+    "scan row should be vertically centered",
+  );
+  assert.ok(
+    status.x + status.width < action.x,
+    "scan status and button should not overlap",
+  );
+  assert.ok(
+    action.x + action.width <= row.x + row.width + 1,
+    "scan button should fit inside its row",
+  );
+  return action;
+}
 
 async function shot(page, name) {
   assert.ok(
@@ -192,6 +281,12 @@ async function shot(page, name) {
         document.documentElement.clientWidth,
     ),
     `${name} horizontal overflow`,
+  );
+  assert.ok(
+    await page
+      .locator(".fs-page")
+      .evaluate((pane) => pane.scrollWidth <= pane.clientWidth),
+    `${name} horizontal overflow inside the Feishu page`,
   );
   await page.screenshot({ path: join(output, `${name}.png`), scale: "css" });
 }
