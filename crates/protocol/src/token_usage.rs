@@ -58,6 +58,61 @@ impl TokenCounts {
     }
 }
 
+/// Model evidence from the native rollout, not from the assigned Agent.
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "id")]
+pub enum TokenModel {
+    Response(String),
+    TurnContext(String),
+    /// A normalized request was checked without finding model evidence.
+    /// Absent (None) means a legacy writer did not perform this check.
+    Unresolved,
+    Ambiguous,
+    ResponseConflict,
+}
+
+impl TokenModel {
+    pub fn valid_id(id: &str) -> bool {
+        !id.is_empty()
+            && id.len() <= 128
+            && id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'/' | b':'))
+    }
+
+    pub fn valid(&self) -> bool {
+        match self {
+            Self::Response(id) | Self::TurnContext(id) => Self::valid_id(id),
+            Self::Unresolved | Self::Ambiguous | Self::ResponseConflict => true,
+        }
+    }
+
+    /// No evidence cannot revoke existing evidence. A contradiction at the
+    /// same evidence level must not silently choose a new model.
+    pub fn merge(old: Option<Self>, new: Option<Self>) -> Option<Self> {
+        match (old, new) {
+            (None, m) | (m, None) => m,
+            (Some(Self::Unresolved), m) | (m, Some(Self::Unresolved)) => m,
+            (Some(a), Some(b)) if a == b => Some(a),
+            (Some(Self::ResponseConflict), _)
+            | (_, Some(Self::ResponseConflict))
+            | (Some(Self::Response(_)), Some(Self::Response(_))) => Some(Self::ResponseConflict),
+            (Some(m @ Self::Response(_)), _) | (_, Some(m @ Self::Response(_))) => Some(m),
+            _ => Some(Self::Ambiguous),
+        }
+    }
+}
+
+/// Request evidence stored alongside the original flat counts JSON. This
+/// reads legacy records and preserves the count payload on older peers.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RequestMeter {
+    #[serde(flatten)]
+    pub counts: TokenCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<TokenModel>,
+}
+
 /// A native request observation with a corroborated upstream response ID.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct RunTokenUsage {
@@ -69,6 +124,8 @@ pub struct RunTokenUsage {
     pub turn_id: String,
     pub response_id: String,
     pub last: TokenCounts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<TokenModel>,
     pub observed_at: i64,
 }
 
@@ -86,6 +143,7 @@ impl RunTokenUsage {
                 .into_iter()
                 .all(|id| !id.is_empty() && id.len() <= 256)
             && self.last.valid()
+            && self.model.as_ref().is_none_or(TokenModel::valid)
             && self.observed_at > 0
     }
 }
@@ -183,6 +241,8 @@ pub enum TokenSourceGap {
 pub struct NativeTokenRecord {
     pub response_id: String,
     pub counts: Option<TokenCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<TokenModel>,
     pub invalid: bool,
     /// A second distinct variant proves that the native key is ambiguous.
     pub variant: Option<TokenCounts>,
@@ -236,7 +296,9 @@ impl TokenBackfillPage {
                     && records.len() <= crate::RUNNER_SYNC_BATCH
                     && (*done || records.len() == crate::RUNNER_SYNC_BATCH)
                     && records.iter().all(|record| {
-                        !record.response_id.is_empty() && record.response_id.len() <= 256
+                        !record.response_id.is_empty()
+                            && record.response_id.len() <= 256
+                            && record.model.as_ref().is_none_or(TokenModel::valid)
                     })
                     && records
                         .windows(2)

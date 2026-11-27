@@ -7,7 +7,7 @@ use super::{
 };
 use crate::store::{Store, timing};
 use anyhow::{Context, Result};
-use protocol::{TokenCounts, TokenUsageScope};
+use protocol::{RequestMeter, TokenUsageScope};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::{
@@ -57,7 +57,7 @@ enum RunTally {
 impl RunTally {
     fn decode(&self) -> Result<Tally> {
         match self {
-            Self::Rebuilt(tally) => Ok(*tally),
+            Self::Rebuilt(tally) => Ok(tally.clone()),
             Self::Stored(None) => Ok(Tally::default()),
             Self::Stored(Some((raw, _))) => Ok(serde_json::from_str(raw)?),
         }
@@ -77,7 +77,7 @@ impl Run {
 
     fn summary(&self) -> Result<Summary> {
         let tally = self.tally.decode()?;
-        let observed = tally.valid_records > 0;
+        let observed = tally.tokens.valid_records > 0;
         Ok(Summary {
             started_runs: 1,
             observed_runs: i64::from(observed),
@@ -110,7 +110,7 @@ impl Snapshot {
         keys
     }
 
-    fn apply(&mut self, keys: &[IssueKey], summary: Summary, sign: i64) {
+    fn apply(&mut self, keys: &[IssueKey], summary: &Summary, sign: i64) {
         for key in keys {
             let total = self.totals.entry(key.clone()).or_default();
             total.merge_signed(summary, sign);
@@ -126,9 +126,9 @@ impl Snapshot {
             .collect::<Vec<_>>();
         if !initialized.is_empty() {
             if let Some(previous) = self.runs.get(&id) {
-                self.apply(&initialized, previous.summary()?, -1);
+                self.apply(&initialized, &previous.summary()?, -1);
             }
-            self.apply(&initialized, run.summary()?, 1);
+            self.apply(&initialized, &run.summary()?, 1);
         }
         if run.selected() {
             self.repair_issue(&run.issue);
@@ -156,13 +156,9 @@ impl Snapshot {
             let mut summary = None;
             for key in keys {
                 if let Some(total) = missing.get_mut(&key) {
-                    let value = match summary {
+                    let value = match &summary {
                         Some(value) => value,
-                        None => {
-                            let value = run.summary()?;
-                            summary = Some(value);
-                            value
-                        }
+                        None => summary.insert(run.summary()?),
                     };
                     total.merge(value);
                 }
@@ -187,8 +183,8 @@ impl Snapshot {
     }
 }
 
-fn encode(summary: Summary) -> Result<String> {
-    Ok(serde_json::to_string(&summary)?)
+fn encode(summary: &Summary) -> Result<String> {
+    Ok(serde_json::to_string(summary)?)
 }
 
 fn tally(db: &Connection, run: &str) -> Result<Tally> {
@@ -198,9 +194,9 @@ fn tally(db: &Connection, run: &str) -> Result<Tally> {
     let mut tally = Tally::default();
     while let Some(row) = rows.next()? {
         let raw = row.get_ref(0)?.as_str()?;
-        let counts: TokenCounts = serde_json::from_str(raw)?;
-        if counts.valid() {
-            tally.count(counts, 1);
+        let meter: RequestMeter = serde_json::from_str(raw)?;
+        if meter.counts.valid() {
+            tally.count(&meter, 1);
         }
     }
     Ok(tally)
@@ -293,7 +289,7 @@ fn capture(db: &Connection, scope: &TokenUsageScope) -> Result<(Snapshot, Rows)>
     ] {
         for issue in issues {
             let key = (issue.clone(), level);
-            let summary = encode(snapshot.totals.get(&key).copied().unwrap_or_default())?;
+            let summary = encode(snapshot.totals.get(&key).unwrap_or(&Summary::default()))?;
             copy.insert(key, summary);
         }
     }
@@ -305,7 +301,7 @@ fn stage_run(tx: &Connection, id: &str, tally: &RunTally) -> Result<()> {
     let (summary, count): (&str, i64) = match tally {
         RunTally::Rebuilt(tally) => {
             encoded = serde_json::to_string(tally)?;
-            (&encoded, tally.valid_records)
+            (&encoded, tally.tokens.valid_records)
         }
         RunTally::Stored(Some((summary, count))) => (summary, *count),
         RunTally::Stored(None) => {
@@ -387,7 +383,7 @@ fn stage_issues(
 ) -> Result<()> {
     for batch in modifications.chunks(STAGE_BATCH) {
         let (tx, clock) = timing::begin(db, operation)?;
-        let mut next = *global;
+        let mut next = global.clone();
         for (key, summary) in batch {
             if key.1 == Level::Direct {
                 // Use the exact rows being published, including untouched
@@ -397,7 +393,7 @@ fn stage_issues(
                 )?.query_row([&key.0], |row| row.get(0)).optional()?;
                 for (raw, sign) in [(previous.as_deref(), -1), (summary.as_deref(), 1)] {
                     if let Some(raw) = raw {
-                        next.merge_signed(serde_json::from_str(raw)?, sign);
+                        next.merge_signed(&serde_json::from_str(raw)?, sign);
                     }
                 }
             }
@@ -470,7 +466,7 @@ fn catch_up(
         )?;
         for key in changed {
             let summary = if snapshot.repairs(&key) {
-                Some(encode(snapshot.totals[&key])?)
+                Some(encode(&snapshot.totals[&key])?)
             } else {
                 query
                     .query_row(params![key.0, key.1.as_str()], |row| row.get(0))
@@ -506,7 +502,7 @@ fn catch_up(
     Ok(true)
 }
 
-fn publish(db: &mut Connection, global: Summary) -> Result<bool> {
+fn publish(db: &mut Connection, global: &Summary) -> Result<bool> {
     let (tx, clock) = timing::begin(db, "token_rebuild_publish")?;
     if tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM token_rebuild_dirty)",
@@ -562,7 +558,7 @@ impl Store {
             stage_snapshot(&mut self.db, &mut snapshot, issues)?;
             loop {
                 if !catch_up(&mut read, &mut self.db, &resolved, &mut snapshot)?
-                    && publish(&mut self.db, snapshot.global)?
+                    && publish(&mut self.db, &snapshot.global)?
                 {
                     break;
                 }
@@ -627,7 +623,7 @@ mod tests {
         sync(&mut writer, "runner", &[c], &[c0])?;
         writer.db.execute("UPDATE token_global_rollup SET summary = (SELECT summary FROM token_issue_rollups WHERE issue_id = 'left' AND scope = 'direct')", [])?;
         stage_snapshot(&mut writer.db, &mut snapshot, issues)?;
-        assert!(!publish(&mut writer.db, snapshot.global)?);
+        assert!(!publish(&mut writer.db, &snapshot.global)?);
         let before = view(&writer, "root")?;
         assert_eq!(before["subtree"]["total_tokens"]["tokens"], "12");
         let held = held.transaction()?;
@@ -636,14 +632,14 @@ mod tests {
         };
         let old = root_summary(&held)?;
         let global_before = overview::read_global(&held)?;
-        assert_eq!(global_before.tally.sums[0], 16);
+        assert_eq!(global_before.tally.tokens.sums[0], 16);
         while catch_up(&mut read, &mut writer.db, &scope, &mut snapshot)? {}
         assert_eq!(view(&writer, "root")?, before);
-        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 16);
-        assert!(publish(&mut writer.db, snapshot.global)?);
+        assert_eq!(overview::read_global(&writer.db)?.tally.tokens.sums[0], 16);
+        assert!(publish(&mut writer.db, &snapshot.global)?);
         assert_eq!(root_summary(&held)?, old);
-        assert_eq!(overview::read_global(&held)?.tally.sums[0], 16);
-        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 23);
+        assert_eq!(overview::read_global(&held)?.tally.tokens.sums[0], 16);
+        assert_eq!(overview::read_global(&writer.db)?.tally.tokens.sums[0], 23);
         assert_ne!(root_summary(&writer.db)?, old);
         let rebuilt = view(&writer, "root")?;
         assert_eq!(rebuilt["subtree"]["reported_requests"], 5);
@@ -657,7 +653,7 @@ mod tests {
         // republish exactly the same counts.
         writer.rebuild_token_usage(&TokenUsageScope::All)?;
         assert_eq!(view(&writer, "root")?, rebuilt);
-        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 23);
+        assert_eq!(overview::read_global(&writer.db)?.tally.tokens.sums[0], 23);
         Ok(())
     }
 
@@ -685,7 +681,7 @@ mod tests {
         assert_eq!(reply["runs"], 1);
         assert_eq!(view(&writer, "left")?, expected);
         assert_eq!(view(&writer, "right")?, unrelated);
-        assert_eq!(overview::read_global(&writer.db)?.tally.sums[0], 11);
+        assert_eq!(overview::read_global(&writer.db)?.tally.tokens.sums[0], 11);
         assert_eq!(
             writer.db.query_row(
                 "SELECT tally, valid_records FROM token_run_tallies WHERE run_id = 'run-b'",
@@ -752,22 +748,23 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Summary>(&shadow)?
                 .tally
+                .tokens
                 .valid_records,
             1
         );
-        assert!(!publish(&mut writer.db, snapshot.global)?);
+        assert!(!publish(&mut writer.db, &snapshot.global)?);
         writer.db.execute_batch("DROP TRIGGER reject_last_shadow")?;
         let more = observation(&runs[31], 1, Some(7));
         sync(&mut writer, "runner", &[], &[more.clone(), more])?;
         let expected = view(&writer, "root")?;
         assert!(catch_up(&mut read, &mut writer.db, &scope, &mut snapshot)?);
-        assert!(publish(&mut writer.db, snapshot.global)?);
+        assert!(publish(&mut writer.db, &snapshot.global)?);
         assert_eq!(view(&writer, "root")?, expected);
         assert_eq!(expected["subtree"]["reported_requests"], DIRTY_BATCH + 1);
         assert_eq!(expected["subtree"]["total_tokens"]["tokens"], "167");
         let total = overview::read_global(&writer.db)?;
-        assert_eq!(total.tally.valid_records, DIRTY_BATCH + 1);
-        assert_eq!(total.tally.sums[0], 167);
+        assert_eq!(total.tally.tokens.valid_records, DIRTY_BATCH + 1);
+        assert_eq!(total.tally.tokens.sums[0], 167);
         Ok(())
     }
 }

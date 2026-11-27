@@ -278,7 +278,34 @@ def verify(args, root, address):
                     else:
                         assert tally["reported_requests"] == 7422, tally
                     assert tally["total_tokens"]["tokens"] == str(tokens), tally
+                # Model-only enrichment of keys already in a historical job.
+                old_projection = usage()
+                for index, model in ((1, "gpt-6.2-sol"), (2, "deepseek-v4.1-flash")):
+                    _, _, thread, turn = run_ref(index)
+                    file = native_path(root / "original-home", thread, archived=index == 2)
+                    original_lines = file.read_text().splitlines()
+                    if index == 2:
+                        # This response has a confirmed model that differs
+                        # from the same-turn requested model.
+                        last = json.loads(original_lines[-1])
+                        last["payload"]["response_model"] = "gpt-6.2-astra"
+                        original_lines[-1] = json.dumps(last)
+                    context = json.dumps({"type": "turn_context", "payload": {
+                        "turn_id": turn, "model": model,
+                    }})
+                    file.write_text("\n".join([context, *original_lines]) + "\n")
+                    maint("backfill", "--run", run_ref(index)[0], "--job", f"model-{index}")
+                    assert idle(f"model-{index}")["counts"] == {"scanned": 1}
                 expected = usage()
+                assert expected["subtree"]["total_tokens"] == old_projection["subtree"]["total_tokens"]
+                assert expected["subtree"]["reported_requests"] == old_projection["subtree"]["reported_requests"]
+                models = {row["model"]: row for row in expected["subtree"]["models"]}
+                assert set(models) == {None, "gpt-6.2-astra"}
+                assert models["gpt-6.2-astra"]["response_model_requests"] == 1
+                assert models[None]["requested_models"] == {
+                    "gpt-6.2-sol": 27, "deepseek-v4.1-flash": 26,
+                }
+                assert models[None]["reported_requests"] == expected["subtree"]["reported_requests"] - 1
                 assert maint("overview")["total"] == expected["subtree"]
                 for job, scope in (("again", ("--all",)), ("issue", ("--issue", "#1")),
                                    ("runner", ("--runner", ORIGINAL)), ("host", ("--host", "fixture-host"))):

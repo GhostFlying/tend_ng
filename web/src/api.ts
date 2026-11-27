@@ -421,7 +421,44 @@ export type TokenField = {
   reported_requests: number;
 };
 
+export type TokenEstimate = {
+  usd: string | null;
+  partial: boolean;
+};
+
+export type TokenModelRow = {
+  model: string | null;
+  response_model_requests: number;
+  requested_models: Record<string, number>;
+  reported_requests: number;
+  total_tokens: TokenField;
+  input_tokens: TokenField;
+  uncached_input_tokens: TokenField;
+  cached_input_tokens: TokenField;
+  cache_write_input_tokens: TokenField;
+  output_tokens: TokenField;
+  reasoning_output_tokens: TokenField;
+  estimate: TokenEstimate;
+  price: {
+    openrouter_id: string;
+    canonical_slug: string;
+    snapshot_date: string;
+    long_input_above: number | null;
+    unsupported: "utc_schedule" | "other_conditions" | null;
+    tiers: {
+      tier: "standard" | "long" | "unknown" | "unsupported";
+      requests: number;
+      components: (TokenField & {
+        usd_per_million: string | null;
+        estimate: TokenEstimate;
+      })[];
+    }[];
+  } | null;
+};
+
 export type TokenBreakdown = {
+  models?: TokenModelRow[];
+  estimate?: TokenEstimate;
   started_runs: number;
   observed_runs: number;
   unobserved_before_collection: number;

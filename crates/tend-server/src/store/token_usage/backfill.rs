@@ -2,8 +2,8 @@ use super::{Tally, VerifiedRun, verified_run};
 use crate::store::{Store, runner::FRESH_SECONDS, timing};
 use anyhow::Result;
 use protocol::{
-    NativeTokenRecord, StartTokenBackfill, TokenBackfillContent, TokenBackfillPage,
-    TokenBackfillWork, TokenConflictPolicy, TokenCounts, TokenUsageScope,
+    NativeTokenRecord, RequestMeter, StartTokenBackfill, TokenBackfillContent, TokenBackfillPage,
+    TokenBackfillWork, TokenConflictPolicy, TokenCounts, TokenModel, TokenUsageScope,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
@@ -31,7 +31,10 @@ pub(in crate::store) fn migrate_ambiguities(db: &Connection) -> Result<()> {
 
 type Key<'a> = (&'a str, &'a str, &'a str);
 
-fn request(db: &Connection, key: Key<'_>) -> Result<Option<(String, TokenCounts, Option<String>)>> {
+fn request(
+    db: &Connection,
+    key: Key<'_>,
+) -> Result<Option<(String, RequestMeter, Option<String>)>> {
     db.prepare_cached(
         "SELECT run_id, last, conflict FROM token_requests
          WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
@@ -50,6 +53,8 @@ struct Evidence {
     prior_native: Option<NativeTokenRecord>,
     server: Option<TokenCounts>,
     server_conflict: Option<TokenCounts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    server_model: Option<TokenModel>,
     policy: TokenConflictPolicy,
 }
 
@@ -59,6 +64,10 @@ fn compatible(server: TokenCounts, native: TokenCounts) -> bool {
         .into_iter()
         .zip(native.fields())
         .all(|(server, native)| server.is_none() || server == native)
+}
+
+fn same_usage(a: &NativeTokenRecord, b: &NativeTokenRecord) -> bool {
+    a.counts == b.counts && a.invalid == b.invalid && a.variant == b.variant
 }
 
 impl Evidence {
@@ -95,10 +104,24 @@ impl Evidence {
         }
     }
 
+    fn meter(&self, decision: &str, counts: TokenCounts) -> RequestMeter {
+        let model = if decision == "chose_server" {
+            self.server_model.clone()
+        } else {
+            let live = self
+                .verified_server()
+                .filter(|server| compatible(*server, counts))
+                .and(self.server_model.clone());
+            TokenModel::merge(self.native.model.clone(), live)
+        };
+        RequestMeter { counts, model }
+    }
+
     fn audit(&self, decision: &str) -> Value {
         json!({"server":self.server,"server_conflict":self.server_conflict,
             "native":self.native.counts,"native_variant":self.native.variant,
             "native_invalid":self.native.invalid,"prior_native":self.prior_native,
+            "native_model":self.native.model,"server_model":self.server_model,
             "policy":self.policy,"decision":decision})
     }
 }
@@ -159,22 +182,22 @@ fn project(
     db: &Connection,
     key: Key<'_>,
     run: &str,
-    previous: Option<(String, TokenCounts, Option<String>)>,
-    chosen: Option<TokenCounts>,
+    previous: Option<(String, RequestMeter, Option<String>)>,
+    chosen: Option<RequestMeter>,
     evidence: &Evidence,
     tally: &mut Tally,
 ) -> Result<()> {
     let before = previous
         .as_ref()
-        .and_then(|(_, last, conflict)| conflict.is_none().then_some(*last));
-    if before == chosen {
+        .and_then(|(_, last, conflict)| conflict.is_none().then_some(last));
+    if before == chosen.as_ref() {
         return Ok(());
     }
     if let Some(before) = before {
         tally.count(before, -1);
     }
     if let Some(chosen) = chosen {
-        tally.count(chosen, 1);
+        tally.count(&chosen, 1);
         db.prepare_cached(
             "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, observed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
@@ -189,7 +212,7 @@ fn project(
             key.0,
             key.1,
             key.2,
-            serde_json::to_string(&evidence.native.counts.unwrap_or(last))?
+            serde_json::to_string(&evidence.native.counts.unwrap_or(last.counts))?
         ])?;
     }
     Ok(())
@@ -225,23 +248,36 @@ pub(super) fn live(
         )?;
         return Ok(true);
     }
+    let previous = (
+        evidence.server,
+        evidence.server_conflict,
+        evidence.server_model.clone(),
+    );
     match evidence.server {
-        None => evidence.server = Some(usage.last),
-        Some(last) if last == usage.last || evidence.server_conflict == Some(usage.last) => {
-            return Ok(true);
+        None => {
+            evidence.server = Some(usage.last);
+            evidence.server_model = usage.model.clone();
         }
         Some(first) => {
             if evidence.server_conflict.is_none()
                 && let Some(merged) = first.merge_known(usage.last)
             {
-                if merged == first {
-                    return Ok(true);
-                }
                 evidence.server = Some(merged);
+                evidence.server_model =
+                    TokenModel::merge(evidence.server_model, usage.model.clone());
             } else {
                 evidence.server_conflict.get_or_insert(usage.last);
             }
         }
+    }
+    if previous
+        == (
+            evidence.server,
+            evidence.server_conflict,
+            evidence.server_model.clone(),
+        )
+    {
+        return Ok(true);
     }
     let (decision, chosen) = evidence.decision();
     if decision != "compatible" {
@@ -249,6 +285,7 @@ pub(super) fn live(
         detail["incoming"] = json!(usage.last);
         audit(db, &job, &run, key.2, "live", detail)?;
     }
+    let chosen = chosen.map(|counts| evidence.meter(decision, counts));
     project(db, key, &run, request(db, key)?, chosen, &evidence, tally)?;
     save_binding(db, key, &run, &job, &evidence)?;
     Ok(true)
@@ -285,17 +322,20 @@ fn historical(
         return Ok("wrong_run");
     }
     let old = binding.as_ref().map(|(_, _, old)| old);
-    let evidence = match old {
+    let mut evidence = match old {
         Some(old) => Evidence {
             native: native.clone(),
-            prior_native: if old.native == *native {
+            prior_native: if same_usage(&old.native, native) {
                 old.prior_native.clone()
             } else {
                 Some(old.native.clone())
             },
             server: old.server,
             server_conflict: old.server_conflict,
-            policy: if job.policy == TokenConflictPolicy::Quarantine && old.native == *native {
+            server_model: old.server_model.clone(),
+            policy: if job.policy == TokenConflictPolicy::Quarantine
+                && same_usage(&old.native, native)
+            {
                 old.policy
             } else {
                 job.policy
@@ -304,7 +344,8 @@ fn historical(
         None => Evidence {
             native: native.clone(),
             prior_native: None,
-            server: original.as_ref().map(|row| row.1),
+            server: original.as_ref().map(|row| row.1.counts),
+            server_model: original.as_ref().and_then(|row| row.1.model.clone()),
             server_conflict: original
                 .as_ref()
                 .and_then(|row| row.2.as_ref())
@@ -313,16 +354,22 @@ fn historical(
             policy: job.policy,
         },
     };
+    if let Some(old) = old
+        && same_usage(&old.native, native)
+    {
+        evidence.native.model = TokenModel::merge(old.native.model.clone(), native.model.clone());
+    }
     let (decision, chosen) = evidence.decision();
     if decision != "compatible" && decision != "native_only"
         || old.is_some_and(|old| old.native != *native)
     {
         let mut detail = evidence.audit(decision);
         detail["reader_id"] = json!(reader);
-        detail["previous_selected"] = json!(original.as_ref().map(|row| row.1));
+        detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
         detail["previous_native"] = json!(old.map(|old| &old.native));
         audit(db, &job.job_id, run_id, key.2, "rollout", detail)?;
     }
+    let chosen = chosen.map(|counts| evidence.meter(decision, counts));
     project(db, key, run_id, original, chosen, &evidence, tally)?;
     save_binding(db, key, run_id, &job.job_id, &evidence)?;
     Ok(decision)
@@ -338,7 +385,7 @@ fn restore_server_copy(
     db: &Connection,
     key: Key<'_>,
     run: &str,
-    original: Option<(String, TokenCounts, Option<String>)>,
+    original: Option<(String, RequestMeter, Option<String>)>,
     evidence: &Evidence,
     tally: &mut Tally,
 ) -> Result<()> {
@@ -347,10 +394,14 @@ fn restore_server_copy(
             return Ok(());
         }
         if conflict.is_none() {
-            tally.count(last, -1);
+            tally.count(&last, -1);
         }
     }
-    if let Some(server) = evidence.server {
+    if let Some(counts) = evidence.server {
+        let server = RequestMeter {
+            counts,
+            model: evidence.server_model.clone(),
+        };
         // Keep even a conflicted realtime owner and its exact old evidence.
         // Do not leave a rollout-origin conflict marker on an ordinary copy.
         let conflict = evidence
@@ -363,8 +414,8 @@ fn restore_server_copy(
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, unixepoch())
              ON CONFLICT(thread_id, turn_id, response_id) DO UPDATE SET last = excluded.last, conflict = excluded.conflict",
         )?.execute(params![key.0, key.1, key.2, run, serde_json::to_string(&server)?, conflict])?;
-        if let Some(server) = evidence.verified_server() {
-            tally.count(server, 1);
+        if evidence.verified_server().is_some() {
+            tally.count(&server, 1);
         }
     } else {
         // The job audit and original binding retain the retracted evidence.
@@ -413,7 +464,7 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
                     let run = verified_run(db, &run_id)?.expect("backfill key references a Run");
-                    let tally = run.tally;
+                    let tally = run.tally.clone();
                     entry.insert((run, tally))
                 }
             };
@@ -421,7 +472,7 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
             let key = (thread, turn, response.as_str());
             let original = request(db, key)?;
             let mut detail = evidence.audit("ambiguous_turn");
-            detail["previous_selected"] = json!(original.as_ref().map(|row| row.1));
+            detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
             audit(db, &job, &run_id, &response, "assignment", detail)?;
             restore_server_copy(db, key, &run_id, original, &evidence, tally)?;
         }
@@ -526,7 +577,7 @@ pub(in crate::store) fn receive(
         return Ok(());
     }
     let job: StartTokenBackfill = serde_json::from_str(&raw)?;
-    let mut tally = run.tally;
+    let mut tally = run.tally.clone();
     for native in records {
         let decision = historical(db, &run, &work.run_id, &job, reader, native, &mut tally)?;
         db.prepare_cached(

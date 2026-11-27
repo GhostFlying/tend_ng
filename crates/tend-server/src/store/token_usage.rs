@@ -1,10 +1,11 @@
 pub(super) mod backfill;
+mod models;
 pub(super) mod overview;
 pub(super) mod rebuild;
 
 use super::Store;
 use anyhow::Result;
-use protocol::{RunObservation, RunPhase, RunTokenUsage, TokenCounts};
+use protocol::{RequestMeter, RunObservation, RunPhase, RunTokenUsage, TokenCounts, TokenModel};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -43,14 +44,14 @@ pub(super) fn migrate(db: &Connection) -> Result<()> {
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
-struct Tally {
+struct Totals {
     valid_records: i64,
     known: [i64; 6],
     // Native values are i64; aggregate totals need not fit i64 or JS Number.
     sums: [i128; 6],
 }
 
-impl Tally {
+impl Totals {
     fn count(&mut self, counts: TokenCounts, sign: i64) {
         self.valid_records += sign;
         for (i, value) in counts.fields().into_iter().enumerate() {
@@ -70,7 +71,77 @@ impl Tally {
     }
 }
 
-#[derive(Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+impl Totals {
+    fn fields(self) -> [Field; 6] {
+        std::array::from_fn(|i| Field {
+            tokens: (self.known[i] > 0).then(|| self.sums[i].to_string()),
+            reported_requests: self.known[i],
+        })
+    }
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+struct Tally {
+    tokens: Totals,
+    model_usage: models::ModelProjection,
+}
+
+// Keep the original tally fields at their original location. Avoid serde
+// flatten here: its intermediate JSON values cannot represent large i128s.
+#[derive(Deserialize, Serialize)]
+struct TallyWire<M> {
+    valid_records: i64,
+    known: [i64; 6],
+    sums: [i128; 6],
+    #[serde(default = "Default::default", skip_serializing_if = "Option::is_none")]
+    model_usage: Option<M>,
+}
+
+impl Serialize for Tally {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        TallyWire {
+            valid_records: self.tokens.valid_records,
+            known: self.tokens.known,
+            sums: self.tokens.sums,
+            model_usage: (self.model_usage != models::ModelProjection::default())
+                .then_some(&self.model_usage),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Tally {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let TallyWire {
+            valid_records,
+            known,
+            sums,
+            model_usage,
+        } = TallyWire::deserialize(d)?;
+        Ok(Self {
+            tokens: Totals {
+                valid_records,
+                known,
+                sums,
+            },
+            model_usage: model_usage.unwrap_or_default(),
+        })
+    }
+}
+
+impl Tally {
+    fn count(&mut self, meter: &RequestMeter, sign: i64) {
+        self.tokens.count(meter.counts, sign);
+        self.model_usage.count(meter, sign);
+    }
+
+    fn merge(&mut self, other: &Self, sign: i64) {
+        self.tokens.merge(other.tokens, sign);
+        self.model_usage.merge(&other.model_usage, sign);
+    }
+}
+
+#[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
 struct Summary {
     started_runs: i64,
     observed_runs: i64,
@@ -79,15 +150,15 @@ struct Summary {
 }
 
 impl Summary {
-    fn merge(&mut self, other: Self) {
+    fn merge(&mut self, other: &Self) {
         self.merge_signed(other, 1);
     }
 
-    fn merge_signed(&mut self, other: Self, sign: i64) {
+    fn merge_signed(&mut self, other: &Self, sign: i64) {
         self.started_runs += sign * other.started_runs;
         self.observed_runs += sign * other.observed_runs;
         self.legacy_unobserved += sign * other.legacy_unobserved;
-        self.tally.merge(other.tally, sign);
+        self.tally.merge(&other.tally, sign);
     }
 }
 
@@ -145,7 +216,7 @@ fn start(db: &Connection, observation: &RunObservation) -> Result<bool> {
     )?.execute(params![observation.run_id, observation.assignment_id, thread, turn,
         serde_json::to_string(&Tally::default())?, observation.task_id])? == 1;
     if created {
-        save_run_tally(db, &observation.run_id, Tally::default())?;
+        save_run_tally(db, &observation.run_id, &Tally::default())?;
     }
     Ok(created)
 }
@@ -187,13 +258,17 @@ fn persist_request(
     if backfill::live(db, usage, tally)? {
         return Ok(());
     }
-    let last = serde_json::to_string(&usage.last)?;
+    let meter = RequestMeter {
+        counts: usage.last,
+        model: usage.model.clone(),
+    };
+    let last = serde_json::to_string(&meter)?;
     let key = params![usage.thread_id, usage.turn_id, usage.response_id];
     if db.prepare_cached(
         "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, observed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
     )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, usage.run_id, last, usage.observed_at])? == 1 {
-        tally.count(usage.last, 1);
+        tally.count(&meter, 1);
         return Ok(());
     }
     let previous = db.prepare_cached(
@@ -202,20 +277,24 @@ fn persist_request(
     // A record asserting a different Run cannot invalidate the original Run's
     // evidence. For an identity conflict within the same Run, neither counts.
     if previous.0 == usage.run_id && previous.1 != last && previous.2.is_none() {
-        let old: TokenCounts = serde_json::from_str(&previous.1)?;
-        if let Some(merged) = old.merge_known(usage.last) {
+        let old: RequestMeter = serde_json::from_str(&previous.1)?;
+        if let Some(counts) = old.counts.merge_known(usage.last) {
+            let merged = RequestMeter {
+                counts,
+                model: TokenModel::merge(old.model.clone(), meter.model),
+            };
             if old != merged {
                 db.prepare_cached(
                     "UPDATE token_requests SET last = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
                 )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, serde_json::to_string(&merged)?])?;
-                tally.count(old, -1);
-                tally.count(merged, 1);
+                tally.count(&old, -1);
+                tally.count(&merged, 1);
             }
         } else {
             db.prepare_cached(
                 "UPDATE token_requests SET conflict = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
             )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, last])?;
-            tally.count(old, -1);
+            tally.count(&old, -1);
         }
     }
     Ok(())
@@ -273,8 +352,8 @@ pub(super) fn apply_batch(
             }
             continue;
         };
-        let before = run.tally;
-        let mut after = before;
+        let before = &run.tally;
+        let mut after = before.clone();
         if new_start {
             // Drain across sync batches before applying current-batch records.
             let mut query = db.prepare_cached(
@@ -298,14 +377,14 @@ pub(super) fn apply_batch(
         for record in records.usage {
             persist_request(db, &run, runner, record, &mut after)?;
         }
-        if after != before {
-            save_run_tally(db, id, after)?;
+        if &after != before {
+            save_run_tally(db, id, &after)?;
         }
-        if new_start || after != before {
+        if new_start || &after != before {
             direct
                 .entry(run.issue.clone())
                 .or_default()
-                .merge(run_delta(&run, after, new_start));
+                .merge(&run_delta(&run, after, new_start));
         }
     }
     update_rollups(db, direct)?;
@@ -314,7 +393,7 @@ pub(super) fn apply_batch(
     Ok(usage.iter().map(|usage| usage.event_id.clone()).collect())
 }
 
-fn save_run_tally(db: &Connection, id: &str, tally: Tally) -> Result<()> {
+fn save_run_tally(db: &Connection, id: &str, tally: &Tally) -> Result<()> {
     db.prepare_cached(
         "INSERT INTO token_run_tallies (run_id, tally, valid_records) VALUES (?1, ?2, ?3)
          ON CONFLICT(run_id) DO UPDATE SET tally = excluded.tally, valid_records = excluded.valid_records"
@@ -322,14 +401,14 @@ fn save_run_tally(db: &Connection, id: &str, tally: Tally) -> Result<()> {
         .execute(params![
             id,
             serde_json::to_string(&tally)?,
-            tally.valid_records
+            tally.tokens.valid_records
         ])?;
     Ok(())
 }
 
 fn save_delta(db: &Connection, id: &str, run: &VerifiedRun, after: Tally) -> Result<()> {
     if after != run.tally {
-        save_run_tally(db, id, after)?;
+        save_run_tally(db, id, &after)?;
         update_rollups(
             db,
             BTreeMap::from([(run.issue.clone(), run_delta(run, after, false))]),
@@ -339,8 +418,8 @@ fn save_delta(db: &Connection, id: &str, run: &VerifiedRun, after: Tally) -> Res
 }
 
 fn run_delta(run: &VerifiedRun, after: Tally, new_start: bool) -> Summary {
-    let was_observed = i64::from(run.tally.valid_records > 0);
-    let observed = i64::from(after.valid_records > 0);
+    let was_observed = i64::from(run.tally.tokens.valid_records > 0);
+    let observed = i64::from(after.tokens.valid_records > 0);
     let mut delta = Summary {
         started_runs: i64::from(new_start),
         observed_runs: observed - was_observed,
@@ -351,7 +430,7 @@ fn run_delta(run: &VerifiedRun, after: Tally, new_start: bool) -> Summary {
         },
         tally: after,
     };
-    delta.tally.merge(run.tally, -1);
+    delta.tally.merge(&run.tally, -1);
     delta
 }
 
@@ -362,28 +441,28 @@ fn update_rollups(db: &Connection, direct: BTreeMap<String, Summary>) -> Result<
         if delta == Summary::default() {
             continue;
         }
-        update_issue(db, &issue, "direct", delta)?;
-        global.merge(delta);
+        update_issue(db, &issue, "direct", &delta)?;
+        global.merge(&delta);
         let mut query =
             db.prepare_cached("SELECT ancestor FROM token_issue_tree WHERE descendant = ?1")?;
         for ancestor in query.query_map([&issue], |row| row.get::<_, String>(0))? {
-            subtree.entry(ancestor?).or_default().merge(delta);
+            subtree.entry(ancestor?).or_default().merge(&delta);
         }
     }
     for (issue, delta) in subtree {
         if delta != Summary::default() {
-            update_issue(db, &issue, "subtree", delta)?;
+            update_issue(db, &issue, "subtree", &delta)?;
         }
     }
     if global != Summary::default() {
         let mut total = overview::read_global(db)?;
-        total.merge(global);
-        overview::write_global(db, total)?;
+        total.merge(&global);
+        overview::write_global(db, &total)?;
     }
     Ok(())
 }
 
-fn update_issue(db: &Connection, issue: &str, scope: &str, delta: Summary) -> Result<()> {
+fn update_issue(db: &Connection, issue: &str, scope: &str, delta: &Summary) -> Result<()> {
     let existing = db
         .prepare_cached(
             "SELECT summary FROM token_issue_rollups WHERE issue_id = ?1 AND scope = ?2",
@@ -433,6 +512,8 @@ struct Node {
 
 #[derive(Clone, Serialize)]
 struct Breakdown {
+    models: Vec<models::ModelRow>,
+    estimate: models::Estimate,
     started_runs: i64,
     observed_runs: i64,
     unobserved_before_collection: i64,
@@ -454,10 +535,6 @@ struct Field {
 
 impl From<Summary> for Breakdown {
     fn from(summary: Summary) -> Self {
-        let fields: [Field; 6] = std::array::from_fn(|i| Field {
-            tokens: (summary.tally.known[i] > 0).then(|| summary.tally.sums[i].to_string()),
-            reported_requests: summary.tally.known[i],
-        });
         let [
             total_tokens,
             input_tokens,
@@ -465,7 +542,8 @@ impl From<Summary> for Breakdown {
             cache_write_input_tokens,
             output_tokens,
             reasoning_output_tokens,
-        ] = fields;
+        ] = summary.tally.tokens.fields();
+        let (models, estimate) = models::rows(summary.tally.model_usage, summary.tally.tokens);
         Self {
             started_runs: summary.started_runs,
             observed_runs: summary.observed_runs,
@@ -473,7 +551,9 @@ impl From<Summary> for Breakdown {
             unobserved_no_usage: summary.started_runs
                 - summary.observed_runs
                 - summary.legacy_unobserved,
-            reported_requests: summary.tally.valid_records,
+            reported_requests: summary.tally.tokens.valid_records,
+            models,
+            estimate,
             total_tokens,
             input_tokens,
             cached_input_tokens,

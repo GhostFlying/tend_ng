@@ -86,9 +86,23 @@ try {
     await open.click();
     await total.getByText("41,200", { exact: true }).waitFor();
     assert.equal(await pane.getByText("0", { exact: true }).count(), 1);
-    assert.equal(await pane.getByText("字段缺失", { exact: true }).count(), 1);
+    const models = pane.getByRole("region", { name: "模型明细与费用估算" });
+    await models.getByText("gpt-6.2-sol", { exact: true }).waitFor();
+    await models.getByText("gpt-6.2-astra", { exact: true }).waitFor();
+    assert.equal(await models.getByText("deepseek-v4.1-flash").count(), 0);
+    const directAstra = models
+      .locator(".model-row > summary")
+      .filter({ hasText: "gpt-6.2-astra" });
+    await directAstra.getByText("9,904", { exact: true }).waitFor();
+    await directAstra.getByText("2,000", { exact: true }).waitFor();
     await pane.getByRole("button", { name: "含所有后代" }).click();
     await total.getByText("127,200", { exact: true }).waitFor();
+    await models.getByText("deepseek-v4.1-flash", { exact: true }).waitFor();
+    await models.getByText("模型未知", { exact: true }).waitFor();
+    const childFlash = models
+      .locator(".model-row > summary")
+      .filter({ hasText: "deepseek-v4.1-flash" });
+    await childFlash.getByText("60,000", { exact: true }).waitFor();
     await pane
       .getByText("已观测 2 / 3 个已开始 Run", { exact: true })
       .waitFor();
@@ -113,18 +127,15 @@ try {
       await open.evaluate((element, desktop) => {
         if (!desktop) return element.scrollIntoView({ block: "start" });
         const main = element.closest("main");
-        main.scrollTop += Math.max(
-          0,
-          element.getBoundingClientRect().top - 170,
-        );
+        main.scrollTop += Math.max(0, element.getBoundingClientRect().top - 76);
       }, width === 1440);
       await page.screenshot({
         path: join(images, `issue-token-usage-${width}.png`),
       });
       if (width === 390) {
-        await pane
-          .getByRole("heading", { name: "子树明细" })
-          .evaluate((element) => element.scrollIntoView({ block: "center" }));
+        await models.evaluate((element) =>
+          element.scrollIntoView({ block: "center" }),
+        );
         await page.screenshot({
           path: join(images, "issue-token-usage-390-breakdown.png"),
         });

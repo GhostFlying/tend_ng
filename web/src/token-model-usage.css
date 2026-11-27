@@ -1,0 +1,156 @@
+.model-usage {
+  min-width: 0;
+  margin-block-start: 16px;
+  border-top: 1px solid var(--border);
+  padding-block-start: 12px;
+  font-size: 14px;
+}
+.model-usage h4 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 4px 16px;
+  margin: 0;
+  font-size: 15px;
+}
+.model-method,
+.model-detail p {
+  margin: 6px 0 8px;
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.model-usage a {
+  color: var(--label);
+  text-underline-offset: 2px;
+}
+.model-list {
+  margin: 10px 0 0;
+  padding: 0;
+  list-style: none;
+}
+.model-list li + li {
+  border-top: 1px solid var(--border);
+}
+.model-row > summary {
+  display: grid;
+  grid-template-columns: minmax(0, 1.7fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
+  align-items: center;
+  gap: 4px 16px;
+  min-height: 46px;
+  padding: 8px 10px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  font-variant-numeric: tabular-nums;
+}
+.model-row > summary:hover,
+.model-row[open] > summary {
+  background: var(--active);
+}
+.model-name strong::before {
+  content: "›";
+  display: inline-block;
+  width: 14px;
+  color: var(--muted);
+}
+.model-row[open] .model-name strong::before {
+  content: "⌄";
+}
+.model-evidence {
+  display: block;
+  font-size: 12px;
+}
+.model-cost {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+.model-row-estimate,
+.model-usage-cost {
+  text-align: end;
+}
+.model-partial {
+  margin-inline-start: 5px;
+  font-size: 11px;
+  color: var(--label);
+}
+.model-line-fields {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 12px;
+  padding-inline-start: 14px;
+}
+.model-line-field {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  min-width: 0;
+  font-size: 12px;
+}
+.model-line-field small {
+  font-size: inherit;
+}
+.model-requested span {
+  display: block;
+}
+.model-detail {
+  padding: 8px 10px 12px;
+}
+.model-raw,
+.model-fee-items {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 120px), 1fr));
+  gap: 8px;
+  margin: 0;
+}
+.model-raw > div,
+.model-fee-items > div {
+  min-width: 0;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.model-raw dd,
+.model-fee-items dd {
+  margin: 2px 0 0;
+}
+.model-rate-tier + .model-rate-tier {
+  margin-block-start: 8px;
+}
+.usage-tree-models {
+  margin: 0 0 8px 44px;
+  font-size: 12px;
+}
+.usage-tree-models > summary {
+  min-height: 32px;
+  line-height: 32px;
+  color: var(--label);
+  cursor: pointer;
+}
+.model-usage-compact {
+  margin-block-start: 6px;
+}
+@media (max-width: 540px) {
+  .model-row > summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 4px 8px;
+    padding-inline: 6px;
+  }
+  .model-name {
+    grid-column: 1 / -1;
+  }
+  .model-line-fields {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding-inline-start: 0;
+  }
+  .model-detail {
+    padding-inline: 6px;
+  }
+  .usage-tree-models {
+    margin-inline-start: 22px;
+  }
+}

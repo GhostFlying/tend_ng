@@ -3,7 +3,7 @@
 //! TokenCount also reports estimates, limit markers and restored context. Pair
 //! the wire values with exact per-response evidence from this turn's append
 //! segment. Never substitute counts from the file for missing wire fields.
-use protocol::TokenCounts;
+use protocol::{RequestMeter, TokenCounts, TokenModel};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -25,6 +25,7 @@ pub struct Collector {
     unmatched: usize,
     evidence: BTreeMap<i64, Vec<NativeRecord>>,
     dirty: BTreeSet<i64>,
+    model: TurnModel,
 }
 
 struct Notice {
@@ -34,8 +35,6 @@ struct Notice {
 
 #[derive(Deserialize)]
 struct Envelope {
-    #[serde(rename = "type")]
-    kind: String,
     payload: NativeRecord,
 }
 
@@ -46,6 +45,10 @@ struct NativeRecord {
     response_id: String,
     usage: TokenCounts,
     thread_token_usage: Cursor,
+    #[serde(default)]
+    response_model: Value,
+    #[serde(skip)]
+    model: Option<TokenModel>,
 }
 
 #[derive(Deserialize)]
@@ -61,6 +64,62 @@ impl NativeRecord {
             && cursor >= 0
             && self.usage.valid()
             && self.usage.total_tokens.is_none_or(|last| last <= cursor)
+    }
+}
+
+/// Historical Codex rollouts normally contain only the same-turn request
+/// context. It is not an assertion about the provider's resolved response.
+#[derive(Default)]
+struct TurnModel {
+    current: bool,
+    model: Option<TokenModel>,
+    rerouted: bool,
+}
+
+impl TurnModel {
+    fn observe(&mut self, kind: &str, payload: &Value, turn: &str) {
+        match kind {
+            "turn_context" => {
+                self.current = payload["turn_id"].as_str() == Some(turn);
+                if self.current {
+                    let next = payload["model"]
+                        .as_str()
+                        .filter(|id| TokenModel::valid_id(id))
+                        .map_or(TokenModel::Ambiguous, |id| {
+                            TokenModel::TurnContext(id.to_owned())
+                        });
+                    self.model = TokenModel::merge(self.model.take(), Some(next));
+                }
+            }
+            "event_msg" if payload["type"] == "model_reroute" => {
+                if payload["turn_id"]
+                    .as_str()
+                    .map_or(self.current, |id| id == turn)
+                {
+                    self.rerouted = true;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn for_response(&self, response_model: &Value) -> TokenModel {
+        if let Some(id) = response_model
+            .as_str()
+            .filter(|id| TokenModel::valid_id(id))
+        {
+            TokenModel::Response(id.to_owned())
+        } else if !response_model.is_null() {
+            TokenModel::ResponseConflict
+        } else if self.rerouted {
+            // The reroute event isn't response-keyed and cannot be applied
+            // as a new model to an unknown number of subsequent requests.
+            TokenModel::Ambiguous
+        } else if self.current {
+            self.model.clone().unwrap_or(TokenModel::Unresolved)
+        } else {
+            TokenModel::Unresolved
+        }
     }
 }
 
@@ -81,6 +140,7 @@ pub(crate) fn native_snapshot(
     let mut input = BufReader::new(file.take(meta.len()));
     let mut records = BTreeMap::<String, NativeTokenRecord>::new();
     let mut line = Vec::new();
+    let mut model = TurnModel::default();
     loop {
         line.clear();
         let bytes = (&mut input)
@@ -119,16 +179,20 @@ pub(crate) fn native_snapshot(
             if tag.kind == RECORD {
                 return Err(OversizedNativeRecord);
             }
+            if tag.kind == "turn_context" {
+                model.current = false;
+            }
             continue;
         }
         let value: Value = serde_json::from_slice(&line).map_err(|_| SourceCorrupt)?;
         let Some(kind) = value["type"].as_str() else {
             return Err(SourceCorrupt);
         };
+        let payload = &value["payload"];
         if kind != RECORD {
+            model.observe(kind, payload, turn);
             continue;
         }
-        let payload = &value["payload"];
         let (Some(record_thread), Some(record_turn)) =
             (payload["thread_id"].as_str(), payload["turn_id"].as_str())
         else {
@@ -154,8 +218,13 @@ pub(crate) fn native_snapshot(
                 counts,
                 invalid: false,
                 variant: None,
+                model: None,
             });
         record.invalid |= !valid;
+        record.model = TokenModel::merge(
+            record.model.take(),
+            Some(model.for_response(&payload["response_model"])),
+        );
         if let Some(counts) = counts
             && record.counts != Some(counts)
         {
@@ -238,6 +307,7 @@ impl Collector {
             unmatched: 0,
             evidence: BTreeMap::new(),
             dirty: BTreeSet::new(),
+            model: TurnModel::default(),
         }))
     }
 
@@ -259,7 +329,7 @@ impl Collector {
         self.unmatched > 0
     }
 
-    pub fn matched(&mut self, thread: &str, turn: &str) -> io::Result<Vec<(String, TokenCounts)>> {
+    pub fn matched(&mut self, thread: &str, turn: &str) -> io::Result<Vec<(String, RequestMeter)>> {
         if self.notices.is_empty() {
             return Ok(Vec::new());
         }
@@ -295,27 +365,42 @@ impl Collector {
                     let rest = skip_line(&mut input)?;
                     if let Some(rest) = rest {
                         self.offset += bytes + rest;
+                        if line[..line.len().min(256)]
+                            .windows(12)
+                            .any(|part| part == b"turn_context")
+                        {
+                            self.model.current = false;
+                        }
                     } else {
                         break;
                     }
                     continue;
                 }
                 self.offset += bytes;
-                if !line
-                    .windows(RECORD.len())
-                    .any(|part| part == RECORD.as_bytes())
+                let prefix = &line;
+                if ![RECORD, "turn_context", "event_msg"]
+                    .into_iter()
+                    .any(|tag| prefix.windows(tag.len()).any(|part| part == tag.as_bytes()))
                 {
                     continue;
                 }
-                if let Ok(Envelope { kind, payload }) = serde_json::from_slice::<Envelope>(&line)
-                    && kind == RECORD
-                    && payload.thread_id == thread
-                    && payload.turn_id == turn
-                    && payload.valid()
-                {
-                    let cursor = payload.thread_token_usage.total_tokens;
-                    self.evidence.entry(cursor).or_default().push(payload);
-                    self.dirty.insert(cursor);
+                let Ok(tag) = serde_json::from_slice::<Tag>(&line) else {
+                    continue;
+                };
+                if tag.kind == RECORD {
+                    if let Ok(mut payload) =
+                        serde_json::from_slice::<Envelope>(&line).map(|e| e.payload)
+                        && payload.thread_id == thread
+                        && payload.turn_id == turn
+                        && payload.valid()
+                    {
+                        payload.model = Some(self.model.for_response(&payload.response_model));
+                        let cursor = payload.thread_token_usage.total_tokens;
+                        self.evidence.entry(cursor).or_default().push(payload);
+                        self.dirty.insert(cursor);
+                    }
+                } else if let Ok(value) = serde_json::from_slice::<Value>(&line) {
+                    self.model.observe(&tag.kind, &value["payload"], turn);
                 }
             }
             self.scanned_end = end;
@@ -350,7 +435,13 @@ impl Collector {
                     }
                 }
                 if let Some((_, last)) = matching {
-                    accepted.push((record.response_id.clone(), last));
+                    accepted.push((
+                        record.response_id.clone(),
+                        RequestMeter {
+                            counts: last,
+                            model: record.model.clone(),
+                        },
+                    ));
                     false
                 } else {
                     true
@@ -440,6 +531,56 @@ mod tests {
     }
 
     #[test]
+    fn models_use_only_prior_context_for_the_exact_turn_or_the_response() -> anyhow::Result<()> {
+        let fixture = Fixture::new()?;
+        let path = fixture.0.join("rollout-fixture-thread.jsonl");
+        let mut live = Collector::new(&path, "thread", false)?.unwrap();
+        let mut response = record("thread", "turn", "confirmed", 39, 8);
+        response["payload"]["response_model"] = json!("openai/gpt-6.2-astra");
+        let lines = [
+            json!({"type":"turn_context","payload":{"turn_id":"old","model":"wrong"}}),
+            record("thread", "turn", "early", 7, 7),
+            json!({"type":"turn_context","payload":{"turn_id":"turn","model":"gpt-6.2-sol"}}),
+            record("thread", "turn", "middle", 20, 13),
+            json!({"type":"event_msg","payload":{"type":"model_reroute","from_model":"gpt-6.2-sol","to_model":"other"}}),
+            record("thread", "turn", "late", 31, 11),
+            response,
+        ];
+        std::fs::write(
+            &path,
+            lines
+                .iter()
+                .map(|line| format!("{line}\n"))
+                .collect::<String>(),
+        )?;
+        for (last, cursor) in [(7, 7), (13, 20), (11, 31), (8, 39)] {
+            live.notice(&notice(last, cursor));
+        }
+        let live = live
+            .matched("thread", "turn")?
+            .into_iter()
+            .map(|(id, meter)| (id, meter.model))
+            .collect::<BTreeMap<_, _>>();
+        let historical = native_snapshot(File::open(&path)?, "thread", "turn", false)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.response_id, row.model))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(live, historical);
+        assert_eq!(live["early"], Some(TokenModel::Unresolved));
+        assert_eq!(
+            live["middle"],
+            Some(TokenModel::TurnContext("gpt-6.2-sol".into()))
+        );
+        assert_eq!(live["late"], Some(TokenModel::Ambiguous));
+        assert_eq!(
+            live["confirmed"],
+            Some(TokenModel::Response("openai/gpt-6.2-astra".into()))
+        );
+        Ok(())
+    }
+
+    #[test]
     fn consumes_only_completed_appends_and_requires_both_sources_and_native_identity()
     -> anyhow::Result<()> {
         let dir = Fixture::new()?;
@@ -468,7 +609,7 @@ mod tests {
         assert_eq!(accepted[0].0, "live");
         assert!(!live.has_unmatched());
         assert_eq!(
-            accepted[0].1.fields(),
+            accepted[0].1.counts.fields(),
             [Some(3), None, Some(0), None, None, None]
         );
         assert!(live.matched("thread", "turn")?.is_empty());
@@ -563,7 +704,7 @@ mod tests {
         assert!(
             accepted
                 .iter()
-                .all(|(_, usage)| usage.total_tokens == Some(0))
+                .all(|(_, usage)| usage.counts.total_tokens == Some(0))
         );
         Ok(())
     }

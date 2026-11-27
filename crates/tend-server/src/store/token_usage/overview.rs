@@ -31,7 +31,7 @@ pub(in crate::store) fn migrate(db: &Connection) -> Result<()> {
     let mut query = db.prepare("SELECT summary FROM token_issue_rollups WHERE scope = 'direct'")?;
     let mut rows = query.query([])?;
     while let Some(row) = rows.next()? {
-        total.merge(serde_json::from_str(row.get_ref(0)?.as_str()?)?);
+        total.merge(&serde_json::from_str(row.get_ref(0)?.as_str()?)?);
     }
     db.execute(
         "INSERT INTO token_global_rollup VALUES (1, ?1)",
@@ -48,10 +48,10 @@ pub(super) fn read_global(db: &Connection) -> Result<Summary> {
         })??)
 }
 
-pub(super) fn write_global(db: &Connection, summary: Summary) -> Result<()> {
+pub(super) fn write_global(db: &Connection, summary: &Summary) -> Result<()> {
     ensure!(
         db.prepare_cached("UPDATE token_global_rollup SET summary = ?1 WHERE id = 1")?
-            .execute([serde_json::to_string(&summary)?])?
+            .execute([serde_json::to_string(summary)?])?
             == 1,
         "missing global Token rollup"
     );

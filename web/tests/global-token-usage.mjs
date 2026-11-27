@@ -126,10 +126,10 @@ try {
     const rootRow = tree.locator(":scope > li").filter({
       has: page.getByRole("link", { name: new RegExp(`^#${root} `) }),
     });
-    assert.deepEqual(await rootRow.locator("bdi").allTextContents(), [
-      "41,200",
-      "127,200",
-    ]);
+    assert.deepEqual(
+      await rootRow.locator(".usage-tree-tokens").allTextContents(),
+      ["41,200", "127,200"],
+    );
 
     // Only an expanded branch reads children, and a retry does not reset siblings.
     const childrenRead = `${url}${endpoint}?parent=${parent}`;
@@ -156,18 +156,90 @@ try {
       has: page.getByRole("link", { name: new RegExp(`^#${missing} `) }),
     });
     assert((await missingRow.textContent()).includes("完全未观测"));
-    assert.deepEqual(await missingRow.locator("bdi").allTextContents(), [
-      "—",
-      "—",
-    ]);
+    assert.deepEqual(
+      await missingRow.locator(".usage-tree-tokens").allTextContents(),
+      ["—", "—"],
+    );
     const meteredRow = children.locator(":scope > li").filter({
       has: page.getByRole("link", { name: new RegExp(`^#${metered} `) }),
     });
-    assert.deepEqual(await meteredRow.locator("bdi").allTextContents(), [
-      "86,000",
-      "86,000",
-    ]);
+    assert.deepEqual(
+      await meteredRow.locator(".usage-tree-tokens").allTextContents(),
+      ["86,000", "86,000"],
+    );
     assert((await meteredRow.textContent()).includes("已观测全部 Run"));
+    const overview = page.locator(".usage-overview .model-usage");
+    await overview.getByText("$0.1351816", { exact: true }).waitFor();
+    const unknown = overview
+      .locator(".model-row > summary")
+      .filter({ hasText: "模型未知" });
+    await unknown.getByText("费用未知", { exact: true }).waitFor();
+    const astra = overview
+      .locator(".model-row > summary")
+      .filter({ hasText: "gpt-6.2-astra" });
+    const astraFields = astra.locator(".model-line-fields");
+    for (const [label, value] of [
+      ["缓存读取", "4,096"],
+      ["非缓存输入", "9,904"],
+      ["缓存写入", "2,000"],
+      ["输出", "400"],
+    ]) {
+      const field = astraFields.locator(".model-line-field").filter({
+        has: page.getByText(label, { exact: true }),
+      });
+      assert.equal(await field.locator("bdi").textContent(), value);
+    }
+    const sol = overview
+      .locator(".model-row > summary")
+      .filter({ hasText: "gpt-6.2-sol" });
+    assert.equal(await sol.getByText("缓存写入").count(), 0);
+    await sol.getByText("未知", { exact: true }).waitFor();
+    const flash = overview
+      .locator(".model-row > summary")
+      .filter({ hasText: "deepseek-v4.1-flash" });
+    const flashWrite = flash
+      .locator(".model-line-field")
+      .filter({ hasText: "缓存写入" });
+    assert.equal(await flashWrite.locator("bdi").textContent(), "0");
+    await unknown.click();
+    await overview
+      .getByText("原生回合仅记录请求模型", { exact: false })
+      .waitFor();
+    await unknown.click();
+    await astra.click();
+    const priceLink = overview.getByRole("link", {
+      name: "openai/gpt-6.2-astra",
+    });
+    await priceLink.waitFor();
+    assert.equal(
+      await priceLink.getAttribute("href"),
+      "https://openrouter.ai/openai/gpt-6.2-astra",
+    );
+    await overview.getByText("$0.02", { exact: true }).waitFor();
+    await noOverflow(page, width);
+    if (images && width === 1440) {
+      await overview.evaluate((node) => {
+        node.closest("main").scrollTop = 0;
+      });
+      await page.screenshot({
+        path: join(images, "token-model-price-desktop.png"),
+      });
+    }
+    await astra.click();
+    await rootRow.getByText(`#${root} 模型明细`, { exact: true }).click();
+    const directModels = rootRow.getByRole("region", { name: "直属模型明细" });
+    const subtreeModels = rootRow.getByRole("region", {
+      name: "含后代模型明细",
+    });
+    await directModels.getByText("gpt-6.2-sol", { exact: true }).waitFor();
+    await subtreeModels
+      .getByText("deepseek-v4.1-flash", { exact: true })
+      .waitFor();
+    assert.equal(
+      await directModels.getByText("deepseek-v4.1-flash").count(),
+      0,
+    );
+    await rootRow.getByText(`#${root} 模型明细`, { exact: true }).click();
     assert.deepEqual(queries, [
       "",
       "",
@@ -177,8 +249,18 @@ try {
     ]);
     await noOverflow(page, width);
     if (images) {
+      await overview.evaluate((node) => {
+        node.closest("main").scrollTop = 0;
+      });
       await page.screenshot({ path: join(images, `token-usage-${width}.png`) });
       if (width === 390) {
+        await overview.evaluate((node) => {
+          const main = node.closest("main");
+          main.scrollTop += node.getBoundingClientRect().top - 70;
+        });
+        await page.screenshot({
+          path: join(images, "token-model-global-mobile.png"),
+        });
         await page
           .getByRole("heading", { name: "Issue 树" })
           .evaluate((node) => node.scrollIntoView({ block: "start" }));

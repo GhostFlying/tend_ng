@@ -13,6 +13,7 @@ import {
   tokens,
   TokenTotal,
 } from "./TokenUsageSummary";
+import { EstimateValue, TokenModelUsage } from "./TokenModelUsage";
 import "./global-token-usage.css";
 
 function IssueValue({
@@ -27,13 +28,18 @@ function IssueValue({
     <div className="usage-tree-value">
       <dt>{label}</dt>
       <dd>
-        <bdi>{tokens(field)}</bdi>
+        <bdi className="usage-tree-tokens">{tokens(field)}</bdi>
       </dd>
       <dd className="detail-muted">
         {coverageLabel(usage)}
         {usage.started_runs > 0 &&
           ` · ${format.format(usage.observed_runs)} / ${format.format(usage.started_runs)}`}
       </dd>
+      {usage.estimate && (
+        <dd className="detail-muted">
+          <EstimateValue estimate={usage.estimate} />
+        </dd>
+      )}
       {usage.reported_requests > 0 && fieldNote(field, usage) && (
         <dd className="detail-muted">{fieldNote(field, usage)}</dd>
       )}
@@ -49,6 +55,7 @@ function IssueRow({
   depth: number;
 }) {
   const [expanded, setExpanded] = useState(false);
+  const [modelsOpen, setModelsOpen] = useState(false);
   const childrenId = useId();
   const title = issueTitle(issue.title, issue.number);
   return (
@@ -90,6 +97,29 @@ function IssueRow({
           <IssueValue label="含后代" usage={issue.subtree} />
         </dl>
       </div>
+      {((issue.direct.models?.length ?? 0) > 0 ||
+        (issue.subtree.models?.length ?? 0) > 0) && (
+        <details
+          className="usage-tree-models"
+          onToggle={(event) => setModelsOpen(event.currentTarget.open)}
+        >
+          <summary>#{issue.number} 模型明细</summary>
+          {modelsOpen && (
+            <>
+              <TokenModelUsage
+                usage={issue.direct}
+                label="直属模型明细"
+                compact
+              />
+              <TokenModelUsage
+                usage={issue.subtree}
+                label="含后代模型明细"
+                compact
+              />
+            </>
+          )}
+        </details>
+      )}
       {expanded && (
         <div
           id={childrenId}
@@ -174,6 +204,7 @@ function UsageLevel({
             按各 Issue 直属用量汇总，每个 Issue 只计算一次。不含未归属 Issue
             的用量。
           </p>
+          <TokenModelUsage usage={page.total} label="模型明细与费用估算" />
         </section>
       )}
       {page && !parent && (

@@ -9,6 +9,8 @@ import {
   TokenTotal,
 } from "./TokenUsageSummary";
 
+import { EstimateValue, TokenModelUsage } from "./TokenModelUsage";
+
 const metrics = [
   ["input_tokens", "输入"],
   ["cached_input_tokens", "缓存读取"],
@@ -58,6 +60,11 @@ function IssueRows({
             </div>
             <div className="token-issue-value">
               <bdi>{tokens(direct.total_tokens)}</bdi>
+              {direct.estimate && (
+                <small className="detail-muted">
+                  <EstimateValue estimate={direct.estimate} />
+                </small>
+              )}
               <small className="detail-muted">
                 {fieldNote(direct.total_tokens, direct) ?? "已上报 Token"}
               </small>
@@ -179,6 +186,7 @@ function UsagePane({ issue }: { issue: string }) {
           <p className="detail-muted token-metric-note">
             各分项按原生字段汇总，不相加补齐总量。
           </p>
+          <TokenModelUsage usage={active} label="模型明细与费用估算" />
         </>
       )}
       {state.status === "ready" && scope === "subtree" && (

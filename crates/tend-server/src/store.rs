@@ -74,7 +74,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 44;
+pub(crate) const SCHEMA_VERSION: i64 = 45;
 
 pub struct Store {
     db: Connection,

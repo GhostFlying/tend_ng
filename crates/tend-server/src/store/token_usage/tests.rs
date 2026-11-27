@@ -79,6 +79,7 @@ pub(super) fn observation(run: &RunObservation, cursor: i64, total: Option<i64>)
             ..TokenCounts::default()
         },
         observed_at: 42,
+        model: None,
     }
 }
 
@@ -106,6 +107,109 @@ pub(super) fn sync(
 
 pub(super) fn view(store: &Store, id: &str) -> Result<Value> {
     Ok(to_value(store.issue_token_usage(id)?.unwrap())?)
+}
+
+#[test]
+fn model_evidence_enriches_and_retracts_without_quarantining_valid_counts() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    issue(&store.db, "child", Some("root"))?;
+    assignment(&store.db, "job", "child", "runner")?;
+    let run = native_run("test-run", "job");
+    let mut record = observation(&run, 1, Some(101));
+    record.last = TokenCounts::from_fields([101, 100, 20, 10, 1, 0].map(Some));
+    sync(&mut store, "runner", &[run], std::slice::from_ref(&record))?;
+    let read = |s: &Store| -> Result<Value> {
+        let global = to_value(s.token_overview(None, None)?)?["total"].clone();
+        assert_eq!(global, view(s, "root")?["subtree"]);
+        assert_eq!(global, view(s, "child")?["direct"]);
+        assert_eq!(global["reported_requests"], 1);
+        Ok(global)
+    };
+    let legacy = read(&store)?;
+    assert_eq!(legacy["models"][0]["model"], Value::Null);
+    assert_eq!(
+        legacy["models"][0]["uncached_input_tokens"]["tokens"],
+        Value::Null
+    );
+    let mut change = |n, model| -> Result<Value> {
+        record.event_id = format!("new-{n}");
+        record.model = model;
+        sync(&mut store, "runner", &[], std::slice::from_ref(&record))?;
+        read(&store)
+    };
+    let sol = TokenModel::TurnContext("gpt-6.2-sol".into());
+    let astra = TokenModel::Response("gpt-6.2-astra".into());
+    let unresolved = change(0, Some(TokenModel::Unresolved))?;
+    assert_eq!(
+        unresolved["models"][0]["uncached_input_tokens"]["tokens"],
+        "70"
+    );
+    assert_eq!(unresolved["models"][0]["model"], Value::Null);
+    let projected = change(1, Some(sol.clone()))?;
+    assert_eq!(projected["models"][0]["model"], Value::Null);
+    assert_eq!(projected["models"][0]["requested_models"]["gpt-6.2-sol"], 1);
+    assert_eq!(
+        projected["models"][0]["uncached_input_tokens"]["tokens"],
+        "70"
+    );
+    assert_eq!(projected["estimate"]["usd"], Value::Null);
+    assert_eq!(projected, change(2, None)?);
+    let inferred = change(3, Some(TokenModel::TurnContext("conflict".into())))?;
+    assert_eq!(inferred["models"][0]["model"], Value::Null);
+    let confirmed = change(4, Some(astra))?;
+    assert_eq!(confirmed["models"][0]["model"], "gpt-6.2-astra");
+    assert_eq!(confirmed["models"][0]["response_model_requests"], 1);
+    assert_eq!(confirmed["models"][0]["requested_models"], json!({}));
+    assert_eq!(confirmed["estimate"]["usd"], "0.000708");
+    let contradicted = change(5, Some(TokenModel::Response("gpt-6.2-sol".into())))?;
+    assert_eq!(contradicted["models"][0]["model"], Value::Null);
+    assert_eq!(contradicted["total_tokens"]["tokens"], "101");
+    assert_eq!(contradicted, change(6, Some(sol))?);
+    store.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
+    assert_eq!(contradicted, read(&store)?);
+    Ok(())
+}
+
+#[test]
+fn retains_zero_and_provable_long_rate_in_rebuild() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "job", "root", "runner")?;
+    let run = native_run("test-run", "job");
+    let mut records = vec![
+        observation(&run, 1, None),
+        observation(&run, 2, None),
+        observation(&run, 3, None),
+    ];
+    for (record, (read, output)) in records
+        .iter_mut()
+        .zip([(0, 0), (272_000, 10), (272_001, 10)])
+    {
+        record.last =
+            TokenCounts::from_fields([None, None, Some(read), Some(0), Some(output), None]);
+        record.model = Some(TokenModel::Response("gpt-6.2-sol".into()));
+    }
+    sync(&mut store, "runner", &[run], &records)?;
+    let before = view(&store, "root")?;
+    assert_eq!(
+        before["direct"]["estimate"],
+        json!({"usd":"0.0545502","partial":true})
+    );
+    let tiers = &before["direct"]["models"][0]["price"]["tiers"];
+    assert_eq!(tiers[0]["tier"], "long");
+    assert_eq!(tiers[1]["tier"], "unknown");
+    assert_eq!(
+        tiers[1]["components"][3]["estimate"],
+        json!({"usd":"0","partial":true})
+    );
+    store.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
+    assert_eq!(before, view(&store, "root")?);
+    Ok(())
 }
 
 #[test]
@@ -495,6 +599,7 @@ fn page(item: i64, offset: i64, counts: &[(i64, i64)], done: bool) -> protocol::
                     }),
                     invalid: false,
                     variant: None,
+                    model: None,
                 })
                 .collect(),
         },

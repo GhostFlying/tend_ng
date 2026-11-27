@@ -20,19 +20,26 @@ def respond(call, result):
     send({"id": call["id"], "result": result})
 
 
-def evidence(cumulative, last, response, thread_id=None, turn_id=None):
-    counts = {re.sub(r"[A-Z]", lambda m: "_" + m[0].lower(), key): value for key, value in last.items()}
+def native_line(kind, payload):
     with rollout.open("a") as ledger:
-        print(json.dumps({"type": "token_usage_record", "payload": {
-            "thread_id": thread_id or thread, "turn_id": turn_id or turn,
-            "response_id": response, "usage": counts,
-            "thread_token_usage": {"total_tokens": cumulative},
-        }}), file=ledger)
+        print(json.dumps({"type": kind, "payload": payload}), file=ledger)
 
 
-def usage(cumulative, last, thread_id=None, turn_id=None, response=None):
+def evidence(cumulative, last, response, thread_id=None, turn_id=None, response_model=None):
+    counts = {re.sub(r"[A-Z]", lambda m: "_" + m[0].lower(), key): value for key, value in last.items()}
+    payload = {
+        "thread_id": thread_id or thread, "turn_id": turn_id or turn,
+        "response_id": response, "usage": counts,
+        "thread_token_usage": {"total_tokens": cumulative},
+    }
+    if response_model is not None:
+        payload["response_model"] = response_model
+    native_line("token_usage_record", payload)
+
+
+def usage(cumulative, last, thread_id=None, turn_id=None, response=None, response_model=None):
     if response:
-        evidence(cumulative, last, response, thread_id, turn_id)
+        evidence(cumulative, last, response, thread_id, turn_id, response_model)
     send({"method": "thread/tokenUsage/updated", "params": {
         "threadId": thread_id or thread, "turnId": turn_id or turn,
         "tokenUsage": {"total": {"totalTokens": cumulative}, "last": last,
@@ -82,6 +89,7 @@ if stop_case:
     sys.exit(0)
 
 if role == "issue-router":
+    native_line("turn_context", {"turn_id": turn, "model": "gpt-6.2-sol"})
     usage(24_800, first)
     # This ordered round trip proves the Runner processed the notices while
     # there was still no matching append. After appending, send no new frames
@@ -92,12 +100,13 @@ if role == "issue-router":
     while not (root / "append-evidence").exists():
         assert time.monotonic() < deadline, "test did not release the original evidence"
         time.sleep(.02)
-    evidence(24_800, first, "parent-first")
+    evidence(24_800, first, "parent-first", response_model="gpt-6.2-sol")
     steer = read("turn/steer")
     assert steer["params"]["threadId"] == thread and steer["params"]["expectedTurnId"] == turn
     assert steer["params"]["clientUserMessageId"] == "usage-live-steer"
     usage(41_200, {"totalTokens": 16_400, "inputTokens": 16_000, "outputTokens": 400,
-                   "cachedInputTokens": 4_096, "reasoningOutputTokens": 0}, response="parent-during-steer")
+                   "cachedInputTokens": 4_096, "cacheWriteInputTokens": 2_000, "reasoningOutputTokens": 0},
+          response="parent-during-steer", response_model="gpt-6.2-astra")
     respond(steer, {"turnId": turn})
     # Both are real shapes of TokenCount, but neither proves a model request.
     usage(41_200, {"totalTokens": 10_000, "inputTokens": 0, "outputTokens": 0})
@@ -109,15 +118,16 @@ if role == "issue-router":
         })
         (root / f"{key}.json").write_text(json.dumps(child_result))
 elif title == "整理安装步骤与首次运行指南":
+    native_line("turn_context", {"turn_id": turn, "model": "deepseek-v4.1-flash"})
     (root / "metered-active").touch()
     deadline = time.monotonic() + 18
     while not (root / "release-usage").exists():
         assert time.monotonic() < deadline, "test did not release the worker"
         time.sleep(.02)
-    first = {"totalTokens": 82_400, "inputTokens": 80_000, "cachedInputTokens": 20_000,
+    first = {"totalTokens": 82_400, "inputTokens": 80_000, "cachedInputTokens": 20_000, "cacheWriteInputTokens": 0,
              "outputTokens": 2_400, "reasoningOutputTokens": 700}
     usage(82_400, first, thread_id="unrelated-thread", response="other-thread")
-    usage(82_400, first, response="worker-first")
+    usage(82_400, first, response="worker-first", response_model="deepseek-v4.1-flash")
     usage(82_400, first)
     usage(86_000, {"totalTokens": 3_600, "inputTokens": 3_200, "outputTokens": 400}, response="worker-second")
     usage(90_000, {"totalTokens": 4_000}, turn_id="unrelated-turn")

@@ -1,0 +1,226 @@
+{
+  "reference_date": "2026-11-27",
+  "models": [
+    {
+      "id": "deepseek/deepseek-v4.1-flash",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "standard": [
+        140000,
+        4200,
+        null,
+        420000
+      ],
+      "long": null
+    },
+    {
+      "id": "deepseek/deepseek-v4.1-flash-1017",
+      "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+      "standard": [
+        null,
+        null,
+        null,
+        null
+      ],
+      "long": null,
+      "unsupported": "utc_schedule"
+    },
+    {
+      "id": "openai/gpt-5.3-codex",
+      "canonical_slug": "openai/gpt-5.3-codex-20260224",
+      "standard": [
+        1750000,
+        175000,
+        null,
+        14000000
+      ],
+      "long": null
+    },
+    {
+      "id": "openai/gpt-5.4",
+      "canonical_slug": "openai/gpt-5.4-20260305",
+      "standard": [
+        2500000,
+        250000,
+        null,
+        15000000
+      ],
+      "long": [
+        5000000,
+        500000,
+        null,
+        22500000
+      ]
+    },
+    {
+      "id": "openai/gpt-5.4-mini",
+      "canonical_slug": "openai/gpt-5.4-mini-20260317",
+      "standard": [
+        750000,
+        75000,
+        null,
+        4500000
+      ],
+      "long": null
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "canonical_slug": "openai/gpt-5.6-luna-20260709",
+      "standard": [
+        200000,
+        20000,
+        250000,
+        1200000
+      ],
+      "long": [
+        400000,
+        40000,
+        500000,
+        1800000
+      ]
+    },
+    {
+      "id": "openai/gpt-5.6-sol",
+      "canonical_slug": "openai/gpt-5.6-sol-20260709",
+      "standard": [
+        4000000,
+        400000,
+        5000000,
+        20000000
+      ],
+      "long": [
+        8000000,
+        800000,
+        10000000,
+        30000000
+      ]
+    },
+    {
+      "id": "openai/gpt-5.6-terra",
+      "canonical_slug": "openai/gpt-5.6-terra-20260709",
+      "standard": [
+        2000000,
+        200000,
+        2500000,
+        12000000
+      ],
+      "long": [
+        4000000,
+        400000,
+        5000000,
+        18000000
+      ]
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "canonical_slug": "openai/gpt-6-astra-20260903",
+      "standard": [
+        10000000,
+        1000000,
+        12500000,
+        50000000
+      ],
+      "long": [
+        20000000,
+        2000000,
+        25000000,
+        75000000
+      ]
+    },
+    {
+      "id": "openai/gpt-6-luna",
+      "canonical_slug": "openai/gpt-6-luna-20260922",
+      "standard": [
+        100000,
+        10000,
+        125000,
+        500000
+      ],
+      "long": [
+        200000,
+        20000,
+        250000,
+        750000
+      ]
+    },
+    {
+      "id": "openai/gpt-6-sol",
+      "canonical_slug": "openai/gpt-6-sol-20260922",
+      "standard": [
+        2000000,
+        200000,
+        2500000,
+        10000000
+      ],
+      "long": [
+        4000000,
+        400000,
+        5000000,
+        15000000
+      ]
+    },
+    {
+      "id": "openai/gpt-6.1-sol",
+      "canonical_slug": "openai/gpt-6.1-sol-20260929",
+      "standard": [
+        2000000,
+        100000,
+        2500000,
+        10000000
+      ],
+      "long": [
+        4000000,
+        200000,
+        5000000,
+        15000000
+      ]
+    },
+    {
+      "id": "openai/gpt-6.1-terra",
+      "canonical_slug": "openai/gpt-6.1-terra-20261026",
+      "standard": [
+        1000000,
+        50000,
+        1250000,
+        5000000
+      ],
+      "long": [
+        2000000,
+        100000,
+        2500000,
+        7500000
+      ]
+    },
+    {
+      "id": "openai/gpt-6.2-astra",
+      "canonical_slug": "openai/gpt-6.2-astra-20261117",
+      "standard": [
+        8000000,
+        400000,
+        10000000,
+        40000000
+      ],
+      "long": [
+        16000000,
+        800000,
+        20000000,
+        60000000
+      ]
+    },
+    {
+      "id": "openai/gpt-6.2-sol",
+      "canonical_slug": "openai/gpt-6.2-sol-20261117",
+      "standard": [
+        2000000,
+        100000,
+        2500000,
+        10000000
+      ],
+      "long": [
+        4000000,
+        200000,
+        5000000,
+        15000000
+      ]
+    }
+  ]
+}

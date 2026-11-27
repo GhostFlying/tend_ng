@@ -1,6 +1,6 @@
 use super::Store;
 use anyhow::Result;
-use protocol::{RUNNER_SYNC_BATCH, RunTokenUsage, TokenCounts};
+use protocol::{RUNNER_SYNC_BATCH, RequestMeter, RunTokenUsage, TokenCounts};
 use rusqlite::{Connection, Params, params};
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
@@ -31,7 +31,7 @@ impl Store {
         thread: &str,
         turn: &str,
         response_id: &str,
-        last: TokenCounts,
+        last: RequestMeter,
     ) -> Result<()> {
         self.0.execute(
             "INSERT INTO local_token_usage (id, run_id, assignment_id, thread_id, turn_id, response_id, last)
@@ -102,13 +102,16 @@ impl Store {
                         response_id: row.get(7)?,
                         observed_at: row.get(8)?,
                         last: TokenCounts::default(),
+                        model: None,
                     },
                     row.get::<_, String>(9)?,
                 ))
             })?
             .map(|row| {
                 let (seq, mut usage, last) = row?;
-                usage.last = serde_json::from_str(&last)?;
+                let meter: RequestMeter = serde_json::from_str(&last)?;
+                usage.last = meter.counts;
+                usage.model = meter.model;
                 Ok((seq, usage))
             })
             .collect()

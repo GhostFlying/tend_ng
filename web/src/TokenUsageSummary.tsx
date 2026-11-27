@@ -6,7 +6,10 @@ export function tokens(field: TokenField) {
   return field.tokens === null ? "—" : format.format(BigInt(field.tokens));
 }
 
-export function fieldNote(field: TokenField, usage: TokenBreakdown) {
+export function fieldNote(
+  field: TokenField,
+  usage: Pick<TokenBreakdown, "reported_requests">,
+) {
   if (field.tokens === null) {
     return usage.reported_requests > 0 ? "字段缺失" : "未知";
   }

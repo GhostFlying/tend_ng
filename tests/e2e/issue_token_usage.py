@@ -181,10 +181,21 @@ def test_tree(args):
 
             subtree = after_loss["subtree"]
             assert subtree["total_tokens"] == {"tokens": "127200", "reported_requests": 4}, subtree
-            assert subtree["cache_write_input_tokens"] == {"tokens": None, "reported_requests": 0}
+            assert subtree["cache_write_input_tokens"] == {"tokens": "2000", "reported_requests": 2}
             assert after_loss["direct"]["reasoning_output_tokens"] == {"tokens": "0", "reported_requests": 2}
             assert subtree["cached_input_tokens"] == {"tokens": "32288", "reported_requests": 3}
             assert (subtree["started_runs"], subtree["observed_runs"], subtree["unobserved_no_usage"]) == (3, 2, 1)
+            models = {row["model"]: row for row in subtree["models"]}
+            assert {k: v["response_model_requests"] for k, v in models.items()} == {
+                "gpt-6.2-sol": 1, "gpt-6.2-astra": 1, "deepseek-v4.1-flash": 1, None: 0,
+            }
+            assert models[None]["requested_models"] == {"deepseek-v4.1-flash": 1}
+            assert models["gpt-6.2-sol"]["uncached_input_tokens"]["tokens"] is None
+            assert models["deepseek-v4.1-flash"]["uncached_input_tokens"]["tokens"] == "60000"
+            assert models["gpt-6.2-astra"]["uncached_input_tokens"]["tokens"] == "9904"
+            assert models[None]["total_tokens"]["tokens"] == "3600"
+            assert subtree["estimate"] == {"usd": "0.1351816", "partial": True}, models
+            assert {r["model"] for r in after_loss["direct"]["models"]} == {"gpt-6.2-sol", "gpt-6.2-astra"}
             nodes = {node["issue_id"]: node for node in after_loss["nodes"]}
             assert set(nodes) == {parent, metered, missing}
             assert nodes[metered]["direct"]["total_tokens"]["tokens"] == "86000"
