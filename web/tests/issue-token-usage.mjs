@@ -93,8 +93,31 @@ try {
     const directAstra = models
       .locator(".model-row > summary")
       .filter({ hasText: "gpt-6.2-astra" });
-    await directAstra.getByText("9,904", { exact: true }).waitFor();
-    await directAstra.getByText("2,000", { exact: true }).waitFor();
+    const directAstraFields = directAstra.locator(".model-line-fields");
+    for (const [label, value] of [
+      ["缓存读取", "4,096"],
+      ["缓存写入", "2,000"],
+      ["输出", "400"],
+    ]) {
+      const field = directAstraFields.locator(".model-line-field").filter({
+        has: page.getByText(label, { exact: true }),
+      });
+      assert.equal(await field.locator("bdi").textContent(), value);
+    }
+    assert.equal(
+      await models.getByText("非缓存输入", { exact: true }).count(),
+      0,
+    );
+    await directAstra.click();
+    const feeItems = models.locator(".model-fee-items");
+    for (const label of ["缓存读取", "缓存写入", "输出"]) {
+      await feeItems.getByText(label, { exact: true }).first().waitFor();
+    }
+    assert.equal(
+      await feeItems.locator("dt").filter({ hasText: "非缓存输入" }).count(),
+      0,
+    );
+    await directAstra.click();
     await pane.getByRole("button", { name: "含所有后代" }).click();
     await total.getByText("127,200", { exact: true }).waitFor();
     await models.getByText("deepseek-v4.1-flash", { exact: true }).waitFor();
@@ -102,7 +125,7 @@ try {
     const childFlash = models
       .locator(".model-row > summary")
       .filter({ hasText: "deepseek-v4.1-flash" });
-    await childFlash.getByText("60,000", { exact: true }).waitFor();
+    await childFlash.getByText("82,400", { exact: true }).waitFor();
     await pane
       .getByText("已观测 2 / 3 个已开始 Run", { exact: true })
       .waitFor();
@@ -132,14 +155,12 @@ try {
       await page.screenshot({
         path: join(images, `issue-token-usage-${width}.png`),
       });
-      if (width === 390) {
-        await models.evaluate((element) =>
-          element.scrollIntoView({ block: "center" }),
-        );
-        await page.screenshot({
-          path: join(images, "issue-token-usage-390-breakdown.png"),
-        });
-      }
+      await models.evaluate((element) =>
+        element.scrollIntoView({ block: "center" }),
+      );
+      await page.screenshot({
+        path: join(images, `hide-uncached-issue-${width}.png`),
+      });
     }
     await pane.getByRole("button", { name: "直属用量" }).click();
     await total.getByText("41,200", { exact: true }).waitFor();

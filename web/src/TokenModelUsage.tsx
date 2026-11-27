@@ -3,10 +3,13 @@ import type { TokenBreakdown, TokenEstimate, TokenModelRow } from "./api";
 import { fieldNote, format, tokens } from "./TokenUsageSummary";
 import "./token-model-usage.css";
 
-const components = ["非缓存输入", "缓存读取", "缓存写入", "输出"];
+const feeComponents = [
+  [1, "缓存读取"],
+  [2, "缓存写入"],
+  [3, "输出"],
+] as const;
 const lineFields = [
   ["cached_input_tokens", "缓存读取"],
-  ["uncached_input_tokens", "非缓存输入"],
   ["cache_write_input_tokens", "缓存写入"],
   ["output_tokens", "输出"],
 ] as const;
@@ -113,31 +116,34 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
                 </span>
               </p>
               <dl className="model-fee-items">
-                {tier.components.map((component, index) => (
-                  <div key={components[index]}>
-                    <dt>{components[index]}</dt>
-                    <dd className="detail-muted">
-                      {component.usd_per_million === null
-                        ? "无适用单价"
-                        : `$${component.usd_per_million} / 百万 Token`}
-                    </dd>
-                    <dd>
-                      <bdi>{tokens(component)}</bdi> Token
-                    </dd>
-                    {fieldNote(component, {
-                      reported_requests: tier.requests,
-                    }) && (
+                {feeComponents.map(([index, label]) => {
+                  const component = tier.components[index];
+                  return (
+                    <div key={label}>
+                      <dt>{label}</dt>
                       <dd className="detail-muted">
-                        {fieldNote(component, {
-                          reported_requests: tier.requests,
-                        })}
+                        {component.usd_per_million === null
+                          ? "无适用单价"
+                          : `$${component.usd_per_million} / 百万 Token`}
                       </dd>
-                    )}
-                    <dd>
-                      <EstimateValue estimate={component.estimate} />
-                    </dd>
-                  </div>
-                ))}
+                      <dd>
+                        <bdi>{tokens(component)}</bdi> Token
+                      </dd>
+                      {fieldNote(component, {
+                        reported_requests: tier.requests,
+                      }) && (
+                        <dd className="detail-muted">
+                          {fieldNote(component, {
+                            reported_requests: tier.requests,
+                          })}
+                        </dd>
+                      )}
+                      <dd>
+                        <EstimateValue estimate={component.estimate} />
+                      </dd>
+                    </div>
+                  );
+                })}
               </dl>
             </div>
           ))}

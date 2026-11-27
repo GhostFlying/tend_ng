@@ -180,7 +180,6 @@ try {
     const astraFields = astra.locator(".model-line-fields");
     for (const [label, value] of [
       ["缓存读取", "4,096"],
-      ["非缓存输入", "9,904"],
       ["缓存写入", "2,000"],
       ["输出", "400"],
     ]) {
@@ -189,11 +188,28 @@ try {
       });
       assert.equal(await field.locator("bdi").textContent(), value);
     }
+    assert.equal(
+      await astraFields.getByText("非缓存输入", { exact: true }).count(),
+      0,
+    );
     const sol = overview
       .locator(".model-row > summary")
       .filter({ hasText: "gpt-6.2-sol" });
     assert.equal(await sol.getByText("缓存写入").count(), 0);
-    await sol.getByText("未知", { exact: true }).waitFor();
+    const solFields = sol.locator(".model-line-fields");
+    for (const [label, value] of [
+      ["缓存读取", "8,192"],
+      ["输出", "800"],
+    ]) {
+      const field = solFields.locator(".model-line-field").filter({
+        has: page.getByText(label, { exact: true }),
+      });
+      assert.equal(await field.locator("bdi").textContent(), value);
+    }
+    assert.equal(
+      await solFields.getByText("非缓存输入", { exact: true }).count(),
+      0,
+    );
     const flash = overview
       .locator(".model-row > summary")
       .filter({ hasText: "deepseek-v4.1-flash" });
@@ -216,13 +232,21 @@ try {
       "https://openrouter.ai/openai/gpt-6.2-astra",
     );
     await overview.getByText("$0.02", { exact: true }).waitFor();
+    const feeItems = overview.locator(".model-fee-items");
+    for (const label of ["缓存读取", "缓存写入", "输出"]) {
+      await feeItems.getByText(label, { exact: true }).first().waitFor();
+    }
+    assert.equal(
+      await feeItems.locator("dt").filter({ hasText: "非缓存输入" }).count(),
+      0,
+    );
     await noOverflow(page, width);
     if (images && width === 1440) {
       await overview.evaluate((node) => {
         node.closest("main").scrollTop = 0;
       });
       await page.screenshot({
-        path: join(images, "token-model-price-desktop.png"),
+        path: join(images, "hide-uncached-global-1440.png"),
       });
     }
     await astra.click();
@@ -259,7 +283,7 @@ try {
           main.scrollTop += node.getBoundingClientRect().top - 70;
         });
         await page.screenshot({
-          path: join(images, "token-model-global-mobile.png"),
+          path: join(images, "hide-uncached-global-390.png"),
         });
         await page
           .getByRole("heading", { name: "Issue 树" })
