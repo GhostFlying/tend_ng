@@ -148,6 +148,8 @@ pub trait TurnHandler {
     fn native_item(&mut self, _thread: &str, _turn: &str, _item: &Value) -> Result<()> {
         Ok(())
     }
+    /// A completed assistant item for the confirmed root thread and turn.
+    fn completed_agent_message(&mut self, _thread: &str, _turn: &str, _item: &Value) {}
     fn usage(&mut self, _thread: &str, _turn: &str, _usage: &Value) -> Result<()> {
         Ok(())
     }
@@ -914,6 +916,7 @@ impl Client {
                 Some("item/completed")
                     if params["turnId"] == *turn_id && params["item"]["type"] == "agentMessage" =>
                 {
+                    handler.completed_agent_message(thread_id, turn_id, &params["item"]);
                     messages.push(params["item"].clone());
                 }
                 Some("turn/completed") if params["turn"]["id"] == *turn_id => {

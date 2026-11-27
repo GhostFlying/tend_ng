@@ -83,6 +83,15 @@ pub struct Message {
     pub attention: Option<AttentionStatus>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub discussion_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub discussion_progress: Vec<DiscussionProgress>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct DiscussionProgress {
+    pub attempt_id: String,
+    pub item_id: String,
+    pub text: String,
 }
 
 #[derive(Debug, Deserialize, Serialize)]

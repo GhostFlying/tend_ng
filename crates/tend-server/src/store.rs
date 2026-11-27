@@ -91,7 +91,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 49;
+pub(crate) const SCHEMA_VERSION: i64 = 50;
 
 pub struct Store {
     db: Connection,
@@ -366,6 +366,9 @@ impl Store {
         if let Some(selected_models) = selected_models {
             selected_models.publish(&tx)?;
         }
+        if version < 50 {
+            discussion::progress::migrate(&tx)?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -507,6 +510,7 @@ impl Store {
                     artifacts: Vec::new(),
                     attention: None,
                     discussion_id: row.get(9)?,
+                    discussion_progress: Vec::new(),
                 },
             ))
         })?;
@@ -535,6 +539,11 @@ impl Store {
             }
             let mut files = reports::chat_artifacts(&self.db, chat_id, *oldest, before)?;
             let mut attentions = attention::on_page(&self.db, chat_id, *oldest, before)?;
+            let mut progress = if discussion {
+                self.discussion_progress_on_page(chat_id, *oldest, before)?
+            } else {
+                HashMap::new()
+            };
             for (seq, message) in &mut page {
                 if let Some(related) = issues.remove(seq) {
                     (message.issue_ids, message.issue_numbers) = related.into_iter().unzip();
@@ -543,6 +552,7 @@ impl Store {
                     message.artifacts = artifacts;
                 }
                 message.attention = attentions.remove(seq);
+                message.discussion_progress = progress.remove(seq).unwrap_or_default();
             }
         }
         let messages = page.into_iter().rev().map(|(_, message)| message).collect();

@@ -50,6 +50,17 @@ def event(method, **params):
     output({"method": method, "params": params})
 
 
+def wait_for_gate(name):
+    deadline = time.monotonic() + 45
+    while not (home / name).exists():
+        assert time.monotonic() < deadline, f"progress fixture did not release {name}"
+        time.sleep(0.02)
+
+
+def commentary(item_id, text, **fields):
+    return {"type": "agentMessage", "phase": "commentary", "id": item_id, "text": text, **fields}
+
+
 def scope(params):
     assert params["permissions"] == profile and params["approvalPolicy"] == "never"
     assert "sandbox" not in params and "sandboxPolicy" not in params
@@ -209,6 +220,7 @@ for line in sys.stdin:
             if case == "Exhaust discussion retries":
                 sys.exit(0)
             answer = "可以。先区分要讨论的想法与之后可能交给 Router 的工作。"
+            progress_history = []
             respond(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
             if receiver:
                 assert not roots and text.startswith("讨论转交 · 上下文摘要。"), (roots, text)
@@ -321,7 +333,75 @@ for line in sys.stdin:
                 answer = "从登记仓库找到启动示例。从 Issue 了解到，第一版只需要覆盖安装和首次运行。"
             elif case == "Recover discussion":
                 answer = "恢复的是原讨论的同一条答复。"
+            elif case == "请比较 CSV 和 JSON，给出第一版导出建议。":
+                def complete(item, *, thread_id=thread, turn_id=turn):
+                    event("item/completed", threadId=thread_id, turnId=turn_id, item=item)
+
+                first = commentary("compare-scope", "我会先比较可读性、字段结构和后续接入成本。")
+                for item in (
+                    {**commentary("reason", "HIDDEN_REASONING"), "type": "reasoning"},
+                    {**commentary("cmd", "HIDDEN_COMMAND"), "type": "commandExecution"},
+                    {**commentary("tool", "HIDDEN_TOOL"), "type": "dynamicToolCall"},
+                    {**commentary("result", "HIDDEN_RESULT"), "type": "functionCallOutput"},
+                    {**commentary("legacy", "HIDDEN_UNCLASSIFIED"), "phase": None},
+                    commentary("json", '{"goal":"HIDDEN_DRAFT"}'),
+                    commentary("fence", "```json\nHIDDEN_FENCED\n```"),
+                    commentary("invalid-text", ["HIDDEN_NON_TEXT"]),
+                    commentary("", "HIDDEN_WITHOUT_ID"),
+                    commentary("moderated", "HIDDEN_MODERATION", moderation={"display": {"mode": "hide"}}),
+                ):
+                    complete(item)
+                complete(commentary("other-thread", "HIDDEN_OTHER_THREAD"), thread_id="unrelated")
+                complete(commentary("other-turn", "HIDDEN_OTHER_TURN"), turn_id="unrelated")
+                event("item/started", threadId=thread, turnId=turn,
+                      item=commentary("started", "HIDDEN_START"))
+                event("item/agentMessage/delta", threadId=thread, turnId=turn,
+                      itemId="started", delta="HIDDEN_DELTA")
+                complete(first)
+                complete({**first, "text": "HIDDEN_DUPLICATE_BODY"})
+                wait_for_gate("progress-second")
+                second = commentary("compare-shape", "两种格式都能保存同样的字段。我正在把首版的读者操作、"
+                                    "字段校验、后续接入成本和维护边界分开比较，再核对嵌套结构、"
+                                    "空值以及跨工具导入导出的差异，最后给出一个可直接执行的建议。\n"
+                                    "复杂结构的兼容性单独说明。")
+                complete(second)
+                wait_for_gate("progress-final")
+                progress_history = [first, second]
+                answer = "**首版用 CSV。** 它方便直接查看和导入表格。对需要嵌套字段的场景，再提供 JSON。"
+            elif case == "Recover discussion progress":
+                seen = commentary("seen", "恢复之前已显示的进展。", completedAtMs=100)
+                event("item/completed", threadId=thread, turnId=turn, item=seen)
+                wait_for_gate("progress-recover")
+                progress_history = [
+                    {**seen, "text": "HIDDEN_REPLAY_WITH_CHANGED_BODY"},
+                    commentary("native-proof", "从原生完成记录恢复的进展。", completedAtMs=101),
+                    commentary("synthetic-copy", "HIDDEN_UNPROVEN_HISTORY"),
+                ]
+                answer = "恢复原回合的正式回复。"
+            elif case == "Retry discussion progress":
+                with ledger:
+                    dropped = ledger.execute(
+                        "INSERT OR IGNORE INTO dropped_turns VALUES (?)", (text,)).rowcount
+                item = commentary("same-item", "第一次尝试的进展。" if dropped else "重试的进展。")
+                event("item/completed", threadId=thread, turnId=turn, item=item)
+                if dropped:
+                    sys.exit(0)
+                answer = "重试正常完成。"
+            elif case == "No discussion progress":
+                wait_for_gate("progress-empty")
+                answer = "没有进展过程的正式回复。"
+            elif case == "Literal discussion progress":
+                event("item/completed", threadId=thread, turnId=turn, item=commentary(
+                    "literal", '只显示字面文本 <img src=x onerror="window.progressWasHtml=true"> '
+                               '[标记](javascript:alert(1))。'))
+                answer = "纯文本测试结束。"
+            if (home / "progress-scope-probe").exists() and (
+                receiver or text.startswith(("Write the Main Chat handoff message", "Prepare an editable handoff draft"))
+            ):
+                event("item/completed", threadId=thread, turnId=turn,
+                      item=commentary("not-ordinary", "HIDDEN_HANDOFF_COMMENTARY", completedAtMs=100))
             items = [{"type": "userMessage", "clientId": client_id},
+                     *progress_history,
                      {"type": "agentMessage", "id": f"{turn}-answer", "phase": "final_answer", "text": answer}]
             history = {"id": turn, "status": "failed" if case == "Hold before failed quick handoff"
                        else "completed", "items": items}
@@ -330,7 +410,7 @@ for line in sys.stdin:
                                (turn, thread, text, context, json.dumps(history), json.dumps(roots)))
             if metering:
                 meter(thread, turn, receiver, text)
-            if case == "Recover discussion" or (
+            if case in ("Recover discussion", "Recover discussion progress") or (
                 text.startswith("Write the Main Chat handoff message")
                 and (home / "handoff-recover").exists()
             ):

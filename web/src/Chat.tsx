@@ -22,6 +22,7 @@ import {
 import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
 import { discussionLink } from "./discussionApi";
+import { DiscussionProgress } from "./DiscussionProgress";
 import { DispatchAuthor, IssueTakeoverEvent } from "./IssueTimelineEvent";
 import { Markdown } from "./Markdown";
 
@@ -263,6 +264,7 @@ function MessageRow({
   onReply,
   onRefresh,
   historical,
+  discussion,
 }: {
   message: Message;
   source?: Message;
@@ -273,6 +275,7 @@ function MessageRow({
   onReply: (message: Message) => void;
   onRefresh: () => void;
   historical: boolean;
+  discussion: boolean;
 }) {
   const [error, setError] = useState("");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -281,6 +284,10 @@ function MessageRow({
   const pending =
     message.router_state === "queued" ||
     message.router_state === "awaiting_turn";
+  const progress =
+    discussion && user && message.discussion_progress?.length
+      ? message.discussion_progress
+      : undefined;
 
   async function saveFile(file: Artifact) {
     setError("");
@@ -398,7 +405,11 @@ function MessageRow({
           回到原讨论 ↗
         </a>
       )}
-      {pending && <span className="message-state">已收到</span>}
+      {progress ? (
+        <DiscussionProgress items={progress} pending={pending} />
+      ) : (
+        pending && <span className="message-state">已收到</span>
+      )}
       {message.router_error && (
         <span className="message-state error">{message.router_error}</span>
       )}
@@ -906,6 +917,7 @@ export function Chat({
         descendant={descendant}
         onRefresh={() => setRefresh((value) => value + 1)}
         historical={!latestIds.has(message.id)}
+        discussion={!!standalone && !issue}
         onReply={(question) => {
           setReplyId(question.id);
           textarea.current?.focus({ preventScroll: true });

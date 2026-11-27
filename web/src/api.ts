@@ -208,6 +208,13 @@ export type Message = {
   approval?: IssueApprovalEvent;
   attention?: AttentionStatus;
   discussion_id?: string;
+  discussion_progress?: DiscussionProgressItem[];
+};
+
+export type DiscussionProgressItem = {
+  attempt_id: string;
+  item_id: string;
+  text: string;
 };
 
 export type AttentionStatus = {

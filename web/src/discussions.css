@@ -63,6 +63,50 @@
   color: var(--muted);
   font-size: 13px;
 }
+.discussion-progress {
+  min-width: 0;
+  max-width: 100%;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 18px;
+}
+.discussion-progress-live {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.discussion-progress-label {
+  flex: none;
+  padding-inline: 6px;
+  border-radius: 4px;
+  background: var(--active);
+  font-weight: 600;
+}
+.discussion-progress-latest {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.discussion-progress-history summary {
+  width: fit-content;
+  margin-inline-start: auto;
+  padding-block: 3px;
+  cursor: pointer;
+}
+.discussion-progress-history summary:hover {
+  color: var(--label);
+}
+.discussion-progress-history ol {
+  display: grid;
+  gap: 5px;
+  margin: 5px 0 0;
+  padding-inline-start: 24px;
+}
+.discussion-progress-history li {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
 .discussion-empty {
   margin-top: 18px;
 }

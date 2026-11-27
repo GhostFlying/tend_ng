@@ -1,3 +1,4 @@
+pub(super) mod progress;
 mod quick;
 
 use super::{Store, timing};

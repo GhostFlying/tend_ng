@@ -113,6 +113,10 @@ impl<H: crate::TurnHandler> crate::TurnHandler for MeteredTurn<'_, H> {
         Ok(())
     }
 
+    fn completed_agent_message(&mut self, thread: &str, turn: &str, item: &Value) {
+        self.inner.completed_agent_message(thread, turn, item);
+    }
+
     fn request_usage(&mut self, thread: &str, turn: &str, response: Response) {
         self.inner.request_usage(thread, turn, response);
     }

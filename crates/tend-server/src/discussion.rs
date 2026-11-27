@@ -266,6 +266,7 @@ impl Service {
             return Ok(());
         };
         let quick = store.quick_input(&input.message_id)?;
+        let show_progress = quick.is_none() && !store.is_draft_input(&input.message_id)?;
         let after_attempt = quick.as_ref().map_or(0, |q| q.after_attempt);
         let attempt = input.attempt.as_ref().filter(|a| a.number > after_attempt);
         let Some(settings) = &self.settings else {
@@ -333,6 +334,9 @@ impl Service {
         let process = client.process_identity()?;
         let number = if let Some(attempt) = attempt {
             if let Some(turn) = router::recover(&mut client, &store, attempt)? {
+                if show_progress {
+                    recover_progress(&store, &attempt.id, &attempt.thread_id, &turn);
+                }
                 return finish(&mut store, &input, quick.as_ref(), turn);
             }
             if attempt.number - after_attempt >= router::MAX_ATTEMPTS {
@@ -465,10 +469,14 @@ impl Service {
                 service: self,
                 chat,
                 attempt_id: &attempt_id,
+                show_progress,
                 allowed,
                 before: input.message_seq,
             },
         )?;
+        if show_progress {
+            recover_progress(&store, &attempt_id, &thread, &turn);
+        }
         finish(&mut store, &input, quick.as_ref(), turn)
     }
 
@@ -808,6 +816,7 @@ struct DiscussionTools<'a> {
     service: &'a Service,
     chat: &'a str,
     attempt_id: &'a str,
+    show_progress: bool,
     allowed: BTreeSet<&'a str>,
     before: i64,
 }
@@ -815,6 +824,13 @@ struct DiscussionTools<'a> {
 impl TurnHandler for DiscussionTools<'_> {
     fn started(&mut self, turn: &str) -> Result<()> {
         self.store.save_turn_id(self.attempt_id, turn)
+    }
+
+    fn completed_agent_message(&mut self, thread: &str, turn: &str, item: &Value) {
+        if self.show_progress {
+            self.store
+                .record_discussion_progress(self.attempt_id, thread, turn, item);
+        }
     }
 
     fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
@@ -982,6 +998,19 @@ fn bounded_handoff_context(store: &Store, chat: &str, before: i64) -> Result<Str
         quoted_background(store, chat)?.unwrap_or_default(),
         store.discussion_history(chat, before)?,
     ))
+}
+
+fn recover_progress(store: &Store, attempt: &str, thread: &str, turn: &Turn) {
+    if turn.status != TurnStatus::Completed {
+        return;
+    }
+    for item in &turn.items {
+        // Legacy history can render compatibility copies with synthetic IDs.
+        // Only replay an item that carries its native completion evidence.
+        if item["completedAtMs"].as_i64().is_some_and(|ms| ms > 0) {
+            store.record_discussion_progress(attempt, thread, &turn.id, item);
+        }
+    }
 }
 
 fn finish(store: &mut Store, input: &Input, quick: Option<&QuickInput>, turn: Turn) -> Result<()> {
