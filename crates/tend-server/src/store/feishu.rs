@@ -9,6 +9,7 @@ use protocol::{
     FeishuAssessment, FeishuDisposition, FeishuEvidence, FeishuSuggestionEvidence,
 };
 use rusqlite::{Connection, OptionalExtension, params};
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub const RETENTION: i64 = 7 * 24 * 60 * 60;
@@ -23,17 +24,20 @@ pub fn migrate(db: &Connection) -> Result<()> {
             id TEXT PRIMARY KEY, owner TEXT NOT NULL, chat_id TEXT NOT NULL, topic TEXT,
             first_at INTEGER NOT NULL, last_at INTEGER NOT NULL, updated_at INTEGER NOT NULL,
             checked_at INTEGER NOT NULL DEFAULT 0, assessed_at INTEGER NOT NULL DEFAULT 0,
-            ignored_revision INTEGER, evidence TEXT NOT NULL, assessment_state TEXT NOT NULL DEFAULT 'pending'
+            ignored_material_revision INTEGER, material_revision INTEGER NOT NULL DEFAULT 1,
+            context_cursor TEXT, evidence TEXT NOT NULL, assessment_state TEXT NOT NULL DEFAULT 'pending'
          );
          CREATE INDEX IF NOT EXISTS feishu_suggestions_topic ON feishu_suggestions(owner,chat_id,topic,last_at);
          CREATE INDEX IF NOT EXISTS feishu_suggestions_recent ON feishu_suggestions(owner,updated_at DESC,id DESC);
          CREATE INDEX IF NOT EXISTS feishu_suggestions_context ON feishu_suggestions(owner,checked_at);
+         CREATE INDEX IF NOT EXISTS feishu_suggestions_expiry ON feishu_suggestions(first_at);
          CREATE INDEX IF NOT EXISTS feishu_suggestions_assessment ON feishu_suggestions(owner,assessment_state,assessed_at);
          CREATE TABLE IF NOT EXISTS feishu_mentions (
             owner TEXT NOT NULL, message_id TEXT NOT NULL, suggestion_id TEXT NOT NULL REFERENCES feishu_suggestions(id) ON DELETE CASCADE,
             created_at INTEGER NOT NULL, PRIMARY KEY(owner,message_id)
          );
          CREATE INDEX IF NOT EXISTS feishu_mentions_by_suggestion ON feishu_mentions(suggestion_id);
+         CREATE INDEX IF NOT EXISTS feishu_mentions_expiry ON feishu_mentions(created_at);
          CREATE TABLE IF NOT EXISTS feishu_discussion_snapshots (
             chat_id TEXT NOT NULL REFERENCES discussions(chat_id), suggestion_id TEXT NOT NULL,
             revision INTEGER NOT NULL, evidence TEXT NOT NULL,
@@ -65,11 +69,28 @@ pub struct FeishuMessage {
     pub deleted: bool,
 }
 
+#[derive(Clone, Deserialize, Serialize)]
+pub struct ContextCursor {
+    pub from: i64,
+    pub through: i64,
+    pub token: String,
+    pub pages: usize,
+    pub complete: bool,
+    pub known: Vec<String>,
+}
+
+pub struct ContextResult {
+    pub replies: Vec<FeishuEvidence>,
+    pub complete: bool,
+    pub next: Option<ContextCursor>,
+}
+
 pub struct ContextJob {
     pub id: String,
     pub chat_id: String,
     pub topic: Option<String>,
     pub first_at: i64,
+    pub cursor: Option<ContextCursor>,
     pub evidence: FeishuSuggestionEvidence,
 }
 
@@ -88,12 +109,17 @@ fn read_evidence(
     .transpose()
 }
 
-fn save_changed(db: &Connection, evidence: &mut FeishuSuggestionEvidence, now: i64) -> Result<()> {
+fn save_changed(
+    db: &Connection,
+    evidence: &mut FeishuSuggestionEvidence,
+    now: i64,
+    new_material: bool,
+) -> Result<()> {
     evidence.revision += 1;
     evidence.assessment = None;
     db.execute(
-        "UPDATE feishu_suggestions SET evidence=?2,updated_at=?3,assessment_state='pending',assessed_at=0 WHERE id=?1",
-        params![evidence.id, serde_json::to_string(evidence)?, now],
+        "UPDATE feishu_suggestions SET evidence=?2,updated_at=?3,material_revision=material_revision+?4,assessment_state='pending',assessed_at=0 WHERE id=?1",
+        params![evidence.id, serde_json::to_string(evidence)?, now, new_material],
     )?;
     Ok(())
 }
@@ -118,52 +144,73 @@ fn add_mention(db: &Connection, owner: &str, m: &FeishuMessage, now: i64) -> Res
                 saved.anchor = e.clone();
             }
             db.execute(
-                "UPDATE feishu_suggestions SET checked_at=0 WHERE id=?1",
+                "UPDATE feishu_suggestions SET checked_at=0,context_cursor=NULL WHERE id=?1",
                 [&id],
             )?;
-            save_changed(db, &mut saved, now)?;
+            save_changed(db, &mut saved, now, true)?;
         }
         return Ok(());
     }
     let known_reply = m.root_id.as_ref().or(m.parent_id.as_ref());
     let topic = m.thread_id.as_ref().or(known_reply);
-    let mut matching = if let Some(topic) = topic {
-        db.query_row(
-            "SELECT id FROM feishu_suggestions WHERE owner=?1 AND chat_id=?2 AND topic=?3
+    let mut matching = None;
+    if let Some(thread) = &m.thread_id {
+        matching = db
+            .query_row(
+                "SELECT id FROM feishu_suggestions WHERE owner=?1 AND chat_id=?2 AND topic=?3
              ORDER BY last_at DESC LIMIT 1",
-            params![owner, m.chat_id, topic],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-    } else {
-        db.query_row(
-            "SELECT id FROM feishu_suggestions WHERE owner=?1 AND chat_id=?2 AND topic IS NULL
-             AND last_at BETWEEN ?3-1800 AND ?3+1800 AND first_at BETWEEN ?3-7200 AND ?3+7200
-             AND MAX(last_at,?3)-MIN(first_at,?3)<=7200
-             ORDER BY last_at DESC,id DESC LIMIT 1",
-            params![owner, m.chat_id, e.created_at],
-            |r| r.get::<_, String>(0),
-        )
-        .optional()?
-    };
-    // An initial chat mention can later be the root of a reply or thread.
-    if matching.is_none()
-        && topic.is_some()
-        && let Some(root) = known_reply
+                params![owner, m.chat_id, thread],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?;
+    }
+    // Follow already recorded source identities in the same chat, not merely
+    // the topic string. A reply to the second mention still belongs to the
+    // first mention's suggestion even after a topic key has been established.
+    for parent in [m.parent_id.as_ref(), m.root_id.as_ref()]
+        .into_iter()
+        .flatten()
     {
+        if matching.is_some() {
+            break;
+        }
         let previous = db.query_row(
-            "SELECT s.id FROM feishu_mentions m JOIN feishu_suggestions s ON s.id=m.suggestion_id
-             WHERE m.owner=?1 AND m.message_id=?2 AND s.chat_id=?3 AND s.topic IS NULL
-               AND (SELECT COUNT(*) FROM feishu_mentions WHERE suggestion_id=s.id)=1",
-            params![owner,root,m.chat_id], |r| r.get::<_,String>(0),
+            "SELECT s.id FROM feishu_suggestions s
+               WHERE s.owner=?1 AND s.chat_id=?3
+                 AND (?4 IS NULL OR s.topic IS NULL OR substr(s.topic,1,4)!='omt_' OR s.topic=?4)
+                 AND (s.id=(SELECT suggestion_id FROM feishu_mentions WHERE owner=?1 AND message_id=?2)
+                      OR EXISTS(SELECT 1 FROM json_each(s.evidence,'$.replies') r WHERE json_extract(r.value,'$.id')=?2))
+               ORDER BY s.last_at DESC,s.id LIMIT 1",
+            params![owner,parent,m.chat_id,m.thread_id], |r| r.get::<_,String>(0),
         ).optional()?;
         if let Some(id) = previous {
             db.execute(
-                "UPDATE feishu_suggestions SET topic=?2 WHERE id=?1",
-                params![id, topic],
+                "UPDATE feishu_suggestions SET topic=?2
+                     WHERE id=?1 AND (topic IS NULL OR (?3 IS NOT NULL AND substr(topic,1,4)!='omt_'))",
+                params![id,topic,m.thread_id],
             )?;
             matching = Some(id);
         }
+    }
+    if matching.is_none() {
+        matching =
+            if let Some(topic) = topic {
+                db.query_row(
+                    "SELECT id FROM feishu_suggestions WHERE owner=?1 AND chat_id=?2 AND topic=?3
+                 ORDER BY last_at DESC LIMIT 1",
+                    params![owner, m.chat_id, topic],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?
+            } else {
+                db.query_row(
+                "SELECT id FROM feishu_suggestions WHERE owner=?1 AND chat_id=?2 AND topic IS NULL
+                 AND last_at BETWEEN ?3-1800 AND ?3+1800 AND first_at BETWEEN ?3-7200 AND ?3+7200
+                 AND MAX(last_at,?3)-MIN(first_at,?3)<=7200
+                 ORDER BY last_at DESC,id DESC LIMIT 1",
+                params![owner,m.chat_id,e.created_at], |r| r.get::<_,String>(0),
+            ).optional()?
+            };
     }
     let id = if let Some(id) = matching {
         let mut saved = read_evidence(db, owner, &id)?.expect("selected suggestion");
@@ -182,10 +229,10 @@ fn add_mention(db: &Connection, owner: &str, m: &FeishuMessage, now: i64) -> Res
         }
         saved.replies.retain(|old| old.id != e.id);
         db.execute(
-            "UPDATE feishu_suggestions SET first_at=MIN(first_at,?2),last_at=MAX(last_at,?2),checked_at=0 WHERE id=?1",
+            "UPDATE feishu_suggestions SET first_at=MIN(first_at,?2),last_at=MAX(last_at,?2),checked_at=0,context_cursor=NULL WHERE id=?1",
             params![id,e.created_at],
         )?;
-        save_changed(db, &mut saved, now)?;
+        save_changed(db, &mut saved, now, true)?;
         id
     } else {
         let id = protocol::new_id();
@@ -254,6 +301,43 @@ impl Store {
         Ok(())
     }
 
+    pub fn prune_feishu(&mut self, now: i64) -> Result<()> {
+        let cutoff = now - RETENTION;
+        let due: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM feishu_suggestions WHERE first_at<?1)
+                    OR EXISTS(SELECT 1 FROM feishu_mentions WHERE created_at<?1)",
+            [cutoff],
+            |r| r.get(0),
+        )?;
+        if !due {
+            return Ok(());
+        }
+        let (tx, clock) = timing::begin(&mut self.db, "feishu_retention")?;
+        tx.execute("DELETE FROM feishu_suggestions WHERE last_at<?1", [cutoff])?;
+        let aged = tx
+            .prepare("SELECT id,evidence FROM feishu_suggestions WHERE first_at<?1")?
+            .query_map([cutoff], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        for (id, raw) in aged {
+            let mut saved: FeishuSuggestionEvidence = serde_json::from_str(&raw)?;
+            saved.mentions.retain(|m| m.created_at >= cutoff);
+            saved.replies.retain(|m| m.created_at >= cutoff);
+            if let Some(anchor) = saved.mentions.first() {
+                saved.anchor = anchor.clone();
+                tx.execute("UPDATE feishu_suggestions SET first_at=?2,context_cursor=NULL,checked_at=0 WHERE id=?1",
+                    params![id,anchor.created_at])?;
+                save_changed(&tx, &mut saved, now, false)?;
+            } else {
+                tx.execute("DELETE FROM feishu_suggestions WHERE id=?1", [id])?;
+            }
+        }
+        tx.execute("DELETE FROM feishu_mentions WHERE created_at<?1", [cutoff])?;
+        timing::commit(tx, clock)?;
+        Ok(())
+    }
+
     pub fn record_feishu_window(
         &mut self,
         owner: &str,
@@ -264,35 +348,6 @@ impl Store {
     ) -> Result<()> {
         let (tx, clock) = timing::begin(&mut self.db, "feishu_scan_window")?;
         let cutoff = now - RETENTION;
-        tx.execute(
-            "DELETE FROM feishu_suggestions WHERE owner=?1 AND last_at<?2",
-            params![owner, cutoff],
-        )?;
-        // A still-active long-lived thread may contain expired original mentions.
-        // Keep the projection scoped to retained source material as well.
-        let aged = tx
-            .prepare("SELECT id,evidence FROM feishu_suggestions WHERE owner=?1 AND first_at<?2")?
-            .query_map(params![owner, cutoff], |r| {
-                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        for (id, raw) in aged {
-            let mut saved: FeishuSuggestionEvidence = serde_json::from_str(&raw)?;
-            saved.mentions.retain(|m| m.created_at >= cutoff);
-            saved.replies.retain(|m| m.created_at >= cutoff);
-            if let Some(anchor) = saved.mentions.first() {
-                saved.anchor = anchor.clone();
-                tx.execute(
-                    "UPDATE feishu_suggestions SET first_at=?2 WHERE id=?1",
-                    params![id, anchor.created_at],
-                )?;
-                save_changed(&tx, &mut saved, now)?;
-            }
-        }
-        tx.execute(
-            "DELETE FROM feishu_mentions WHERE owner=?1 AND created_at<?2",
-            params![owner, cutoff],
-        )?;
         messages.sort_by(|a, b| {
             (a.evidence.created_at, &a.evidence.id).cmp(&(b.evidence.created_at, &b.evidence.id))
         });
@@ -315,8 +370,9 @@ impl Store {
 
     pub fn feishu_context_jobs(&self, owner: &str, now: i64) -> Result<Vec<ContextJob>> {
         let mut query = self.db.prepare(
-            "SELECT id,chat_id,topic,first_at,evidence FROM feishu_suggestions
-             WHERE owner=?1 AND last_at>=?2 AND checked_at<?3 ORDER BY checked_at,updated_at DESC LIMIT 8",
+            "SELECT id,chat_id,topic,first_at,evidence,context_cursor FROM feishu_suggestions
+             WHERE owner=?1 AND first_at>=?2 AND (context_cursor IS NOT NULL OR checked_at<?3)
+             ORDER BY checked_at,updated_at DESC LIMIT 8",
         )?;
         query
             .query_map(params![owner, now - RETENTION, now - 150], |r| {
@@ -326,15 +382,17 @@ impl Store {
                     r.get(2)?,
                     r.get(3)?,
                     r.get::<_, String>(4)?,
+                    r.get::<_, Option<String>>(5)?,
                 ))
             })?
             .map(|row| {
-                let (id, chat_id, topic, first_at, raw) = row?;
+                let (id, chat_id, topic, first_at, raw, cursor) = row?;
                 Ok(ContextJob {
                     id,
                     chat_id,
                     topic,
                     first_at,
+                    cursor: cursor.map(|raw| serde_json::from_str(&raw)).transpose()?,
                     evidence: serde_json::from_str(&raw)?,
                 })
             })
@@ -346,23 +404,32 @@ impl Store {
         owner: &str,
         job: &ContextJob,
         name: Option<&str>,
-        result: Option<(Vec<FeishuEvidence>, bool)>,
+        result: Option<ContextResult>,
         now: i64,
     ) -> Result<()> {
         let (tx, clock) = timing::begin(&mut self.db, "feishu_context")?;
         let Some(mut saved) = read_evidence(&tx, owner, &job.id)? else {
             return Ok(());
         };
-        if saved.revision != job.evidence.revision {
+        // Retention or ingestion can change source material during an external read.
+        // An assessor updating only its output does not invalidate this context job.
+        if saved.anchor != job.evidence.anchor
+            || saved.mentions != job.evidence.mentions
+            || saved.replies != job.evidence.replies
+        {
             return Ok(());
         }
         let old_status = saved.context_status.clone();
-        let changed = if let Some((replies, complete)) = result {
-            saved.context_status = if complete { "ready" } else { "partial" }.into();
-            let changed = saved.replies != replies;
-            saved.replies = replies;
+        let old_name = saved.chat_name.clone();
+        let mut next = None;
+        let changed = if let Some(result) = result {
+            saved.context_status = if result.complete { "ready" } else { "partial" }.into();
+            let changed = saved.replies != result.replies;
+            saved.replies = result.replies;
+            next = result.next;
             changed
         } else {
+            // Expired or invalid continuation tokens are retried from a fresh window.
             saved.context_status = "unavailable".into();
             false
         };
@@ -370,13 +437,14 @@ impl Store {
             saved.chat_name = name.to_owned();
         }
         if changed {
-            save_changed(&tx, &mut saved, now)?;
+            save_changed(&tx, &mut saved, now, true)?;
+        } else if old_status != saved.context_status || old_name != saved.chat_name {
+            saved.revision += 1;
         }
-        // A complete first fetch makes the initial material available for assessment
-        // without changing its source version just for an empty context.
+        let cursor = next.as_ref().map(serde_json::to_string).transpose()?;
         tx.execute(
-            "UPDATE feishu_suggestions SET checked_at=?2,evidence=?3 WHERE id=?1",
-            params![job.id, now, serde_json::to_string(&saved)?],
+            "UPDATE feishu_suggestions SET checked_at=?2,evidence=?3,context_cursor=?4 WHERE id=?1",
+            params![job.id, now, serde_json::to_string(&saved)?, cursor],
         )?;
         if old_status != saved.context_status
             && matches!(old_status.as_str(), "partial" | "unavailable")
@@ -399,7 +467,7 @@ impl Store {
         now: i64,
     ) -> Result<Option<FeishuSuggestionEvidence>> {
         self.db.query_row(
-            "SELECT evidence FROM feishu_suggestions WHERE owner=?1 AND last_at>=?2 AND checked_at>0
+            "SELECT evidence FROM feishu_suggestions WHERE owner=?1 AND first_at>=?2 AND checked_at>0 AND context_cursor IS NULL
              AND (assessment_state='pending' OR (assessment_state='failed' AND assessed_at<=?3))
              ORDER BY assessed_at,updated_at DESC,id LIMIT 1",
             params![owner, now-RETENTION, now-300], |r| r.get::<_,String>(0),
@@ -425,7 +493,10 @@ impl Store {
         } else {
             "failed"
         };
-        saved.assessment = result;
+        if saved.assessment != result {
+            saved.revision += 1;
+            saved.assessment = result;
+        }
         tx.execute("UPDATE feishu_suggestions SET evidence=?2,assessment_state=?3,assessed_at=?4 WHERE id=?1",
             params![job.id,serde_json::to_string(&saved)?,state,now])?;
         timing::commit(tx, clock)?;
@@ -447,8 +518,8 @@ impl Store {
     pub fn feishu_list(&self, owner: &str, before: Option<(i64, &str)>) -> Result<Value> {
         let (at, id) = before.unwrap_or((i64::MAX, ""));
         let mut stmt = self.db.prepare(
-            "SELECT evidence,updated_at,ignored_revision,assessment_state FROM feishu_suggestions
-             WHERE owner=?1 AND last_at>=unixepoch()-?2 AND (updated_at,id)<(?3,?4)
+            "SELECT evidence,updated_at,ignored_material_revision,assessment_state,material_revision FROM feishu_suggestions
+             WHERE owner=?1 AND first_at>=unixepoch()-?2 AND (updated_at,id)<(?3,?4)
              ORDER BY updated_at DESC,id DESC LIMIT 51",
         )?;
         let mut rows = stmt.query(params![owner, RETENTION, at, id])?;
@@ -475,8 +546,8 @@ impl Store {
 
     pub fn feishu_detail(&self, owner: &str, id: &str) -> Result<Option<Value>> {
         let mut stmt = self.db.prepare(
-            "SELECT evidence,updated_at,ignored_revision,assessment_state FROM feishu_suggestions
-             WHERE owner=?1 AND id=?2 AND last_at>=unixepoch()-?3",
+            "SELECT evidence,updated_at,ignored_material_revision,assessment_state,material_revision FROM feishu_suggestions
+             WHERE owner=?1 AND id=?2 AND first_at>=unixepoch()-?3",
         )?;
         let mut rows = stmt.query(params![owner, id, RETENTION])?;
         rows.next()?
@@ -486,7 +557,7 @@ impl Store {
 
     fn feishu_card(&self, owner: &str, row: &rusqlite::Row<'_>) -> Result<Value> {
         let evidence: FeishuSuggestionEvidence = serde_json::from_str(&row.get::<_, String>(0)?)?;
-        let ignored = row.get::<_, Option<i64>>(2)? == Some(evidence.revision);
+        let ignored = row.get::<_, Option<i64>>(2)? == Some(row.get::<_, i64>(4)?);
         let mut query = self.db.prepare(
             "SELECT l.chat_id,l.revision,d.title,d.archived,
                  EXISTS(SELECT 1 FROM discussion_references r WHERE r.chat_id=l.chat_id AND r.id=('feishu:'||l.suggestion_id))
@@ -527,8 +598,8 @@ impl Store {
             _ => return Ok(Change::Conflict),
         };
         tx.execute(
-            "UPDATE feishu_suggestions SET ignored_revision=?2 WHERE id=?1",
-            params![id, ignored.then_some(revision)],
+            "UPDATE feishu_suggestions SET ignored_material_revision=CASE WHEN ?2 THEN material_revision ELSE NULL END WHERE id=?1",
+            params![id, ignored],
         )?;
         timing::commit(tx, clock)?;
         Ok(Change::Ok(()))
@@ -552,9 +623,9 @@ impl Store {
         // An exact retry can read the existing association after the selection changed.
         if let Some(existing) = &existing {
             let recorded: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM feishu_discussion_links l JOIN discussion_references r
-                   ON r.chat_id=l.chat_id AND r.id=('feishu:'||l.suggestion_id)
-                   WHERE l.owner=?1 AND l.suggestion_id=?2 AND l.chat_id=?3 AND l.revision=?4)",
+                "SELECT EXISTS(SELECT 1 FROM feishu_discussion_links l JOIN feishu_discussion_snapshots s
+                   ON s.chat_id=l.chat_id AND s.suggestion_id=l.suggestion_id
+                   WHERE l.owner=?1 AND l.suggestion_id=?2 AND l.chat_id=?3 AND s.revision=?4)",
                 params![owner, id, existing, revision],
                 |r| r.get(0),
             )?;
@@ -667,7 +738,7 @@ fn current(
     revision: i64,
 ) -> Result<Change<FeishuSuggestionEvidence>> {
     let Some(raw) = db.query_row(
-        "SELECT evidence FROM feishu_suggestions WHERE owner=?1 AND id=?2 AND last_at>=unixepoch()-?3",
+        "SELECT evidence FROM feishu_suggestions WHERE owner=?1 AND id=?2 AND first_at>=unixepoch()-?3",
         params![owner,id,RETENTION], |r| r.get::<_,String>(0),
     ).optional()? else { return Ok(Change::Missing) };
     let evidence: FeishuSuggestionEvidence = serde_json::from_str(&raw)?;

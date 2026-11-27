@@ -47,3 +47,46 @@ fn process_status(pid: u32) -> Result<Option<(String, String)>> {
 fn exited(state: &str) -> bool {
     state.starts_with(['Z', 'X'])
 }
+
+/// Bounds the entire lifetime of an isolated App Server, including blocked
+/// pipe writes. The owning Client leaves the child unreaped until this worker
+/// is joined, so the PID cannot be reused while a signal is still possible.
+#[cfg(unix)]
+pub(crate) struct ProcessDeadline {
+    pid: u32,
+    cancel: std::sync::mpsc::Sender<()>,
+    worker: std::thread::JoinHandle<()>,
+}
+
+#[cfg(unix)]
+impl ProcessDeadline {
+    pub(crate) fn start(pid: u32, limit: std::time::Duration) -> Self {
+        let (cancel, stopped) = std::sync::mpsc::channel();
+        let deadline = std::time::Instant::now() + limit;
+        let worker = std::thread::spawn(move || {
+            if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+                stopped.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+            {
+                Self::kill_group(pid);
+            }
+        });
+        Self {
+            pid,
+            cancel,
+            worker,
+        }
+    }
+
+    pub(crate) fn stop(self) {
+        let _ = self.cancel.send(());
+        let _ = self.worker.join();
+        Self::kill_group(self.pid);
+    }
+
+    fn kill_group(pid: u32) {
+        // SAFETY: Command was spawned as a new process group with group ID
+        // equal to this child PID. The Client is its sole reaper and doesn't
+        // release that PID while a watchdog or this call can signal it.
+        unsafe { libc::killpg(pid as libc::pid_t, libc::SIGKILL) };
+    }
+}

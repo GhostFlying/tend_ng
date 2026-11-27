@@ -267,4 +267,4 @@ Web 的「转交主 Chat」和 CLI `tend discussion handoff-now` 会用原讨论
 }
 ```
 
-`profile` 可省略，`cli` 默认 `lark-cli`（需在 Server 的 PATH 上）。采集子进程用 GNU `timeout` 限时，使用 UTC 解析 CLI 文本时间。省略 `agent` 时仍采集并显示来源，不生成模型研判。配置具名研判时，`home` 是独立用户目录（默认 `codex-ark` 从其中的 `.codex-ark` 读取已准备好的 Ark 配置），`cwd` 是单独的空目录。可选覆盖 `program`、`model`、`reasoning_effort`，默认值分别为 `codex-ark`、`deepseek-v4.1-flash`、`high`。扫描及研判不使用 Runner，显式快转沿已有 Discussion 配置与权限。用 `tend feishu-suggestions --help` 查 CLI，用 `tend feishu-suggestions list` 查最后一次成功扫描与来源缺口。
+`profile` 可省略，`cli` 默认 `lark-cli`（需在 Server 的 PATH 上）。采集子进程用 GNU `timeout` 限时，使用 UTC 解析 CLI 文本时间。省略 `agent` 时仍采集并显示来源，不生成模型研判。配置具名研判时，`home` 是独立用户目录（默认 `codex-ark` 从其中的 `.codex-ark` 读取已准备好的 Ark 配置），`cwd` 是单独的空目录。可选覆盖 `program`、`model`、`reasoning_effort`，默认值分别为 `codex-ark`、`deepseek-v4.1-flash`、`high`。`timeout_seconds` 默认 120 秒，限制整个本机研判进程。扫描及研判不使用 Runner，显式快转沿已有 Discussion 配置与权限。用 `tend feishu-suggestions --help` 查 CLI，用 `tend feishu-suggestions list` 查最后一次成功扫描与来源缺口。

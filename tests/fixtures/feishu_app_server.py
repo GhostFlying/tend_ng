@@ -1,8 +1,11 @@
 """Isolated JSON-RPC fixture for the named Feishu assessor."""
+import fcntl
 import json
 import os
 from pathlib import Path
+import signal
 import sys
+import time
 import uuid
 
 root = Path(os.environ["HOME"])
@@ -39,6 +42,13 @@ for line in sys.stdin:
             result(request, {"thread": {"id": thread}, "approvalPolicy": "never", "runtimeWorkspaceRoots": [],
                              "activePermissionProfile": {"id": "tend-router-routing"},
                              "sandbox": {"type": "readOnly", "networkAccess": False}})
+            stall = root / "stall-next"
+            if stall.exists():
+                stall.unlink()
+                capacity = fcntl.fcntl(sys.stdin.fileno(), fcntl.F_SETPIPE_SZ, 4096)
+                (root / "stalled").write_text(f"{os.getpid()} {capacity}")
+                while True:
+                    signal.pause()
         case "turn/start":
             assert params["threadId"] == thread and params["effort"] == "high"
             assert params["permissions"] == "tend-router-routing"
@@ -47,23 +57,28 @@ for line in sys.stdin:
             assert "不相关的群聊" not in str(context)
             replies = context["replies"]
             if anchor == "om_qa_anchor":
+                hold = root / "hold-qa-assessment"
+                if hold.exists():
+                    (root / "qa-assessment-has-input").touch()
+                    while hold.exists():
+                        time.sleep(0.01)
                 headline = "确认 Android 灰度窗口与回滚阈值"
                 overview = "候选包已通过冒烟，灰度比例先维持 5%。" + (
                     " QA 新增 Android 12 和 15 验收范围。" if len(replies) > 1 else "")
                 questions = ["请 QA 确认触发回滚的阈值。"]
                 disposition = "open"
             elif anchor == "om_docs_anchor":
-                assert [reply["id"] for reply in replies] == ["om_docs_reply"]
+                assert [reply["id"] for reply in replies] in (["om_docs_reply"], ["om_docs_reply", "om_docs_followup"])
                 headline, overview, questions, disposition = "本地启动文档已补齐", "来源回复明确关闭此项。", [], "resolved"
             elif anchor == "om_release_anchor":
-                assert len(context["mentions"]) == 2
+                assert len(context["mentions"]) in (2, 3)
                 headline, overview, questions, disposition = "确认周五发布负责人", "发布窗口已确认。", ["由谁确认发布？"], "open"
             else:
                 headline, overview, questions, disposition = "补齐另一个发布话题", "单独保留另一个 thread。", [], "unclear"
             with (root / "assessed.jsonl").open("a", encoding="utf-8") as log:
                 log.write(json.dumps([anchor, context["revision"], [reply["id"] for reply in replies]]) + "\n")
             response = {"headline": headline, "overview": overview, "open_questions": questions,
-                        "disposition": disposition, "evidence_ids": [anchor] + [reply["id"] for reply in replies]}
+                        "disposition": disposition, "evidence_ids": [anchor] + [reply["id"] for reply in replies[:11]]}
             turn = str(uuid.uuid4())
             result(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
             item = {"type": "agentMessage", "id": turn + "-answer", "phase": "final_answer",

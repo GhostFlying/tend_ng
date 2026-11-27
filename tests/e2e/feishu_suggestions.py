@@ -1,6 +1,7 @@
 """Verify Feishu scans, isolation, recovery and explicit transfers with local fixtures."""
 import argparse
 from datetime import datetime
+import errno
 import json
 import os
 from pathlib import Path
@@ -51,7 +52,7 @@ def run(args, root):
     feishu = root / "feishu.json"
     feishu.write_text(json.dumps({
         "owner_open_id": "ou_fixture_owner", "profile": "fixture-user", "cli": "./lark-fixture",
-        "agent": {"id": "FeishuFixture", "home": "./assessor-home", "cwd": "./assessor-cwd"},
+        "agent": {"id": "FeishuFixture", "home": "./assessor-home", "cwd": "./assessor-cwd", "timeout_seconds": 8},
     }))
     env["PATH"] = f"{root}:{env['PATH']}"
     discussion = root / "discussion.json"
@@ -155,6 +156,8 @@ def run(args, root):
         assert list_calls()[start:] == [["whoami"]]
 
     set_state("recover")
+    hold = root / "assessor-home" / "hold-qa-assessment"
+    hold.touch()
     start = len(list_calls())
     with server(args.server, root, env, **options):
         recovered = wait_scan("idle")
@@ -181,7 +184,19 @@ def run(args, root):
         def judged(anchor):
             return wait_for(lambda: card(anchor), lambda c: c and c["evidence"]["assessment"])
 
+        wait_for((root / "assessor-home" / "qa-assessment-has-input").exists, bool)
+        before = card("om_qa_anchor")["evidence"]
+        assert before["assessment"] is None
+        assert use("ignore", before["id"], before["revision"])["ignored"]
+        existing = cli("discussion", "create", "已有的验收讨论")["chat_id"]
+        with lose_first_response(address) as (proxy, posts):
+            assert use("discuss", before["id"], before["revision"], existing, upstream=proxy)["chat_id"] == existing
+            assert len(posts) == 2 and posts[0][0] == posts[1][0]
+        hold.unlink()
         qa = judged("om_qa_anchor")
+        assert qa["evidence"]["revision"] > before["revision"] and qa["ignored"]
+        use("handoff", before["id"], before["revision"], error="HTTP 409")
+        documents = card("om_docs_anchor")["evidence"]["id"]
         resolved = judged("om_docs_anchor")
         release = judged("om_release_anchor")
         judged("om_other_topic")
@@ -193,16 +208,20 @@ def run(args, root):
         assert use("read", id)["ignored"]
         one_thread = use("discuss", id, revision)["chat_id"]
         assert use("discuss", id, revision)["chat_id"] == one_thread
-        existing = cli("discussion", "create", "已有的验收讨论")["chat_id"]
         assert use("discuss", id, revision, existing)["chat_id"] == existing
+        assert use("discuss", id, before["revision"], existing)["chat_id"] == existing
+        assert next(a for a in use("read", id)["discussions"] if a["chat_id"] == existing)["revision"] == revision
+        saved = sql(db, "SELECT revision,evidence FROM feishu_discussion_snapshots WHERE chat_id=? ORDER BY revision", existing)
+        assert [n for n,_ in saved] == [before["revision"], revision]
+        assert json.loads(saved[0][1])["assessment"] is None and json.loads(saved[1][1])["assessment"]
         assert not cli("chat", "read", existing)["messages"]
         assert not cli("chat", "read", "main")["messages"]
         assert {a["chat_id"] for a in use("read", id)["discussions"]} == {one_thread, existing}
 
         # Simulate the passage of the context poll interval. A new reply is
         # deliberately NOT an @mention and must still advance the same card.
-        set_state("recover", progress=True)
-        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id=?", id)
+        set_state("recover", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id IN (?,?)", id, documents)
         use("sync")
         advanced = wait_for(lambda: use("read", id),
                             lambda c: c["evidence"]["revision"] > revision and c["evidence"]["assessment"])
@@ -212,6 +231,26 @@ def run(args, root):
         assert next(d for d in advanced["discussions"] if d["chat_id"] == existing)["revision"] == revision
         use("ignore", id, revision, error="HTTP 409")
         assert use("discuss", id, updated, existing)["chat_id"] == existing
+        assert use("discuss", id, revision, existing)["chat_id"] == existing
+        assert next(a for a in use("read", id)["discussions"] if a["chat_id"] == existing)["revision"] == updated
+        release_id = release["evidence"]["id"]
+        nested = wait_for(lambda: use("read", release_id), lambda c: len(c["evidence"]["mentions"]) == 3)
+        assert [m["id"] for m in nested["evidence"]["mentions"]] == ["om_release_anchor", "om_release_update", "om_release_final"]
+        assert len(feed()["suggestions"]) == 4
+
+        # The first poll reached its budget. The next scan must reuse the
+        # original window and actually request its fifth provider page.
+        wait_for(lambda: use("read", documents), lambda c: c["evidence"]["context_status"] == "partial")
+        first_window = sql(db, "SELECT context_cursor FROM feishu_suggestions WHERE id=?", documents)[0][0]
+        cursor = json.loads(first_window)
+        assert cursor["token"] == "doc-page-5"
+        use("sync")
+        continued = wait_for(lambda: use("read", documents), lambda c: c["evidence"]["context_status"] == "ready"
+                             and c["evidence"]["assessment"] and len(c["evidence"]["replies"]) == 2)
+        assert [m["id"] for m in continued["evidence"]["replies"]] == ["om_docs_reply", "om_docs_followup"]
+        assert continued["evidence"]["assessment"]["disposition"] == "resolved"
+        latest_page = next(c for c in list_calls() if "doc-page-5" in c)
+        assert datetime.fromisoformat(latest_page[latest_page.index("--end") + 1]).timestamp() == cursor["through"]
         assert len([line for line in assessor_log.read_text().splitlines() if "om_qa_anchor" in line]) == 2
         print("PASS direct @ filter, topic aggregation, later non-mention reply, resolved suggestion, ignore/restore semantics and no Runner use", flush=True)
 
@@ -250,6 +289,58 @@ def run(args, root):
         assert use("read", id)["handoffs"][0]["handoff"] == direct
         assert sql(db, "SELECT count(*) FROM router_dispatches") == [(0,)]
         print("PASS CLI and Web reference path, immutable revision, lost response, original Main Chat message, and #117 source authorization", flush=True)
+
+        # Consume a rich QA prompt with a child that acknowledges thread/start
+        # then stops reading its 4 KiB stdin pipe. Queue another existing
+        # material while it is stuck and verify that job actually finishes.
+        path = root / "assessor-home"
+        (path / "stall-next").touch()
+        set_state("recover", progress=True, deep_context=True, big_payload=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=0 WHERE id=?", id)
+        use("sync")
+        wait_for((path / "stalled").exists, bool)
+        pid, capacity = map(int, (path / "stalled").read_text().split())
+        oversized = use("read", id)["evidence"]
+        assert len(json.dumps(oversized, ensure_ascii=False).encode()) > capacity * 4
+        completions = assessor_log.read_text().count("om_release_anchor")
+        set_checkpoints("UPDATE feishu_suggestions SET assessment_state='pending',assessed_at=0 WHERE id=?", release_id)
+        wait_for(lambda: use("read", id), lambda c: c["assessment_status"] == "failed")
+        wait_for(lambda: assessor_log.read_text().count("om_release_anchor"), lambda n: n > completions)
+        try:
+            os.kill(pid, 0)
+        except OSError as exc:
+            assert exc.errno == errno.ESRCH, exc
+        else:
+            raise AssertionError(f"expired assessor {pid} was not stopped and reaped")
+        print("PASS a subprocess that stops reading a full pipe expires and the next assessment completes", flush=True)
+
+        release_result = use("read", release_id)
+        use("ignore", release_id, release_result["evidence"]["revision"])
+
+    # Simulate elapsed time while Tend was stopped. Keep an active card with
+    # one expired origin as well as a fully expired suggestion whose explicit
+    # snapshots survive. The provider is now persistently failing identity.
+    expired = at - 8 * 86400
+    set_checkpoints("UPDATE feishu_suggestions SET first_at=?,last_at=? WHERE id=?", expired, expired, id)
+    with sqlite3.connect(db) as conn:
+        raw = conn.execute("SELECT evidence FROM feishu_suggestions WHERE id=?", (release_id,)).fetchone()[0]
+        evidence = json.loads(raw)
+        evidence["anchor"]["created_at"] = expired
+        evidence["mentions"][0]["created_at"] = expired
+        conn.execute("UPDATE feishu_suggestions SET evidence=?,first_at=? WHERE id=?",
+                     (json.dumps(evidence), expired, release_id))
+        conn.execute("UPDATE feishu_mentions SET created_at=? WHERE message_id='om_release_anchor'", (expired,))
+    set_state("wrong-user")
+    with server(args.server, root, env, **options):
+        assert wait_scan("failed")["scan"]["gap"] == "identity"
+        use("read", id, error="HTTP 404")
+        assert sql(db, "SELECT count(*) FROM feishu_suggestions WHERE id=?", id) == [(0,)]
+        assert sql(db, "SELECT count(*) FROM feishu_mentions WHERE message_id='om_release_anchor'") == [(0,)]
+        active = use("read", release_id)
+        assert active["evidence"]["anchor"]["id"] == "om_release_update" and active["ignored"]
+        assert status(id, updated) == direct
+        assert use("discuss", id, before["revision"], existing)["chat_id"] == existing
+        print("PASS provider-independent retention trims active/expired material but preserves explicit old receipts and snapshots", flush=True)
 
 
 if __name__ == "__main__":

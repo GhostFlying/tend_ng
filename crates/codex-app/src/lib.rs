@@ -54,6 +54,8 @@ pub enum WorkThreadResume {
 
 pub struct Client {
     child: Child,
+    #[cfg(unix)]
+    deadline: Option<process::ProcessDeadline>,
     stdin: Option<ChildStdin>,
     events: Receiver<Result<Value>>,
     notifications: VecDeque<Value>,
@@ -205,11 +207,24 @@ impl Turn {
 
 impl Client {
     pub fn connect(command: &mut Command) -> Result<Self> {
+        Self::connect_inner(command, None)
+    }
+
+    fn connect_inner(command: &mut Command, limit: Option<Duration>) -> Result<Self> {
+        #[cfg(unix)]
+        if limit.is_some() {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        #[cfg(not(unix))]
+        ensure!(limit.is_none(), "process group deadlines require Unix");
         let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
             .context("start local Codex App Server")?;
+        #[cfg(unix)]
+        let deadline = limit.map(|limit| process::ProcessDeadline::start(child.id(), limit));
         let stdin = child.stdin.take().context("App Server stdin")?;
         let stdout = child.stdout.take().context("App Server stdout")?;
         let (sender, events) = mpsc::sync_channel(32);
@@ -226,6 +241,8 @@ impl Client {
         });
         let mut client = Self {
             child,
+            #[cfg(unix)]
+            deadline,
             stdin: Some(stdin),
             events,
             notifications: VecDeque::new(),
@@ -468,6 +485,22 @@ impl Client {
     /// Start a Router process using its normal model and session storage, but
     /// expose no native side-effect tools. Only the checked Tend RPCs remain.
     pub fn connect_routing_only(command: &mut Command, cwd: &Path) -> Result<Self> {
+        Self::connect_routing_inner(command, cwd, None)
+    }
+
+    pub fn connect_routing_only_with_deadline(
+        command: &mut Command,
+        cwd: &Path,
+        limit: Duration,
+    ) -> Result<Self> {
+        Self::connect_routing_inner(command, cwd, Some(limit))
+    }
+
+    fn connect_routing_inner(
+        command: &mut Command,
+        cwd: &Path,
+        limit: Option<Duration>,
+    ) -> Result<Self> {
         command.arg("--strict-config");
         for feature in ROUTING_DISABLED_FEATURES {
             command.arg("-c").arg(format!("features.{feature}=false"));
@@ -489,7 +522,7 @@ impl Client {
         command.arg("-c").arg(format!(
             "permissions.{ROUTING_PROFILE}.network.enabled=false"
         ));
-        let mut client = Self::connect(command)?;
+        let mut client = Self::connect_inner(command, limit)?;
         let response = client.call("config/read", json!({"includeLayers":false, "cwd":cwd}))?;
         let config = &response["config"];
         ensure!(
@@ -1002,6 +1035,12 @@ impl Drop for Client {
 impl Client {
     pub fn stop(&mut self) -> Result<()> {
         drop(self.stdin.take());
+        #[cfg(unix)]
+        if let Some(deadline) = self.deadline.take() {
+            deadline.stop();
+            self.child.wait()?;
+            return Ok(());
+        }
         let deadline = Instant::now() + Duration::from_secs(1);
         while Instant::now() < deadline {
             if self.child.try_wait()?.is_some() {

@@ -3,7 +3,7 @@ mod api;
 
 use crate::store::{
     Store,
-    feishu::{ContextJob, FeishuMessage, RETENTION},
+    feishu::{ContextCursor, ContextJob, ContextResult, FeishuMessage, RETENTION},
 };
 use anyhow::{Context, Result, ensure};
 use protocol::FeishuEvidence;
@@ -23,6 +23,9 @@ use tiny_http::Request;
 const DAY: i64 = 86_400;
 const OVERLAP: i64 = 15 * 60;
 const SCAN_INTERVAL: Duration = Duration::from_secs(180);
+const CONTEXT_PAGE_BUDGET: usize = 4;
+const CONTEXT_MAX_PAGES: usize = 200;
+const CONTEXT_MAX_IDS: usize = 512;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -62,6 +65,7 @@ pub fn serve(path: Option<&Path>, db: &Path) -> Result<SyncSender<Request>> {
             Ok(config)
         })
         .transpose()?;
+    spawn_retention(db)?;
     let (owner, assessor) = if let Some(config) = &mut config {
         if let Some(assessment) = config.agent.take() {
             let name = assessment.id.clone();
@@ -82,6 +86,20 @@ fn now() -> i64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+fn spawn_retention(db: &Path) -> Result<()> {
+    let mut store = Store::open(db)?;
+    store.prune_feishu(now())?;
+    thread::spawn(move || {
+        loop {
+            thread::sleep(Duration::from_secs(30));
+            if store.prune_feishu(now()).is_err() {
+                eprintln!("Feishu retention could not prune expired material");
+            }
+        }
+    });
+    Ok(())
 }
 
 fn spawn_scanner(db: &Path, config: Config) -> Result<SyncSender<()>> {
@@ -434,9 +452,12 @@ fn parse_message(
             .as_str()
             .filter(|id| provider_id(id, "om_"))
             .map(str::to_owned),
-        parent_id: raw["parent_id"]
-            .as_str()
-            .filter(|id| provider_id(id, "om_"))
+        // The official shortcuts expose the parent of an ordinary reply as
+        // reply_to. Accept the raw parent_id too, when present.
+        parent_id: ["reply_to", "parent_id"]
+            .into_iter()
+            .filter_map(|key| raw[key].as_str())
+            .find(|id| provider_id(id, "om_"))
             .map(str::to_owned),
         deleted: raw["deleted"] == true,
         evidence: FeishuEvidence {
@@ -495,15 +516,20 @@ fn fetch_context(
     config: &Config,
     job: &ContextJob,
     now: i64,
-) -> ScanResult<(Vec<FeishuEvidence>, bool)> {
+) -> ScanResult<ContextResult> {
     let thread = job
         .topic
         .as_deref()
         .filter(|topic| provider_id(topic, "omt_"));
-    let since = store
-        .feishu_iso(job.first_at.max(now - RETENTION))
-        .map_err(|_| ScanError::Storage)?;
-    let until = store.feishu_iso(now).map_err(|_| ScanError::Storage)?;
+    let from = job
+        .cursor
+        .as_ref()
+        .map_or(job.first_at.max(now - RETENTION), |c| c.from);
+    let through = job.cursor.as_ref().map_or(now, |c| c.through);
+    let since = store.feishu_iso(from).map_err(|_| ScanError::Storage)?;
+    let until = store.feishu_iso(through).map_err(|_| ScanError::Storage)?;
+    // Ascending order lets a parent be discovered before a child across a page
+    // or a poll boundary. For ordinary chats the cursor uses the same time bounds.
     let common = [
         "--as",
         "user",
@@ -511,7 +537,7 @@ fn fetch_context(
         "--format",
         "json",
         "--order",
-        "desc",
+        "asc",
         "--page-size",
         "50",
     ];
@@ -530,31 +556,60 @@ fn fetch_context(
         ]
     };
     args.extend(common);
-    let page = config.messages(&args)?;
-    let rows = rows(&page)?;
-    let mut complete = page["has_more"] == false;
+    let mut token = job.cursor.as_ref().map(|c| c.token.clone());
+    let mut seen = HashSet::new();
+    let mut complete = job.cursor.as_ref().is_none_or(|c| c.complete);
+    let mut pages = job.cursor.as_ref().map_or(0, |c| c.pages);
     let mut found = Vec::new();
     let mut deleted = HashSet::new();
-    for row in rows {
-        complete &= row["thread_replies_error"] != true && row["thread_has_more"] != true;
-        let embedded = row["thread_replies"].as_array().into_iter().flatten();
-        for raw in std::iter::once(row).chain(embedded) {
-            if raw["deleted"] == true {
-                if let Some(id) = raw["message_id"].as_str() {
-                    deleted.insert(id.to_owned());
+    for _ in 0..CONTEXT_PAGE_BUDGET {
+        let mut query = args.clone();
+        if let Some(token) = &token {
+            seen.insert(token.clone());
+            query.extend(["--page-token", token]);
+        }
+        let page = config.messages(&query)?;
+        pages += 1;
+        for row in rows(&page)? {
+            complete &= row["thread_replies_error"] != true && row["thread_has_more"] != true;
+            let embedded = row["thread_replies"].as_array().into_iter().flatten();
+            for raw in std::iter::once(row).chain(embedded) {
+                if raw["deleted"] == true {
+                    if let Some(id) = raw["message_id"].as_str() {
+                        deleted.insert(id.to_owned());
+                    }
+                    continue;
                 }
-                continue;
-            }
-            match parse_message(store, raw, Some(&job.chat_id)) {
-                Ok(message)
-                    if message.chat_id == job.chat_id
-                        && message.evidence.created_at >= job.first_at.max(now - RETENTION) =>
-                {
-                    found.push(message)
+                match parse_message(store, raw, Some(&job.chat_id)) {
+                    Ok(message)
+                        if message.chat_id == job.chat_id
+                            && message.evidence.created_at >= job.first_at.max(now - RETENTION)
+                            && message.evidence.created_at <= through =>
+                    {
+                        found.push(message)
+                    }
+                    Ok(_) => {}
+                    Err(_) => complete = false,
                 }
-                Ok(_) => {}
-                Err(_) => complete = false,
             }
+        }
+        token = match page["has_more"].as_bool() {
+            Some(false) => None,
+            Some(true) if pages < CONTEXT_MAX_PAGES => page["page_token"]
+                .as_str()
+                .filter(|next| !next.is_empty() && next.len() <= 4096 && !seen.contains(*next))
+                .map(str::to_owned)
+                .or_else(|| {
+                    complete = false;
+                    None
+                }),
+            _ => {
+                complete = false;
+                None
+            }
+        };
+        if token.is_none() {
+            break;
         }
     }
     let mut seeds: HashSet<String> = job.evidence.mentions.iter().map(|m| m.id.clone()).collect();
@@ -563,6 +618,15 @@ fn fetch_context(
         seeds.insert(topic.clone());
     }
     let mut known = seeds.clone();
+    if let Some(cursor) = &job.cursor {
+        known.extend(
+            cursor
+                .known
+                .iter()
+                .filter(|id| !deleted.contains(*id))
+                .cloned(),
+        );
+    }
     let mut replies: HashMap<_, _> = job
         .evidence
         .replies
@@ -604,5 +668,25 @@ fn fetch_context(
         replies.drain(..replies.len() - 12);
         complete = false;
     }
-    Ok((replies, complete))
+    let next = token.map(|token| {
+        let mut known: Vec<_> = known.into_iter().filter(|id| !seeds.contains(id)).collect();
+        known.sort_unstable();
+        if known.len() > CONTEXT_MAX_IDS {
+            known.truncate(CONTEXT_MAX_IDS);
+            complete = false;
+        }
+        ContextCursor {
+            from,
+            through,
+            token,
+            pages,
+            complete,
+            known,
+        }
+    });
+    Ok(ContextResult {
+        replies,
+        complete: complete && next.is_none(),
+        next,
+    })
 }

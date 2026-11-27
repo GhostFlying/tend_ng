@@ -10,7 +10,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 const CATEGORY: &str = "feishu-router";
@@ -28,6 +28,8 @@ pub struct Config {
     model: String,
     #[serde(default = "default_effort")]
     reasoning_effort: String,
+    #[serde(default = "default_timeout")]
+    timeout_seconds: u64,
 }
 
 fn default_program() -> PathBuf {
@@ -40,12 +42,17 @@ fn default_effort() -> String {
     "high".into()
 }
 
+fn default_timeout() -> u64 {
+    120
+}
+
 impl Config {
     pub fn resolve(&mut self, root: &Path) -> Result<()> {
         ensure!(
             protocol::valid_id(&self.id)
                 && !self.model.trim().is_empty()
-                && !self.reasoning_effort.trim().is_empty(),
+                && !self.reasoning_effort.trim().is_empty()
+                && (1..=3600).contains(&self.timeout_seconds),
             "invalid Feishu assessment profile"
         );
         if self.program.components().count() > 1 {
@@ -118,7 +125,11 @@ fn assess(config: &Config, job: &FeishuSuggestionEvidence) -> Result<FeishuAsses
             command.env(var, value);
         }
     }
-    let mut client = Client::connect_routing_only(&mut command, &config.cwd)?;
+    let mut client = Client::connect_routing_only_with_deadline(
+        &mut command,
+        &config.cwd,
+        Duration::from_secs(config.timeout_seconds),
+    )?;
     let thread = client.start_ephemeral_analysis(&config.cwd, INSTRUCTIONS, &config.model)?;
     let context = serde_json::to_string(job)?;
     let turn = client.run_turn(
@@ -130,9 +141,7 @@ fn assess(config: &Config, job: &FeishuSuggestionEvidence) -> Result<FeishuAsses
             effort: Some(&config.reasoning_effort),
             discussion_scope: None,
         },
-        &mut AnalysisTurn {
-            deadline: Instant::now() + Duration::from_secs(120),
-        },
+        &mut AnalysisTurn,
     )?;
     ensure!(
         turn.status == TurnStatus::Completed,
@@ -188,21 +197,9 @@ fn validate(job: &FeishuSuggestionEvidence, result: &FeishuAssessment) -> Result
     Ok(())
 }
 
-struct AnalysisTurn {
-    deadline: Instant,
-}
+struct AnalysisTurn;
 
 impl TurnHandler for AnalysisTurn {
-    fn checks_controls(&self) -> bool {
-        true
-    }
-    fn controls(&mut self, _client: &mut Client, _thread: &str, _turn: &str) -> Result<()> {
-        ensure!(
-            Instant::now() < self.deadline,
-            "Feishu assessment timed out"
-        );
-        Ok(())
-    }
     fn started(&mut self, _: &str) -> Result<()> {
         Ok(())
     }
