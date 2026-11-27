@@ -147,6 +147,8 @@ try {
     assert.equal(mainCount(chat), 0);
     await shoot(page, `${name}-05-failed-retry`);
 
+    if (name === "mobile")
+      await page.getByRole("button", { name: "更多讨论操作" }).tap();
     await page
       .getByRole("button", { name: "预览 / 编辑", exact: true })
       .click();
@@ -195,7 +197,7 @@ try {
         await input.fill(text);
         await input.press("Enter");
         await saved;
-        await page.getByText(text, { exact: true }).waitFor();
+        await page.getByRole("main").getByText(text, { exact: true }).waitFor();
       };
       await sendPrompt("第一次失败转交的补充讨论");
       await page.waitForFunction(

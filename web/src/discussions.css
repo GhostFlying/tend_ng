@@ -135,6 +135,17 @@
   flex: none;
   font-size: 12px;
 }
+.discussion-view,
+.discussion-more-actions {
+  display: contents;
+}
+.discussion-phone,
+.discussion-reveal,
+.discussion-back svg,
+.discussion-composer-mirror,
+.discussion-title[data-editing="true"] {
+  display: none;
+}
 .discussion-bar {
   flex: 0 0 auto;
   max-height: min(50dvh, 560px);
@@ -399,20 +410,237 @@
   }
 }
 @media (max-width: 760px) {
-  .discussion-index .discussion-start button,
-  .discussion-archive-action {
+  .discussion-index .discussion-start button {
     min-height: 44px;
   }
-  .discussion-actions .discussion-secondary,
-  .discussion-actions .primary {
-    min-height: 44px;
-  }
-  .discussion-bar-inner,
   .discussion-index {
     padding-inline: 16px;
   }
+  .content:has(> .discussion-view) > .header,
+  .content:has(> .discussion-view[data-discussion-keyboard]) > .phone-nav,
+  .discussion-view[data-discussion-collapsed] > .discussion-bar,
+  .discussion-view[data-discussion-keyboard] > .discussion-bar,
+  .discussion-view .discussion-desktop,
+  .discussion-back span {
+    display: none;
+  }
+  .discussion-view {
+    display: flex;
+    flex: 1;
+    flex-direction: column;
+    min-height: 0;
+    padding-top: env(safe-area-inset-top);
+  }
+  .discussion-view[data-discussion-keyboard] {
+    position: fixed;
+    z-index: 2;
+    inset: var(--discussion-visible-top) 0 auto;
+    height: var(--discussion-visible-height);
+    overflow: hidden;
+    padding-top: 0;
+    background: var(--bg);
+  }
+  .discussion-view[data-discussion-collapsed]:not([data-discussion-keyboard])
+    > .discussion-reveal {
+    position: absolute;
+    display: block;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
   .discussion-bar-inner {
-    padding-block: 12px;
+    grid-template-columns: auto minmax(0, 1fr) auto auto;
+    align-items: center;
+    gap: 0 4px;
+    padding: 3px max(8px, env(safe-area-inset-right)) 3px
+      max(8px, env(safe-area-inset-left));
+  }
+  .discussion-meta,
+  .discussion-actions {
+    display: contents;
+  }
+  .discussion-bar .discussion-title:not(.discussion-title-edit) {
+    display: flex;
+  }
+  .discussion-bar .discussion-title h2 {
+    font-size: 16px;
+  }
+  .discussion-back,
+  .discussion-more-toggle {
+    display: grid;
+    width: 44px;
+    min-height: 44px;
+    place-items: center;
+    border-radius: 8px;
+  }
+  .discussion-back:hover,
+  .discussion-more-toggle[aria-expanded="true"] {
+    background: var(--active);
+  }
+  .discussion-back svg,
+  .discussion-more-toggle svg {
+    display: block;
+    width: 20px;
+    height: 20px;
+  }
+  .discussion-back svg {
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+  .discussion-more-toggle svg {
+    fill: currentColor;
+  }
+  .discussion-quick-action {
+    min-height: 44px;
+    padding-inline: 10px;
+    white-space: nowrap;
+    font-size: 13px;
+  }
+  .discussion-back,
+  .discussion-bar-inner > .discussion-title:not(.discussion-title-edit),
+  .discussion-quick-action,
+  .discussion-more-toggle {
+    grid-row: 1;
+  }
+  .discussion-bar-inner
+    > :not(.discussion-meta, .discussion-title, .discussion-actions),
+  .discussion-title-edit,
+  .discussion-more-actions,
+  .discussion-quick-status {
+    grid-column: 1 / -1;
+    min-width: 0;
+  }
+  .discussion-more-actions:not([data-open="true"]),
+  .discussion-reference-fold:not([data-open="true"]) > ul {
+    display: none;
+  }
+  .discussion-more-actions[data-open="true"] {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+    padding: 8px;
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    background: var(--sidebar);
+  }
+  .discussion-more-actions .discussion-phone {
+    display: inline-block;
+  }
+  .discussion-more-actions .discussion-mode {
+    flex-basis: 100%;
+  }
+  .discussion-more-actions :is(button, a),
+  .discussion-title-edit button,
+  .discussion-quick-status button,
+  .discussion-references button {
+    min-height: 44px;
+  }
+  .discussion-more-actions a {
+    align-content: center;
+    padding-inline: 6px;
+  }
+  .discussion-quick-status {
+    padding: 4px 8px;
+  }
+  .discussion-reference-fold > button {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    min-height: 44px;
+    padding-inline: 8px;
+  }
+  .discussion-reference-fold > ul {
+    padding: 0 8px 8px;
+  }
+  .discussion-references button {
+    min-width: 44px;
+    text-align: center;
+  }
+  .discussion-bar input,
+  .discussion-dialog :is(input:not([type="checkbox"]), textarea) {
+    font-size: 16px;
+  }
+  .discussion-view .chat {
+    padding: 16px max(16px, env(safe-area-inset-right)) 16px
+      max(16px, env(safe-area-inset-left));
+  }
+  .discussion-view .dock {
+    padding: 4px max(8px, env(safe-area-inset-right)) 4px
+      max(8px, env(safe-area-inset-left));
+  }
+  .discussion-view .composer {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    column-gap: 4px;
+    min-height: 0;
+    padding: 3px 5px;
+    border-radius: 12px;
+  }
+  .discussion-view .composer-reply,
+  .discussion-view .composer > .discussion-picker {
+    grid-column: 1 / -1;
+  }
+  .discussion-view .composer > .discussion-picker {
+    grid-row: 3;
+    max-height: min(
+      220px,
+      calc(var(--discussion-visible-height, 100dvh) * 0.26)
+    );
+  }
+  .discussion-composer-input {
+    position: relative;
+    grid-row: 2;
+    min-width: 0;
+  }
+  .discussion-view .composer textarea,
+  .discussion-composer-mirror {
+    box-sizing: border-box;
+    padding: 11px 6px;
+    font: inherit;
+    font-size: 16px;
+    line-height: 22px;
+    letter-spacing: inherit;
+    overflow-wrap: break-word;
+  }
+  .discussion-composer-mirror {
+    display: block;
+    visibility: hidden;
+    overflow: hidden;
+    min-height: 44px;
+    max-height: min(
+      110px,
+      max(44px, calc(var(--discussion-visible-height, 100dvh) * 0.24))
+    );
+    white-space: pre-wrap;
+  }
+  .discussion-composer-mirror::after {
+    content: attr(data-value);
+  }
+  .discussion-view .composer textarea {
+    position: absolute;
+    inset: 0;
+    height: 100%;
+    min-height: 0;
+    max-height: none;
+    field-sizing: fixed;
+  }
+  .discussion-view .compose-actions {
+    grid-area: 2 / 2;
+    margin: 0;
+    padding: 0;
+  }
+  .discussion-view .compose-actions span {
+    display: none;
+  }
+  .discussion-view .send {
+    width: 44px;
+    height: 44px;
   }
   .discussion-dialog {
     width: calc(100% - 16px);

@@ -278,6 +278,11 @@ def main():
         sql(db, "CREATE INDEX discussions_by_activity ON discussions(updated_at DESC, chat_id)")
         sql(db, "UPDATE discussions SET title='新讨论' WHERE chat_id=?", unnamed)
         sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
+        sql(db, "DROP INDEX issues_token_usage_page")
+        sql(db, "DROP TABLE token_global_rollup")
+        for table in ("token_agent_backfill", "token_agent_requests", "token_agent_turns",
+                      "token_agent_attempts", "token_agent_rollups"):
+            sql(db, f"DROP TABLE {table}")
         for trigger in ("token_issue_tree_insert", "token_backfill_reroute", "token_rebuild_track_start",
                         "token_rebuild_track_insert", "token_rebuild_track_update", "token_rebuild_track_delete"):
             sql(db, f"DROP TRIGGER {trigger}")

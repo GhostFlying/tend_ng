@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { FormEvent } from "react";
+import type { FormEvent, ReactNode } from "react";
 import { chatLink, issueTitle, operationId } from "./api";
 import {
   DiscussionError,
@@ -51,12 +51,12 @@ export function QuickHandoffControl({
   chat,
   revision,
   onSent,
-  onPreview,
+  render,
 }: {
   chat: string;
   revision: number;
   onSent: () => void;
-  onPreview: () => void;
+  render: (controls: { action: ReactNode; status: ReactNode }) => ReactNode;
 }) {
   const key = `tend.discussion.quick.v2.${chat}`;
   const [tracked, setTracked] = useState(
@@ -197,70 +197,67 @@ export function QuickHandoffControl({
     ...(current ? [current] : []),
     ...older.filter((row) => row.operation_id !== current?.operation_id),
   ];
-  return (
-    <>
+  return render({
+    action: (
       <button
-        className="primary"
+        className="primary discussion-quick-action"
         type="button"
         disabled={!current || !!busy || Boolean(current.request)}
         onClick={() => current && void submit(current)}
       >
         转交主 Chat
       </button>
-      <button
-        className="discussion-secondary"
-        type="button"
-        onClick={onPreview}
-      >
-        预览 / 编辑
-      </button>
-      {statuses.map((record) => {
-        const { operation_id, request } = record;
-        const previous = operation_id !== current?.operation_id;
-        if (
-          !request &&
-          busy !== operation_id &&
-          !tracked.some((row) => row.operation_id === operation_id)
-        )
-          return null;
-        return (
-          <div className="discussion-quick-status" key={operation_id}>
-            {busy === operation_id || request?.status === "queued" ? (
-              <span role="status">正在生成摘要并转交…</span>
-            ) : request?.message_id ? (
-              <span role="status">
-                已转交主 Chat ·{" "}
-                <a href={chatLink("main", request.message_id)}>
-                  查看主 Chat 消息 ↗
-                </a>
-              </span>
-            ) : (
-              <>
-                <span className="error" role="alert">
-                  {request?.status === "failed"
-                    ? `${previous ? "先前" : ""}转交失败，未发送到主 Chat。${request.error ?? ""}`
-                    : "暂时未查到转交请求。可用同一操作重试。"}
+    ),
+    status: (
+      <>
+        {statuses.map((record) => {
+          const { operation_id, request } = record;
+          const previous = operation_id !== current?.operation_id;
+          if (
+            !request &&
+            busy !== operation_id &&
+            !tracked.some((row) => row.operation_id === operation_id)
+          )
+            return null;
+          return (
+            <div className="discussion-quick-status" key={operation_id}>
+              {busy === operation_id || request?.status === "queued" ? (
+                <span role="status">正在生成摘要并转交…</span>
+              ) : request?.message_id ? (
+                <span role="status">
+                  已转交主 Chat ·{" "}
+                  <a href={chatLink("main", request.message_id)}>
+                    查看主 Chat 消息 ↗
+                  </a>
                 </span>
-                <button
-                  className="discussion-secondary"
-                  type="button"
-                  disabled={!!busy}
-                  onClick={() => void submit(record)}
-                >
-                  重试转交
-                </button>
-              </>
-            )}
+              ) : (
+                <>
+                  <span className="error" role="alert">
+                    {request?.status === "failed"
+                      ? `${previous ? "先前" : ""}转交失败，未发送到主 Chat。${request.error ?? ""}`
+                      : "暂时未查到转交请求。可用同一操作重试。"}
+                  </span>
+                  <button
+                    className="discussion-secondary"
+                    type="button"
+                    disabled={!!busy}
+                    onClick={() => void submit(record)}
+                  >
+                    重试转交
+                  </button>
+                </>
+              )}
+            </div>
+          );
+        })}
+        {!!error && (
+          <div className="discussion-quick-status error" role="alert">
+            {error}
           </div>
-        );
-      })}
-      {!!error && (
-        <div className="discussion-quick-status error" role="alert">
-          {error}
-        </div>
-      )}
-    </>
-  );
+        )}
+      </>
+    ),
+  });
 }
 
 export function HandoffDialog({

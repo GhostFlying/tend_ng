@@ -427,6 +427,8 @@ function MessageRow({
 }
 
 type Standalone = {
+  timeline?: RefObject<HTMLElement | null>;
+  beforeTimelinePosition?: () => void;
   onPromptAccepted?: () => void;
   renderMention?: (query: string, done: () => void) => ReactNode;
 };
@@ -505,6 +507,40 @@ function Composer({
     setDelivery(startMessageSend(key, message, issue, chatId));
   }
 
+  const editor = (
+    <textarea
+      ref={textarea}
+      aria-label={
+        issue
+          ? "发消息给 Issue Owner"
+          : standalone
+            ? "在讨论中发消息"
+            : "发消息给 Tend"
+      }
+      placeholder={
+        issue
+          ? "发消息给 Issue Owner…"
+          : standalone
+            ? "发消息，或输入 @ 附加资料…"
+            : "发消息给 Tend…"
+      }
+      value={text}
+      rows={2}
+      readOnly={sending}
+      onChange={(event) => setText(event.target.value)}
+      onKeyDown={(event) => {
+        if (
+          event.key === "Enter" &&
+          !event.shiftKey &&
+          !event.nativeEvent.isComposing
+        ) {
+          event.preventDefault();
+          event.currentTarget.form?.requestSubmit();
+        }
+      }}
+    />
+  );
+
   return (
     <footer className="dock">
       <div className="lane">
@@ -527,37 +563,18 @@ function Composer({
               </button>
             </div>
           )}
-          <textarea
-            ref={textarea}
-            aria-label={
-              issue
-                ? "发消息给 Issue Owner"
-                : standalone
-                  ? "在讨论中发消息"
-                  : "发消息给 Tend"
-            }
-            placeholder={
-              issue
-                ? "发消息给 Issue Owner…"
-                : standalone
-                  ? "发消息，或输入 @ 附加资料…"
-                  : "发消息给 Tend…"
-            }
-            value={text}
-            rows={2}
-            readOnly={sending}
-            onChange={(event) => setText(event.target.value)}
-            onKeyDown={(event) => {
-              if (
-                event.key === "Enter" &&
-                !event.shiftKey &&
-                !event.nativeEvent.isComposing
-              ) {
-                event.preventDefault();
-                event.currentTarget.form?.requestSubmit();
-              }
-            }}
-          />
+          {standalone ? (
+            <div className="discussion-composer-input">
+              {editor}
+              <div
+                className="discussion-composer-mirror"
+                aria-hidden="true"
+                data-value={`${text}\u200B`}
+              />
+            </div>
+          ) : (
+            editor
+          )}
           {mention &&
             standalone?.renderMention?.(mention[1], () => {
               setText((value) => value.replace(/(^|\s)@[^\s@]*$/, "$1"));
@@ -629,7 +646,9 @@ export function Chat({
     () => savedMessage(chatId, issue)?.reply_to ?? null,
   );
   const textarea = useRef<HTMLTextAreaElement>(null);
-  const timeline = useRef<HTMLElement>(null);
+  const ownTimeline = useRef<HTMLElement>(null);
+  const timeline = standalone?.timeline ?? ownTimeline;
+  const beforeTimelinePosition = standalone?.beforeTimelinePosition;
   const follow = useRef(!detail);
   const [anchor, setAnchor] = useState(messageAnchor);
   const handledAnchor = useRef("");
@@ -717,11 +736,13 @@ export function Chat({
         ) {
           if (parent instanceof HTMLDetailsElement) parent.open = true;
         }
+        beforeTimelinePosition?.();
         target.scrollIntoView({ block: "center" });
         return;
       }
     }
     if (preserve.current) {
+      beforeTimelinePosition?.();
       element.scrollTop =
         preserve.current.top + element.scrollHeight - preserve.current.height;
       preserve.current = null;
@@ -729,9 +750,11 @@ export function Chat({
       follow.current &&
       (!anchor || handledAnchor.current === anchor)
     ) {
+      if (element.scrollHeight - element.clientHeight - element.scrollTop > 1)
+        beforeTimelinePosition?.();
       element.scrollTop = element.scrollHeight;
     }
-  }, [messages, readyForAnchor, anchor]);
+  }, [messages, readyForAnchor, anchor, timeline, beforeTimelinePosition]);
 
   const loadHistory = useCallback(
     async (before: number, target?: string) => {
@@ -784,7 +807,7 @@ export function Chat({
         }
       }
     },
-    [issue, chatId],
+    [issue, chatId, timeline],
   );
 
   useEffect(() => {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import { Chat } from "./Chat";
 import { DiscussionStart } from "./DiscussionStart";
@@ -26,6 +26,7 @@ import type {
 } from "./discussionApi";
 import { HandoffDialog, QuickHandoffControl } from "./DiscussionHandoff";
 import { discussionError, useReferenceSearch } from "./discussionSearch";
+import { useDiscussionPhoneLayout } from "./discussionPhoneLayout";
 import { navigate, trackPageVisit } from "./navigation";
 import "./discussions.css";
 
@@ -206,7 +207,28 @@ function DiscussionView({
   const [savingArchive, setSavingArchive] = useState(false);
   const [picker, setPicker] = useState(false);
   const [handoff, setHandoff] = useState(false);
+  const [more, setMore] = useState(false);
+  const [referencesOpen, setReferencesOpen] = useState(false);
   const [revision, setRevision] = useState(0);
+  const frame = useRef<HTMLDivElement>(null);
+  const bar = useRef<HTMLElement>(null);
+  const timeline = useRef<HTMLElement>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const moreId = useId();
+  const referencesId = useId();
+  const { revealHeader, beforeTimelinePosition } = useDiscussionPhoneLayout(
+    !!meta,
+    frame,
+    bar,
+    timeline,
+  );
+  const focusMobileRename = useRef(false);
+  const titleInputRef = useCallback((input: HTMLInputElement | null) => {
+    if (input && focusMobileRename.current) {
+      focusMobileRename.current = false;
+      input.focus({ preventScroll: true });
+    }
+  }, []);
   const refreshDetail = useCallback(() => setRefresh((value) => value + 1), []);
   const onPromptAccepted = useCallback(() => {
     setRevision((value) => value + 1);
@@ -347,32 +369,79 @@ function DiscussionView({
       </main>
     );
   return (
-    <>
-      <section className="discussion-bar" aria-label="当前讨论">
+    <div className="discussion-view" ref={frame}>
+      <button
+        className="text-button discussion-reveal"
+        type="button"
+        onClick={revealHeader}
+        onFocus={revealHeader}
+      >
+        显示讨论工具栏
+      </button>
+      <section
+        ref={bar}
+        className="discussion-bar"
+        aria-label="当前讨论"
+        data-pinned={
+          more ||
+          (referencesOpen && meta.references.length > 0) ||
+          title !== null ||
+          picker ||
+          handoff ||
+          !!error
+        }
+        onKeyDown={(event) => {
+          if (event.key !== "Escape" || !more) return;
+          event.stopPropagation();
+          setMore(false);
+          setPicker(false);
+          moreButton.current?.focus();
+        }}
+      >
         <div className="lane discussion-bar-inner">
           <div className="discussion-meta">
             <a
-              className="text-button"
+              className="text-button discussion-back"
+              aria-label={meta.archived ? "已归档列表" : "所有讨论"}
               href={discussionIndexLink(meta.archived)}
             >
-              {meta.archived ? "已归档列表" : "所有讨论"}
+              <span>{meta.archived ? "已归档列表" : "所有讨论"}</span>
+              <svg aria-hidden="true" viewBox="0 0 24 24">
+                <path d="m14.5 5-7 7 7 7" />
+              </svg>
             </a>
             {meta.origin && (
-              <a className="text-button" href={meta.origin.href}>
+              <a
+                className="text-button discussion-desktop"
+                href={meta.origin.href}
+              >
                 {meta.origin.label}
               </a>
             )}
-            <span className="discussion-mode">只读讨论</span>
+            <span className="discussion-mode discussion-desktop">只读讨论</span>
             {meta.archived && (
-              <span className="discussion-archive-label">已归档</span>
+              <span className="discussion-archive-label discussion-desktop">
+                已归档
+              </span>
             )}
           </div>
-          {title !== null ? (
+          <div className="discussion-title" data-editing={title !== null}>
+            <h2 title={meta.title}>{meta.title}</h2>
+            <button
+              className="text-button discussion-desktop"
+              type="button"
+              onClick={() => setTitle(meta.title)}
+            >
+              改标题
+            </button>
+          </div>
+          {title !== null && (
             <form
-              className="discussion-title"
+              className="discussion-title discussion-title-edit"
               onSubmit={(event) => void saveTitle(event)}
             >
               <input
+                ref={titleInputRef}
                 aria-label="讨论标题"
                 maxLength={120}
                 value={title}
@@ -393,46 +462,93 @@ function DiscussionView({
                 保存
               </button>
             </form>
-          ) : (
-            <div className="discussion-title">
-              <h2 title={meta.title}>{meta.title}</h2>
-              <button
-                className="text-button"
-                type="button"
-                onClick={() => setTitle(meta.title)}
-              >
-                改标题
-              </button>
-            </div>
           )}
           <div className="discussion-actions">
             <QuickHandoffControl
               chat={chat}
               revision={revision}
-              onPreview={() => setHandoff(true)}
               onSent={refreshDetail}
+              render={({ action, status }) => (
+                <>
+                  {action}
+                  <button
+                    ref={moreButton}
+                    className="text-button discussion-more-toggle discussion-phone"
+                    type="button"
+                    aria-label="更多讨论操作"
+                    aria-expanded={more}
+                    aria-controls={moreId}
+                    onClick={() => {
+                      setMore(!more);
+                      if (more) setPicker(false);
+                    }}
+                  >
+                    <svg aria-hidden="true" viewBox="0 0 24 24">
+                      <circle cx="5" cy="12" r="1.6" />
+                      <circle cx="12" cy="12" r="1.6" />
+                      <circle cx="19" cy="12" r="1.6" />
+                    </svg>
+                  </button>
+                  <div
+                    className="discussion-more-actions"
+                    id={moreId}
+                    data-open={more}
+                  >
+                    <span className="discussion-mode discussion-phone">
+                      只读讨论{meta.archived ? " · 已归档" : ""}
+                    </span>
+                    {meta.origin && (
+                      <a
+                        className="text-button discussion-phone"
+                        href={meta.origin.href}
+                      >
+                        {meta.origin.label}
+                      </a>
+                    )}
+                    <button
+                      className="discussion-secondary discussion-phone"
+                      type="button"
+                      aria-expanded={title !== null}
+                      onClick={() => {
+                        focusMobileRename.current = title === null;
+                        setTitle(title === null ? meta.title : null);
+                      }}
+                    >
+                      改标题
+                    </button>
+                    <button
+                      className="discussion-secondary"
+                      type="button"
+                      onClick={() => setHandoff(true)}
+                    >
+                      预览 / 编辑
+                    </button>
+                    <button
+                      className="discussion-secondary"
+                      type="button"
+                      aria-expanded={picker}
+                      onClick={() => setPicker((value) => !value)}
+                    >
+                      附加资料
+                    </button>
+                    <button
+                      className="discussion-secondary discussion-archive-action"
+                      type="button"
+                      disabled={savingArchive}
+                      onClick={() => void changeArchive(!meta.archived)}
+                    >
+                      {meta.archived ? "恢复讨论" : "归档讨论"}
+                    </button>
+                    {meta.handoffs[0] && (
+                      <a className="text-button" href={meta.handoffs[0].href}>
+                        查看主 Chat 回执 ↗
+                      </a>
+                    )}
+                  </div>
+                  {status}
+                </>
+              )}
             />
-            <button
-              className="discussion-secondary"
-              type="button"
-              aria-expanded={picker}
-              onClick={() => setPicker((value) => !value)}
-            >
-              附加资料
-            </button>
-            <button
-              className="discussion-secondary discussion-archive-action"
-              type="button"
-              disabled={savingArchive}
-              onClick={() => void changeArchive(!meta.archived)}
-            >
-              {meta.archived ? "恢复讨论" : "归档讨论"}
-            </button>
-            {meta.handoffs[0] && (
-              <a className="text-button" href={meta.handoffs[0].href}>
-                查看主 Chat 回执 ↗
-              </a>
-            )}
           </div>
           {!meta.execution_configured && (
             <p role="status" className="discussion-muted">
@@ -445,28 +561,47 @@ function DiscussionView({
             </p>
           )}
           {meta.references.length > 0 && (
-            <ul className="discussion-references" aria-label="已附加资料">
-              {meta.references.map((ref) => (
-                <li key={ref.id}>
-                  {ref.href ? (
-                    <a href={ref.href}>{ref.label}</a>
-                  ) : (
-                    <span>{ref.label}</span>
-                  )}
-                  <small data-readable={ref.status === "available"}>
-                    {referenceStatus[ref.status] ?? ref.status}
-                  </small>
-                  <button
-                    type="button"
-                    className="text-button"
-                    aria-label={`移除 ${ref.label}`}
-                    onClick={() => void remove(ref.id)}
-                  >
-                    ×
-                  </button>
-                </li>
-              ))}
-            </ul>
+            <div
+              className="discussion-reference-fold"
+              data-open={referencesOpen}
+            >
+              <button
+                className="text-button discussion-phone"
+                type="button"
+                aria-expanded={referencesOpen}
+                aria-controls={referencesId}
+                onClick={() => setReferencesOpen((value) => !value)}
+              >
+                <span aria-hidden="true">{referencesOpen ? "▾" : "▸"}</span>
+                引用资料（{meta.references.length}）
+              </button>
+              <ul
+                id={referencesId}
+                className="discussion-references"
+                aria-label="已附加资料"
+              >
+                {meta.references.map((ref) => (
+                  <li key={ref.id}>
+                    {ref.href ? (
+                      <a href={ref.href}>{ref.label}</a>
+                    ) : (
+                      <span>{ref.label}</span>
+                    )}
+                    <small data-readable={ref.status === "available"}>
+                      {referenceStatus[ref.status] ?? ref.status}
+                    </small>
+                    <button
+                      type="button"
+                      className="text-button"
+                      aria-label={`移除 ${ref.label}`}
+                      onClick={() => void remove(ref.id)}
+                    >
+                      ×
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </div>
           )}
           {meta.handoffs.length > 1 && (
             <details className="discussion-handoff-history">
@@ -490,6 +625,8 @@ function DiscussionView({
         onReachable={onReachable}
         standalone={{
           onPromptAccepted,
+          timeline,
+          beforeTimelinePosition,
           renderMention: (query, done) => (
             <ReferencePicker
               query={query}
@@ -509,7 +646,7 @@ function DiscussionView({
           onSent={() => setRefresh((value) => value + 1)}
         />
       )}
-    </>
+    </div>
   );
 }
 

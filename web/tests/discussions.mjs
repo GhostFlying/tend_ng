@@ -299,6 +299,20 @@ try {
     const directory = menu.getByRole("link", { name: "讨论", exact: true });
     const chatNav = menu.getByRole("link", { name: "对话", exact: true });
     const activate = (link) => (name === "mobile" ? link.tap() : link.click());
+    const more = page.getByRole("button", { name: "更多讨论操作" });
+    const openMore = async () => {
+      if (
+        name === "mobile" &&
+        (await more.getAttribute("aria-expanded")) !== "true"
+      )
+        await activate(more);
+    };
+    const openReferences = async () => {
+      if (name !== "mobile") return;
+      const disclosure = page.getByRole("button", { name: /^引用资料/ });
+      if ((await disclosure.getAttribute("aria-expanded")) !== "true")
+        await activate(disclosure);
+    };
     const navCreate = menu.getByRole("button", {
       name: "新建讨论",
       exact: true,
@@ -477,6 +491,7 @@ try {
       );
     }
     await shoot(page, `discussion-${name}-empty`);
+    await openMore();
     await page.getByRole("button", { name: "改标题" }).click();
     const title =
       name === "desktop" ? "演示仓库 · 上手说明" : "手机验证 · 上手说明";
@@ -563,6 +578,7 @@ try {
     await composer.fill("@exam");
     await page.getByRole("button", { name: "example 仓库" }).click();
     const references = page.getByRole("list", { name: "已附加资料" });
+    await openReferences();
     await visible(references.getByRole("link", { name: "example" }));
     assert.equal(await composer.inputValue(), "");
     await composer.fill(`@#${referenceIssue}`);
@@ -572,6 +588,7 @@ try {
     await visible(
       references.getByRole("link", { name: new RegExp(`#${referenceIssue}`) }),
     );
+    await openMore();
     await page.getByRole("button", { name: "附加资料" }).click();
     await page
       .getByRole("textbox", { name: "PR / MR 链接" })
@@ -634,6 +651,7 @@ try {
     if (name === "desktop") await shoot(page, "discussion-desktop-receipt");
     await sent.getByRole("link", { name: "回到原讨论 ↗" }).click();
     await page.waitForURL(discussion);
+    await openMore();
     await visible(page.getByRole("link", { name: "查看主 Chat 回执 ↗" }));
 
     const beforeArchive = cli("read", chat);
@@ -679,6 +697,7 @@ try {
     await page.goBack({ waitUntil: "commit" });
     await page.waitForURL(discussion);
     await assertSameDocument();
+    await openMore();
     await visible(restore.and(page.locator(":enabled")));
     await page.goForward({ waitUntil: "commit" });
     await page.waitForURL(`${base}/discussions`);
@@ -697,9 +716,15 @@ try {
     await shoot(page, `discussion-${name}-archive-list`);
     await archivedLink.click();
     await page.waitForURL(discussion);
+    await openMore();
     await visible(restore);
-    await visible(page.getByText("已归档", { exact: true }));
+    await visible(
+      page.getByText(name === "mobile" ? "只读讨论 · 已归档" : "已归档", {
+        exact: true,
+      }),
+    );
     await visible(main.getByText(open, { exact: true }));
+    await openReferences();
     await visible(references.getByRole("link", { name: "example" }));
     await visible(page.getByRole("link", { name: "查看主 Chat 回执 ↗" }));
     if (name === "desktop")
@@ -772,6 +797,7 @@ try {
     await shoot(page, `discussion-${name}-issue-title`);
     await page.goBack({ waitUntil: "commit" });
     await page.waitForURL(discussion);
+    await openReferences();
     await visible(issueLink);
     if (name === "desktop") {
       await activate(directory);
@@ -835,6 +861,7 @@ try {
     }
     await activate(directory);
     await activate(currentList.getByRole("link", { name: /主 Chat 引用示例/ }));
+    await openMore();
     const origin = await visible(
       page
         .getByRole("region", { name: "当前讨论" })
