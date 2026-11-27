@@ -151,13 +151,13 @@ fn model_evidence_enriches_and_retracts_without_quarantining_valid_counts() -> R
     );
     assert_eq!(unresolved["models"][0]["model"], Value::Null);
     let projected = change(1, Some(sol.clone()))?;
-    assert_eq!(projected["models"][0]["model"], Value::Null);
-    assert_eq!(projected["models"][0]["requested_models"]["gpt-6.2-sol"], 1);
+    assert_eq!(projected["models"][0]["model"], "gpt-6.2-sol");
+    assert_eq!(projected["models"][0]["selected_model_requests"], 1);
     assert_eq!(
         projected["models"][0]["uncached_input_tokens"]["tokens"],
         "70"
     );
-    assert_eq!(projected["estimate"]["usd"], Value::Null);
+    assert_eq!(projected["estimate"]["usd"], "0.000177");
     assert_eq!(projected, change(2, None)?);
     let inferred = change(3, Some(TokenModel::TurnContext("conflict".into())))?;
     assert_eq!(inferred["models"][0]["model"], Value::Null);
@@ -172,6 +172,67 @@ fn model_evidence_enriches_and_retracts_without_quarantining_valid_counts() -> R
     assert_eq!(contradicted, change(6, Some(sol))?);
     store.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
     assert_eq!(contradicted, read(&store)?);
+    Ok(())
+}
+
+#[test]
+fn upgrades_existing_selected_models_and_merges_exact_catalog_aliases() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let path = fixture.file();
+    let mut store = Store::initialize(&path)?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    issue(&store.db, "child", Some("root"))?;
+    assignment(&store.db, "job", "child", "runner")?;
+    let run = native_run("test-run", "job");
+    let mut records = [
+        observation(&run, 1, None),
+        observation(&run, 2, None),
+        observation(&run, 3, None),
+    ];
+    records[0].model = Some(TokenModel::TurnContext("gpt-6.2-sol".into()));
+    records[0].last = TokenCounts::from_fields([101, 100, 20, 10, 1, 0].map(Some));
+    records[1].model = Some(TokenModel::Response("openai/gpt-6.2-sol-20261117".into()));
+    records[1].last = TokenCounts::from_fields([272002, 272001, 20, 10, 1, 0].map(Some));
+    records[2].model = Some(TokenModel::TurnContext("gpt-6.2-sol-unlisted".into()));
+    records[2].last = records[0].last;
+    sync(&mut store, "runner", std::slice::from_ref(&run), &records)?;
+    let expected = view(&store, "root")?["subtree"].clone();
+    assert_eq!(expected["models"].as_array().unwrap().len(), 2);
+    assert_eq!(expected["models"][0]["model"], "gpt-6.2-sol");
+    assert_eq!(expected["models"][0]["selected_model_requests"], 1);
+    assert_eq!(expected["models"][0]["response_model_requests"], 1);
+    assert_eq!(expected["models"][0]["estimate"]["usd"], "1.08813");
+    assert_eq!(expected["models"][1]["estimate_gap"], "no_exact_price");
+    assert!(expected["models"][1]["estimate"]["usd"].is_null());
+    assert_eq!(
+        expected["estimate"],
+        json!({"usd":"1.08813", "partial":true})
+    );
+
+    store.db.execute_batch(
+        "UPDATE token_run_tallies SET tally=json_set(json_remove(tally,'$.model_usage.selected'),
+           '$.model_usage.requested', json('{\"gpt-6.2-sol\":1,\"gpt-6.2-sol-unlisted\":1}'));
+         UPDATE token_issue_rollups SET summary=json_remove(summary,'$.tally.model_usage.selected')
+           WHERE json_type(summary,'$.tally.model_usage.selected') IS NOT NULL;
+         UPDATE token_global_rollup SET summary=json_remove(summary,'$.tally.model_usage.selected');
+         PRAGMA user_version=48;",
+    )?;
+    drop(store);
+    let mut upgraded = Store::initialize(&path)?;
+    assert_eq!(view(&upgraded, "root")?["subtree"], expected);
+    assert_eq!(view(&upgraded, "child")?["direct"], expected);
+    assert_eq!(
+        to_value(upgraded.token_overview(None, None)?)?["total"],
+        expected
+    );
+    upgraded.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
+    assert_eq!(view(&upgraded, "root")?["subtree"], expected);
+    drop(upgraded);
+    assert_eq!(
+        view(&Store::initialize(&path)?, "root")?["subtree"],
+        expected
+    );
     Ok(())
 }
 
@@ -618,6 +679,237 @@ fn deliver(store: &mut Store, reader: &str, page: &protocol::TokenBackfillPage) 
     backfill::receive(&tx, reader, page)?;
     tx.commit()?;
     Ok(())
+}
+
+#[test]
+fn new_native_backfill_repairs_legacy_placeholders_but_keeps_real_conflicts() -> Result<()> {
+    use protocol::{TokenBackfillContent, TokenConflictPolicy::Quarantine, TokenUsageScope::All};
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "job", "root", "runner")?;
+    let run = native_run("run", "job");
+    let thread = run.thread_id.as_deref().unwrap();
+    let turn = run.turn_id.as_deref().unwrap();
+    let counts = TokenCounts::from_fields([Some(863), Some(831), Some(180), None, Some(32), None]);
+    let native = |id: i64, model: Value| {
+        json!({"type":"token_usage_record","payload":{
+            "thread_id":thread,"turn_id":turn,"response_id":format!("resp-{id}"),
+            "usage":counts,"thread_token_usage":{"total_tokens":863*id},"response_model":model
+        }})
+    };
+    let path = fixture.file().with_extension("jsonl");
+    fs::write(
+        &path,
+        [
+            json!({"type":"turn_context","payload":{"turn_id":turn,"model":"gpt-6.2-sol"}}),
+            json!({"type":"event_msg","payload":{"type":"model_reroute","to_model":"unbound"}}),
+            native(1, Value::Null),
+            native(2, json!("invalid value")),
+            native(3, json!("gpt-6.2-astra")),
+            native(3, json!("gpt-6.2-sol")),
+            // No current selection is available for the malformed copies.
+            json!({"type":"turn_context","payload":{"turn_id":"unrelated","model":"unrelated"}}),
+            native(4, json!("invalid value")),
+            native(4, json!("gpt-6.2-astra")),
+            native(5, json!("gpt-6.2-astra")),
+            native(5, json!("invalid value")),
+            native(6, json!("gpt-6.2-sol")),
+            native(6, json!("openai/gpt-6.2-sol-20261117")),
+        ]
+        .iter()
+        .map(|line| format!("{line}\n"))
+        .collect::<String>(),
+    )?;
+    let legacy =
+        codex_app::usage::native_snapshot_legacy(fs::File::open(&path)?, thread, turn, false)
+            .unwrap();
+    let corrected =
+        codex_app::usage::native_snapshot(fs::File::open(&path)?, thread, turn, false).unwrap();
+    let mut live = observation(&run, 1, None);
+    live.last = counts;
+    live.model = Some(TokenModel::Ambiguous);
+    sync(&mut store, "runner", std::slice::from_ref(&run), &[live])?;
+    for (job, native) in [
+        ("legacy", &legacy),
+        ("rechecked", &corrected),
+        ("legacy-replay", &legacy),
+    ] {
+        backfill_job(&mut store, job, All, Quarantine)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        let mut reply = page(work.item, 0, &[], true);
+        let TokenBackfillContent::Records { records, .. } = &mut reply.content else {
+            unreachable!()
+        };
+        records.clone_from(native);
+        deliver(&mut store, "runner", &reply)?;
+        assert_eq!(
+            store.token_backfill_status(job, 0)?.unwrap()["counts"]["scanned"],
+            1
+        );
+        let direct = &view(&store, "root")?["direct"];
+        assert_eq!(direct["reported_requests"], 6);
+        if job == "legacy" {
+            assert!(direct["estimate"]["usd"].is_null());
+        } else {
+            assert_eq!(direct["models"][0]["model"], "gpt-6.2-sol");
+            assert_eq!(direct["models"][0]["selected_model_requests"], 2);
+            assert_eq!(direct["models"][0]["response_model_requests"], 1);
+            assert_eq!(direct["models"][1]["model"], "gpt-6.2-astra");
+            assert_eq!(direct["models"][1]["response_model_requests"], 2);
+            assert_eq!(direct["models"][2]["model"], Value::Null);
+            assert_eq!(direct["estimate"], json!({"usd":"0.003718","partial":true}));
+        }
+    }
+    let before = view(&store, "root")?;
+    store.rebuild_token_usage(&All)?;
+    assert_eq!(view(&store, "root")?, before);
+    Ok(())
+}
+
+#[test]
+fn runner_replay_with_an_exact_catalog_alias_keeps_the_request_price() -> Result<()> {
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "job", "root", "runner")?;
+    let run = native_run("run", "job");
+    let mut live = observation(&run, 1, None);
+    live.last = TokenCounts::from_fields([Some(863), Some(831), Some(180), None, Some(32), None]);
+    live.model = Some(TokenModel::RequestSelection("gpt-6.2-sol".into()));
+    sync(&mut store, "runner", &[run], std::slice::from_ref(&live))?;
+    let before = view(&store, "root")?;
+    live.event_id = "alias-proof".into();
+    live.model = Some(TokenModel::RequestSelection(
+        "openai/gpt-6.2-sol-20261117".into(),
+    ));
+    sync(&mut store, "runner", &[], std::slice::from_ref(&live))?;
+    assert_eq!(view(&store, "root")?, before);
+    assert_eq!(before["direct"]["estimate"]["usd"], "0.000338");
+    live.event_id = "different-model".into();
+    live.model = Some(TokenModel::RequestSelection("gpt-6.2-astra".into()));
+    sync(&mut store, "runner", &[], &[live])?;
+    let conflict = view(&store, "root")?;
+    assert_eq!(conflict["direct"]["reported_requests"], 1);
+    assert_eq!(conflict["direct"]["models"][0]["model"], Value::Null);
+    assert_eq!(conflict["direct"]["estimate"]["usd"], Value::Null);
+    Ok(())
+}
+
+#[test]
+fn native_recheck_does_not_hide_a_conflicting_live_actual_model() -> Result<()> {
+    use protocol::{TokenBackfillContent, TokenConflictPolicy::Quarantine, TokenUsageScope::All};
+    // The legacy placeholder, exact live response, and modern native scan
+    // are independently delivered and may arrive in any order.
+    for order in [
+        [0, 1, 2],
+        [0, 2, 1],
+        [1, 0, 2],
+        [1, 2, 0],
+        [2, 0, 1],
+        [2, 1, 0],
+    ] {
+        let fixture = Fixture::new()?;
+        let mut store = Store::initialize(&fixture.file())?;
+        base(&store.db)?;
+        issue(&store.db, "root", None)?;
+        assignment(&store.db, "job", "root", "runner")?;
+        let run = native_run("run", "job");
+        let thread = run.thread_id.as_deref().unwrap();
+        let turn = run.turn_id.as_deref().unwrap();
+        let mut marker = observation(&run, 1, None);
+        marker.last =
+            TokenCounts::from_fields([Some(863), Some(831), Some(180), None, Some(32), None]);
+        marker.model = Some(TokenModel::LegacyResponseConflict);
+        let mut live = marker.clone();
+        live.event_id = "explicit-live".into();
+        live.model = Some(TokenModel::Response("gpt-6.2-sol".into()));
+        let path = fixture.file().with_extension("jsonl");
+        fs::write(&path, ["invalid model", "gpt-6.2-astra"].into_iter().map(|model| {
+            format!("{}\n", json!({"type":"token_usage_record","payload":{
+                "thread_id":thread,"turn_id":turn,"response_id":marker.response_id,
+                "usage":marker.last,"thread_token_usage":{"total_tokens":863},"response_model":model
+            }}))
+        }).collect::<String>())?;
+        let scanned =
+            codex_app::usage::native_snapshot(fs::File::open(&path)?, thread, turn, false).unwrap();
+        sync(&mut store, "runner", &[run], &[])?;
+        for step in order {
+            match step {
+                0 | 1 => {
+                    let evidence = if step == 0 { &marker } else { &live };
+                    sync(&mut store, "runner", &[], std::slice::from_ref(evidence))?;
+                }
+                2 => {
+                    backfill_job(&mut store, "modern", All, Quarantine)?;
+                    let work = backfill::pending(&store.db, "runner")?.unwrap();
+                    let mut reply = page(work.item, 0, &[], true);
+                    let TokenBackfillContent::Records { records, .. } = &mut reply.content else {
+                        unreachable!()
+                    };
+                    records.clone_from(&scanned);
+                    deliver(&mut store, "runner", &reply)?;
+                }
+                _ => unreachable!(),
+            }
+        }
+        let before = view(&store, "root")?;
+        assert_eq!(before["direct"]["reported_requests"], 1, "{order:?}");
+        assert_eq!(
+            before["direct"]["models"][0]["model"],
+            Value::Null,
+            "{order:?}"
+        );
+        assert_eq!(
+            before["direct"]["estimate"]["usd"],
+            Value::Null,
+            "{order:?}"
+        );
+        assert!(store.db.query_row(
+            "SELECT json_extract(last,'$.model.observed_conflict') FROM token_requests",
+            [],
+            |r| r.get::<_, bool>(0)
+        )?);
+        live.event_id = "explicit-live-replay".into();
+        sync(&mut store, "runner", &[], &[live])?;
+        store.rebuild_token_usage(&All)?;
+        assert_eq!(view(&store, "root")?, before);
+        drop(store);
+        assert_eq!(view(&Store::initialize(&fixture.file())?, "root")?, before);
+    }
+    Ok(())
+}
+
+#[test]
+fn compatible_agent_repair_can_release_a_held_issue_model_without_adding_usage() {
+    let actual = TokenModel::Response("gpt-6.2-sol".into());
+    let issue = RequestMeter {
+        counts: TokenCounts {
+            total_tokens: Some(863),
+            ..Default::default()
+        },
+        model: TokenModel::merge(
+            Some(TokenModel::LegacyResponseConflict),
+            Some(actual.clone()),
+        ),
+        provider_counts: false,
+    };
+    let agent = RequestMeter {
+        counts: TokenCounts {
+            input_tokens: Some(831),
+            ..Default::default()
+        },
+        model: Some(TokenModel::Unresolved.rechecked(protocol::ModelRepair::native(false, true))),
+        provider_counts: false,
+    };
+    let projected = model_with_agent(&issue, Some(&agent));
+    assert_eq!(
+        projected.model.as_ref().map(TokenModel::basis),
+        Some(&actual)
+    );
+    assert_eq!(projected.counts, issue.counts);
 }
 
 #[test]

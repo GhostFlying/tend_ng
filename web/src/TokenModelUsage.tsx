@@ -35,22 +35,33 @@ export function EstimateValue({ estimate }: { estimate?: TokenEstimate }) {
   );
 }
 
-function ModelEvidence({ row }: { row: TokenModelRow }) {
-  return (
-    <span className="detail-muted model-evidence">
-      {format.format(row.reported_requests)} 条请求
-      {row.response_model_requests > 0 &&
-        ` · 响应确认 ${format.format(row.response_model_requests)} 条`}
-      {row.price?.unsupported === "utc_schedule" && " · 未估算 UTC 价档"}
-      {row.price?.unsupported === "other_conditions" && " · 未支持价格条件"}
-    </span>
-  );
+function modelGap(row: TokenModelRow) {
+  if (row.model === null) return "缺少可归属的模型证据";
+  if (!row.price) return "无匹配的 OpenRouter 公示价";
+  if (row.price.unsupported === "utc_schedule") return "不支持 UTC 时段价";
+  if (row.price.unsupported === "other_conditions") return "不支持该价格条件";
+  if (row.estimate.partial || row.estimate_gap === "incomplete_components")
+    return "部分计量或费率缺失";
 }
 
 function ModelDetails({ row }: { row: TokenModelRow }) {
   const price = row.price;
+  const explicit = row.request_level_selected_model_requests ?? 0;
+  const turn = (row.selected_model_requests ?? 0) - explicit;
+  const actual = row.response_model_requests;
+  const missingFresh = price?.tiers.some(
+    (tier) => tier.components[0].reported_requests < tier.requests,
+  );
   return (
     <div className="model-detail">
+      {row.model !== null && (
+        <p className="detail-muted">
+          模型依据
+          {explicit > 0 && ` · 原生请求所选 ${format.format(explicit)} 条`}
+          {turn > 0 && ` · 原生回合所选 ${format.format(turn)} 条`}
+          {actual > 0 && ` · 逐响应确认 ${format.format(actual)} 条`}
+        </p>
+      )}
       <dl className="model-raw">
         {rawFields.map(([field, label]) => (
           <div key={field}>
@@ -64,16 +75,6 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
           </div>
         ))}
       </dl>
-      {Object.keys(row.requested_models).length > 0 && (
-        <p className="detail-muted model-requested">
-          原生回合仅记录请求模型，以下线索不作为实际型号或估价依据。
-          {Object.entries(row.requested_models).map(([model, requests]) => (
-            <span key={model}>
-              {model} · {format.format(requests)} 条
-            </span>
-          ))}
-        </p>
-      )}
       {!price ? (
         <p className="detail-muted">
           {row.model !== null
@@ -99,6 +100,11 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
               {price.unsupported === "utc_schedule"
                 ? "公示价按 UTC 时段变化。本版不选择时段费率，也不使用回填入库时间。"
                 : "快照包含未支持的覆盖条件，无法确认适用费率。"}
+            </p>
+          )}
+          {missingFresh && (
+            <p className="detail-muted">
+              缺少完整输入或缓存读写计量的请求，无法确定其非缓存输入费用。
             </p>
           )}
           {price.tiers.map((tier) => (
@@ -155,6 +161,7 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
 
 function ModelRow({ row }: { row: TokenModelRow }) {
   const [open, setOpen] = useState(false);
+  const gap = row.estimate.usd === null ? modelGap(row) : undefined;
   return (
     <details
       className="model-row"
@@ -163,7 +170,10 @@ function ModelRow({ row }: { row: TokenModelRow }) {
       <summary>
         <span className="model-name">
           <strong>{row.model ?? "模型未知"}</strong>
-          <ModelEvidence row={row} />
+          <span className="detail-muted model-evidence">
+            {format.format(row.reported_requests)} 条请求
+            {gap && ` · ${gap}`}
+          </span>
         </span>
         <span className="model-row-tokens">
           <bdi>{tokens(row.total_tokens)}</bdi> Token
@@ -215,7 +225,9 @@ export function TokenModelUsage({
       <h4>
         <span>{label}</span>
         <span className="model-usage-cost">
-          <EstimateValue estimate={usage.estimate} />
+          {usage.reported_requests > 0 && (
+            <EstimateValue estimate={usage.estimate} />
+          )}
         </span>
       </h4>
       {!compact && (
@@ -228,8 +240,9 @@ export function TokenModelUsage({
           >
             OpenRouter 公示标准价
           </a>{" "}
-          估算已上报的
-          Token，不是实际账单。仅估算响应确认且费率可确定的模型。非缓存输入扣除缓存读写，推理已含于输出。不计快速或批量档、工具费、平台费用及折扣。
+          对已上报请求的 Token
+          估算，不是实际账单。按执行时所选模型，能确认具体请求的实际型号时用该型号。
+          部分估算只计可确定的用量和费率，不含未采集的用量、工具费、平台费用及折扣。
         </p>
       )}
       {(usage.models?.length ?? 0) === 0 ? (

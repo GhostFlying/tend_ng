@@ -124,6 +124,16 @@ fn write(db: &Connection, source: &str, stats: &Stats) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn migrate_selections(
+    db: &Connection,
+    source: &str,
+    extra: &super::models::ModelProjection,
+) -> Result<()> {
+    let mut stats = read(db, source)?;
+    stats.summary.tally.model_usage.merge(extra, 1);
+    write(db, source, &stats)
+}
+
 impl Store {
     pub(crate) fn start_feishu_metering(
         &self,
@@ -326,6 +336,24 @@ fn issue_has_key(db: &Connection, thread: &str, turn: &str, response: &str) -> R
     )?.query_row(params![thread, turn, response], |r| r.get(0))?)
 }
 
+pub(super) fn agent_meter(
+    db: &Connection,
+    key: super::RequestKey<'_>,
+) -> Result<Option<RequestMeter>> {
+    let meter: Option<String> = db
+        .prepare_cached(
+            "SELECT meter FROM token_agent_requests
+         WHERE thread=?1 AND turn=?2 AND response=?3 AND conflict IS NULL",
+        )?
+        .query_row(key, |row| row.get(0))
+        .optional()?;
+    meter
+        .as_deref()
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(Into::into)
+}
+
 fn count(stats: &mut Stats, meter: &RequestMeter, conflict: bool, shadowed: bool, sign: i64) {
     if shadowed {
         stats.shared_issue_responses += sign;
@@ -377,6 +405,7 @@ fn persist(
     let mut stats = read(db, &source)?;
     let shadowed = issue_has_key(db, thread, turn, response)?;
     let mut conflict = None;
+    let mut previous_agent = None;
     let meter = if let Some((old_raw, old_conflict, old_shadowed)) = previous {
         use protocol::TokenConflictPolicy::{PreferNative, PreferServer};
         let old: RequestMeter = serde_json::from_str(&old_raw)?;
@@ -397,6 +426,9 @@ fn persist(
             return Ok(disagreement.is_some());
         }
         count(&mut stats, &old, old_had_conflict, old_shadowed, -1);
+        if !old_had_conflict {
+            previous_agent = Some(old);
+        }
         conflict = disagreement;
         next
     } else {
@@ -426,6 +458,14 @@ fn persist(
         stats.summary.legacy_unobserved -= i64::from(legacy);
     }
     write(db, &source, &stats)?;
+    if shadowed {
+        super::agent_model_changed(
+            db,
+            (thread, turn, response),
+            previous_agent.as_ref(),
+            conflict.is_none().then_some(&meter),
+        )?;
+    }
     Ok(conflict.is_some())
 }
 
@@ -656,6 +696,177 @@ mod tests {
         assert_eq!(feishu["responses_without_usage"], 1);
         assert_eq!(feishu["conflicts"], 1);
         assert_eq!(feishu["usage"]["estimate"]["usd"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn selection_upgrade_does_not_readd_shadowed_or_conflicting_server_requests() -> Result<()> {
+        let file = Fixture::new()?;
+        let mut store = Store::initialize(&file.file())?;
+        base(&store.db)?;
+        issue(&store.db, "issue", None)?;
+        assignment(&store.db, "task", "issue", "runner")?;
+        let run = native_run("run", "task");
+        let thread = run.thread_id.as_deref().unwrap();
+        let turn = run.turn_id.as_deref().unwrap();
+        let mut copy = observation(&run, 0, Some(11));
+        copy.last.input_tokens = Some(8); // The shadowed Server meter cannot supply its model.
+        attempt(&store, "a", Source::Router, thread, turn)?;
+        for (id, total) in [
+            ("unique", 21),
+            ("conflict", 22),
+            ("conflict", 23),
+            (&copy.response_id, 11),
+        ] {
+            let mut response = response(id, Some(total));
+            response.meter.model = Some(TokenModel::TurnContext("gpt-6.2-sol".into()));
+            response.meter.counts.input_tokens = Some(9);
+            response.meter.counts.output_tokens = Some(2);
+            store.record_agent_response("a", thread, turn, response);
+        }
+        sync(&mut store, "runner", std::slice::from_ref(&run), &[copy])?;
+        let expected = root_page(&store)?;
+        let router = row(&expected, "router");
+        assert_eq!(router["shared_issue_responses"], 1);
+        assert_eq!(router["conflicts"], 1);
+        assert_eq!(router["usage"]["models"][0]["selected_model_requests"], 1);
+        assert_eq!(router["usage"]["estimate"]["usd"], "0.00002");
+        store.db.execute_batch(
+            "UPDATE token_agent_rollups SET stats=json_remove(stats,'$.summary.tally.model_usage.selected')
+             WHERE source='router';
+             PRAGMA user_version=48;",
+        )?;
+        drop(store);
+        assert_eq!(root_page(&Store::initialize(&file.file())?)?, expected);
+        Ok(())
+    }
+
+    #[test]
+    fn shared_request_uses_compatible_model_in_both_arrival_orders_and_rebuild() -> Result<()> {
+        for agent_first in [true, false] {
+            let file = Fixture::new()?;
+            let mut store = Store::initialize(&file.file())?;
+            base(&store.db)?;
+            issue(&store.db, "root", None)?;
+            issue(&store.db, "issue", Some("root"))?;
+            assignment(&store.db, "task", "issue", "runner")?;
+            let run = native_run("run", "task");
+            let thread = run.thread_id.as_deref().unwrap();
+            let turn = run.turn_id.as_deref().unwrap();
+            let mut selected = observation(&run, 0, None);
+            selected.last =
+                TokenCounts::from_fields([Some(863), Some(831), Some(180), None, Some(32), None]);
+            selected.model = Some(TokenModel::TurnContext("gpt-6.2-sol".into()));
+            let observed = |total| Response {
+                id: selected.response_id.clone(),
+                meter: RequestMeter {
+                    counts: TokenCounts {
+                        total_tokens: Some(total),
+                        ..selected.last
+                    },
+                    model: Some(TokenModel::Response("gpt-6.2-astra".into())),
+                    provider_counts: false,
+                },
+            };
+            attempt(&store, "a", Source::Router, thread, turn)?;
+            if agent_first {
+                store.record_agent_response("a", thread, turn, observed(863));
+            }
+            sync(
+                &mut store,
+                "runner",
+                std::slice::from_ref(&run),
+                std::slice::from_ref(&selected),
+            )?;
+            if !agent_first {
+                assert_eq!(root_page(&store)?["total"]["estimate"]["usd"], "0.000338");
+                store
+                    .db
+                    .execute("UPDATE token_rebuild_state SET collecting=1", [])?;
+                store.record_agent_response("a", thread, turn, observed(863));
+                assert_eq!(
+                    store.db.query_row(
+                        "SELECT count(*) FROM token_rebuild_dirty WHERE run_id='run'",
+                        [],
+                        |r| r.get::<_, i64>(0)
+                    )?,
+                    1
+                );
+            }
+            let page = root_page(&store)?;
+            assert_eq!(row(&page, "router")["shared_issue_responses"], 1);
+            assert_eq!(row(&page, "router")["usage"]["reported_requests"], 0);
+            assert_eq!(page["total"]["reported_requests"], 1);
+            assert_eq!(page["total"]["models"][0]["model"], "gpt-6.2-astra");
+            assert_eq!(page["total"]["estimate"]["usd"], "0.001352");
+            assert_eq!(page["issues"][0]["subtree"], page["total"]);
+            assert_eq!(
+                store.db.query_row(
+                    "SELECT json_extract(last,'$.model.id') FROM token_requests",
+                    [],
+                    |r| r.get::<_, String>(0)
+                )?,
+                "gpt-6.2-sol"
+            );
+            store.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
+            assert_eq!(root_page(&store)?, page);
+            if agent_first {
+                // Schema 48 recorded the Issue's base selection as a count,
+                // without per-model quantities or borrowed response evidence.
+                let old = "{\"confirmed\":{},\"requested\":{\"gpt-6.2-sol\":1},\"fresh\":{\"known\":0,\"zero\":0,\"units\":0}}";
+                store.db.execute(
+                    "UPDATE token_run_tallies SET tally=json_set(tally,'$.model_usage',json(?1))",
+                    [old],
+                )?;
+                store.db.execute("UPDATE token_issue_rollups SET summary=json_set(summary,'$.tally.model_usage',json(?1)) WHERE json_extract(summary,'$.tally.valid_records')>0", [old])?;
+                store.db.execute("UPDATE token_global_rollup SET summary=json_set(summary,'$.tally.model_usage',json(?1))", [old])?;
+                store.db.pragma_update(None, "user_version", 48)?;
+                drop(store);
+                store = Store::initialize(&file.file())?;
+                assert_eq!(root_page(&store)?, page);
+            }
+            store.record_agent_response("a", thread, turn, observed(900));
+            let after = root_page(&store)?;
+            assert_eq!(after["total"]["models"][0]["model"], "gpt-6.2-sol");
+            assert_eq!(after["total"]["estimate"]["usd"], "0.000338");
+            assert_eq!(after["total"]["reported_requests"], 1);
+            store.rebuild_token_usage(&protocol::TokenUsageScope::Issue("root".into()))?;
+            assert_eq!(root_page(&store)?, after);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn native_server_rescan_replaces_only_a_reproduced_legacy_placeholder() -> Result<()> {
+        let file = Fixture::new()?;
+        let store = Store::initialize(&file.file())?;
+        attempt(&store, "a", Source::Router, "thread", "turn")?;
+        let rescan = |model| {
+            let counts =
+                TokenCounts::from_fields([Some(863), Some(831), Some(180), None, Some(32), None]);
+            let meter = RequestMeter {
+                counts,
+                model: Some(model),
+                provider_counts: false,
+            };
+            persist(
+                &store.db,
+                "a",
+                "thread",
+                "turn",
+                "response",
+                meter,
+                Some(protocol::TokenConflictPolicy::Quarantine),
+            )?;
+            root_page(&store)
+        };
+        assert!(rescan(TokenModel::Ambiguous)?["total"]["estimate"]["usd"].is_null());
+        let corrected = TokenModel::TurnContext("gpt-6.2-sol".into())
+            .rechecked(protocol::ModelRepair::native(true, false));
+        let page = rescan(corrected)?;
+        assert_eq!(page["total"]["estimate"]["usd"], "0.000338");
+        assert_eq!(rescan(TokenModel::Ambiguous)?, page);
+        assert!(rescan(TokenModel::TurnConflict)?["total"]["estimate"]["usd"].is_null());
         Ok(())
     }
 }

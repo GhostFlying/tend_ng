@@ -169,11 +169,7 @@ try {
     );
     assert((await meteredRow.textContent()).includes("已观测全部 Run"));
     const overview = page.locator(".usage-overview .model-usage");
-    await overview.getByText("$0.1351816", { exact: true }).waitFor();
-    const unknown = overview
-      .locator(".model-row > summary")
-      .filter({ hasText: "模型未知" });
-    await unknown.getByText("费用未知", { exact: true }).waitFor();
+    await overview.getByText("$0.1353496", { exact: true }).waitFor();
     const astra = overview
       .locator(".model-row > summary")
       .filter({ hasText: "gpt-6.2-astra" });
@@ -217,11 +213,9 @@ try {
       .locator(".model-line-field")
       .filter({ hasText: "缓存写入" });
     assert.equal(await flashWrite.locator("bdi").textContent(), "0");
-    await unknown.click();
-    await overview
-      .getByText("原生回合仅记录请求模型", { exact: false })
-      .waitFor();
-    await unknown.click();
+    await flash.click();
+    await overview.getByText("原生回合所选 1 条", { exact: false }).waitFor();
+    await flash.click();
     await astra.click();
     const priceLink = overview.getByRole("link", {
       name: "openai/gpt-6.2-astra",

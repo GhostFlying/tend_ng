@@ -35,7 +35,7 @@
 }
 .model-row > summary {
   display: grid;
-  grid-template-columns: minmax(0, 1.7fr) minmax(0, 0.9fr) minmax(0, 0.9fr);
+  grid-template-columns: minmax(0, 1.45fr) minmax(0, 0.85fr) minmax(0, 1.2fr);
   align-items: center;
   gap: 4px 16px;
   min-height: 46px;
@@ -70,9 +70,11 @@
   text-align: end;
 }
 .model-partial {
+  display: inline-block;
   margin-inline-start: 5px;
   font-size: 11px;
   color: var(--label);
+  white-space: nowrap;
 }
 .model-line-fields {
   grid-column: 1 / -1;
@@ -91,9 +93,6 @@
 }
 .model-line-field small {
   font-size: inherit;
-}
-.model-requested span {
-  display: block;
 }
 .model-detail {
   padding: 8px 10px 12px;

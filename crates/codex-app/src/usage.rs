@@ -4,7 +4,8 @@
 //! the wire values with exact per-response evidence from this turn's append
 //! segment. Never substitute counts from the file for missing wire fields.
 use protocol::{
-    RequestMeter, TokenCounts, TokenModel, TokenSourceGap, TokenSourceGap::SourceUnreadable,
+    ModelRepair, RequestMeter, TokenCounts, TokenModel, TokenSourceGap,
+    TokenSourceGap::SourceUnreadable,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -61,11 +62,7 @@ impl Response {
         } else {
             counts.without_unproven_optional_zeros()
         };
-        let model = params["responseModel"]
-            .as_str()
-            .filter(|id| TokenModel::valid_id(id))
-            .map(|id| TokenModel::Response(id.to_owned()))
-            .unwrap_or(TokenModel::Unresolved);
+        let model = request_model(&params["responseModel"], &params["requestedModel"]);
         Some(Self {
             id: id.to_owned(),
             meter: RequestMeter {
@@ -295,6 +292,8 @@ struct NativeRecord {
     thread_token_usage: Cursor,
     #[serde(default)]
     response_model: Value,
+    #[serde(default)]
+    requested_model: Value,
     #[serde(skip)]
     model: Option<TokenModel>,
 }
@@ -315,59 +314,93 @@ impl NativeRecord {
     }
 }
 
-/// Historical Codex rollouts normally contain only the same-turn request
-/// context. It is not an assertion about the provider's resolved response.
+fn model_id(v: &Value) -> Option<String> {
+    v.as_str()
+        .filter(|id| TokenModel::valid_id(id))
+        .map(str::to_owned)
+}
+
+fn request_model(actual: &Value, selected: &Value) -> TokenModel {
+    if let Some(id) = model_id(actual) {
+        TokenModel::Response(id)
+    } else if let Some(id) = model_id(selected) {
+        TokenModel::RequestSelection(id)
+    } else {
+        TokenModel::Unresolved
+    }
+}
+
+/// The selected model is sufficient for attribution. Unkeyed reroute
+/// notifications may refer to another attempt, so cannot correct it.
 #[derive(Default)]
 struct TurnModel {
     current: bool,
     model: Option<TokenModel>,
-    rerouted: bool,
+    legacy_rerouted: bool,
 }
 
 impl TurnModel {
-    fn observe(&mut self, kind: &str, payload: &Value, turn: &str) {
-        match kind {
-            "turn_context" => {
-                self.current = payload["turn_id"].as_str() == Some(turn);
-                if self.current {
-                    let next = payload["model"]
-                        .as_str()
-                        .filter(|id| TokenModel::valid_id(id))
-                        .map_or(TokenModel::Ambiguous, |id| {
-                            TokenModel::TurnContext(id.to_owned())
-                        });
-                    self.model = TokenModel::merge(self.model.take(), Some(next));
-                }
+    fn observe(&mut self, kind: &str, payload: &Value, turn: &str, legacy: bool) {
+        if kind == "turn_context" {
+            self.current = payload["turn_id"].as_str() == Some(turn);
+            let selected = model_id(&payload["model"]).map(TokenModel::TurnContext);
+            if !legacy {
+                self.model = selected.filter(|_| self.current).map(|current| {
+                    // Preserve proof of equivalent spellings in successive
+                    // contexts. A genuine change still selects the latest.
+                    TokenModel::merge(self.model.clone(), Some(current.clone()))
+                        .filter(|model| matches!(model.basis(), TokenModel::TurnContext(_)))
+                        .unwrap_or(current)
+                });
+            } else if self.current {
+                self.model = TokenModel::merge_legacy(
+                    self.model.take(),
+                    Some(selected.unwrap_or(TokenModel::Ambiguous)),
+                );
             }
-            "event_msg" if payload["type"] == "model_reroute" => {
-                if payload["turn_id"]
-                    .as_str()
-                    .map_or(self.current, |id| id == turn)
-                {
-                    self.rerouted = true;
-                }
-            }
-            _ => {}
+        } else if kind == "event_msg"
+            && payload["type"] == "model_reroute"
+            && payload["turn_id"]
+                .as_str()
+                .map_or(self.current, |id| id == turn)
+        {
+            self.legacy_rerouted = true;
         }
     }
 
-    fn for_response(&self, response_model: &Value) -> TokenModel {
-        if let Some(id) = response_model
-            .as_str()
-            .filter(|id| TokenModel::valid_id(id))
-        {
-            TokenModel::Response(id.to_owned())
-        } else if !response_model.is_null() {
-            TokenModel::ResponseConflict
-        } else if self.rerouted {
-            // The reroute event isn't response-keyed and cannot be applied
-            // as a new model to an unknown number of subsequent requests.
-            TokenModel::Ambiguous
-        } else if self.current {
-            self.model.clone().unwrap_or(TokenModel::Unresolved)
-        } else {
-            TokenModel::Unresolved
+    fn for_response(&self, actual: &Value, selected: &Value, legacy: bool) -> TokenModel {
+        if legacy {
+            // Preserve existing root-only backfill snapshot digests, even
+            // when the previous scanner could not attribute model evidence.
+            if let Some(id) = model_id(actual) {
+                return TokenModel::Response(id);
+            }
+            if !actual.is_null() {
+                return TokenModel::LegacyResponseConflict;
+            }
+            if self.legacy_rerouted {
+                return TokenModel::Ambiguous;
+            }
         }
+        let selected = if legacy { &Value::Null } else { selected };
+        match request_model(actual, selected) {
+            TokenModel::Unresolved if self.current => {
+                self.model.clone().unwrap_or(TokenModel::Unresolved)
+            }
+            model => model,
+        }
+    }
+
+    fn for_history(&self, actual: &Value, selected: &Value, legacy: bool) -> TokenModel {
+        let model = self.for_response(actual, selected, legacy);
+        if legacy {
+            return model;
+        }
+        let parsed_actual = model_id(actual).is_some();
+        model.rechecked(ModelRepair::native(
+            !parsed_actual && self.legacy_rerouted,
+            !actual.is_null() && !parsed_actual,
+        ))
     }
 }
 
@@ -478,7 +511,12 @@ fn snapshot(
                     model_turn = next.to_owned();
                 }
             }
-            model.observe(kind, payload, &model_turn);
+            model.observe(
+                kind,
+                payload,
+                &model_turn,
+                matches!(scope, Scope::LegacyTurn(_)),
+            );
             continue;
         }
         let (Some(record_thread), Some(record_turn)) =
@@ -546,12 +584,25 @@ fn snapshot(
             model: None,
         });
         record.invalid |= !valid;
-        record.model = TokenModel::merge(
+        let merge_model = if legacy {
+            TokenModel::merge_legacy
+        } else {
+            TokenModel::merge
+        };
+        record.model = merge_model(
             record.model.take(),
             Some(if model_turn == record_turn {
-                model.for_response(&payload["response_model"])
+                model.for_history(
+                    &payload["response_model"],
+                    &payload["requested_model"],
+                    legacy,
+                )
             } else {
-                TurnModel::default().for_response(&payload["response_model"])
+                TurnModel::default().for_history(
+                    &payload["response_model"],
+                    &payload["requested_model"],
+                    legacy,
+                )
             }),
         );
         if let Some(counts) = counts
@@ -707,7 +758,7 @@ impl Collector {
                 }
                 self.offset += bytes;
                 let prefix = &line;
-                if ![RECORD, "turn_context", "event_msg"]
+                if ![RECORD, "turn_context"]
                     .into_iter()
                     .any(|tag| prefix.windows(tag.len()).any(|part| part == tag.as_bytes()))
                 {
@@ -723,13 +774,20 @@ impl Collector {
                         && payload.turn_id == turn
                         && payload.valid()
                     {
-                        payload.model = Some(self.model.for_response(&payload.response_model));
+                        payload.model = Some(self.model.for_response(
+                            &payload.response_model,
+                            &payload.requested_model,
+                            false,
+                        ));
                         let cursor = payload.thread_token_usage.total_tokens;
                         self.evidence.entry(cursor).or_default().push(payload);
                         self.dirty.insert(cursor);
                     }
-                } else if let Ok(value) = serde_json::from_slice::<Value>(&line) {
-                    self.model.observe(&tag.kind, &value["payload"], turn);
+                } else if tag.kind == "turn_context"
+                    && let Ok(value) = serde_json::from_slice::<Value>(&line)
+                {
+                    self.model
+                        .observe(&tag.kind, &value["payload"], turn, false);
                 }
             }
             self.scanned_end = end;
@@ -883,12 +941,65 @@ mod tests {
     }
 
     #[test]
+    fn exact_app_server_selection_is_backward_readable() -> anyhow::Result<()> {
+        #[derive(Deserialize)]
+        #[serde(rename_all = "snake_case", tag = "source", content = "id")]
+        enum OldModel {
+            TurnContext(String),
+            Ambiguous,
+            ResponseConflict,
+        }
+
+        let selected = Response::from_event(&json!({
+            "responseId": "specific-response",
+            "requestedModel": "selected",
+            "usage": {"totalTokens": 100}
+        }))
+        .unwrap();
+        let exact = selected.meter.model.unwrap();
+        let wire = serde_json::to_value(&exact)?;
+        assert_eq!(
+            wire,
+            json!({"source":"turn_context","id":"selected","request_level":true})
+        );
+        assert!(matches!(
+            serde_json::from_value(wire.clone())?,
+            OldModel::TurnContext(id) if id == "selected"
+        ));
+        assert_eq!(serde_json::from_value::<TokenModel>(wire)?, exact);
+        let rechecked = exact.rechecked(ModelRepair::native(true, false));
+        let read_old = |model| -> anyhow::Result<OldModel> {
+            Ok(serde_json::from_str(&serde_json::to_string(&model)?)?)
+        };
+        assert!(matches!(read_old(rechecked)?, OldModel::TurnContext(id) if id == "selected"));
+        assert!(matches!(
+            read_old(TokenModel::TurnConflict)?,
+            OldModel::Ambiguous
+        ));
+        assert!(matches!(
+            read_old(TokenModel::ResponseConflict)?,
+            OldModel::ResponseConflict
+        ));
+        let masked = TokenModel::merge(
+            Some(TokenModel::LegacyResponseConflict),
+            Some(TokenModel::Response("selected".into())),
+        )
+        .unwrap();
+        assert!(matches!(read_old(masked)?, OldModel::ResponseConflict));
+        Ok(())
+    }
+
+    #[test]
     fn models_use_only_prior_context_for_the_exact_turn_or_the_response() -> anyhow::Result<()> {
         let fixture = Fixture::new()?;
         let path = fixture.0.join("rollout-fixture-thread.jsonl");
         let mut live = Collector::new(&path, "thread", false)?.unwrap();
         let mut response = record("thread", "turn", "confirmed", 39, 8);
+        response["payload"]["requested_model"] = json!("gpt-6.2-sol");
         response["payload"]["response_model"] = json!("openai/gpt-6.2-astra");
+        let mut selected = record("thread", "turn", "selected", 49, 10);
+        selected["payload"]["requested_model"] = json!("gpt-6.1-sol");
+        selected["payload"]["response_model"] = json!("invalid model");
         let lines = [
             json!({"type":"turn_context","payload":{"turn_id":"old","model":"wrong"}}),
             record("thread", "turn", "early", 7, 7),
@@ -897,6 +1008,7 @@ mod tests {
             json!({"type":"event_msg","payload":{"type":"model_reroute","from_model":"gpt-6.2-sol","to_model":"other"}}),
             record("thread", "turn", "late", 31, 11),
             response,
+            selected,
         ];
         std::fs::write(
             &path,
@@ -905,7 +1017,7 @@ mod tests {
                 .map(|line| format!("{line}\n"))
                 .collect::<String>(),
         )?;
-        for (last, cursor) in [(7, 7), (13, 20), (11, 31), (8, 39)] {
+        for (last, cursor) in [(7, 7), (13, 20), (11, 31), (8, 39), (10, 49)] {
             live.notice(&notice(last, cursor));
         }
         let live = live
@@ -918,17 +1030,47 @@ mod tests {
             .into_iter()
             .map(|row| (row.response_id, row.model))
             .collect::<BTreeMap<_, _>>();
-        assert_eq!(live, historical);
+        assert_eq!(
+            live,
+            historical
+                .iter()
+                .map(|(id, model)| {
+                    (
+                        id.clone(),
+                        model.as_ref().map(|model| model.basis().clone()),
+                    )
+                })
+                .collect()
+        );
         assert_eq!(live["early"], Some(TokenModel::Unresolved));
         assert_eq!(
             live["middle"],
             Some(TokenModel::TurnContext("gpt-6.2-sol".into()))
         );
-        assert_eq!(live["late"], Some(TokenModel::Ambiguous));
+        assert_eq!(live["late"], live["middle"]);
         assert_eq!(
             live["confirmed"],
             Some(TokenModel::Response("openai/gpt-6.2-astra".into()))
         );
+        assert_eq!(
+            live["selected"],
+            Some(TokenModel::RequestSelection("gpt-6.1-sol".into()))
+        );
+        let legacy = native_snapshot_legacy(File::open(&path)?, "thread", "turn", false)
+            .unwrap()
+            .into_iter()
+            .map(|row| (row.response_id, row.model))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(legacy["late"], Some(TokenModel::Ambiguous));
+        assert_eq!(legacy["selected"], Some(TokenModel::LegacyResponseConflict));
+        for id in ["late", "selected"] {
+            let repaired = TokenModel::merge(legacy[id].clone(), historical[id].clone());
+            assert_eq!(repaired, historical[id]);
+            assert_eq!(
+                TokenModel::merge(repaired.clone(), legacy[id].clone()),
+                repaired
+            );
+        }
         Ok(())
     }
 

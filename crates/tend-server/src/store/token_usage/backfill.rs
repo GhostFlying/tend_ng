@@ -1,4 +1,4 @@
-use super::{Tally, VerifiedRun, verified_run};
+use super::{RequestKey as Key, Tally, VerifiedRun, verified_run};
 use crate::store::{Store, runner::FRESH_SECONDS, timing};
 use anyhow::Result;
 use protocol::{
@@ -28,8 +28,6 @@ pub(in crate::store) fn migrate_ambiguities(db: &Connection) -> Result<()> {
     }
     Ok(())
 }
-
-type Key<'a> = (&'a str, &'a str, &'a str);
 
 fn request(
     db: &Connection,
@@ -228,10 +226,10 @@ fn project(
         return Ok(());
     }
     if let Some(before) = before {
-        tally.count(before, -1);
+        tally.count_issue(db, key, before, -1)?;
     }
     if let Some(chosen) = chosen {
-        tally.count(&chosen, 1);
+        tally.count_issue(db, key, &chosen, 1)?;
         db.prepare_cached(
             "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, observed_at)
              VALUES (?1, ?2, ?3, ?4, ?5, unixepoch())
@@ -483,7 +481,7 @@ fn restore_server_copy(
             return Ok(());
         }
         if conflict.is_none() {
-            tally.count(&last, -1);
+            tally.count_issue(db, key, &last, -1)?;
         }
     }
     if let Some(counts) = evidence.server {
@@ -505,7 +503,7 @@ fn restore_server_copy(
              ON CONFLICT(thread_id, turn_id, response_id) DO UPDATE SET last = excluded.last, conflict = excluded.conflict",
         )?.execute(params![key.0, key.1, key.2, run, serde_json::to_string(&server)?, conflict])?;
         if evidence.verified_server().is_some() {
-            tally.count(&server, 1);
+            tally.count_issue(db, key, &server, 1)?;
         }
     } else {
         // The job audit and original binding retain the retracted evidence.

@@ -2,6 +2,7 @@ pub(super) mod backfill;
 mod models;
 pub(super) mod overview;
 pub(super) mod rebuild;
+pub(super) mod selected_migration;
 pub(crate) mod system;
 
 use super::Store;
@@ -10,6 +11,8 @@ use protocol::{RequestMeter, RunObservation, RunPhase, RunTokenUsage, TokenCount
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+
+type RequestKey<'a> = (&'a str, &'a str, &'a str);
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(include_str!("token_usage/schema.sql"))?;
@@ -136,10 +139,75 @@ impl Tally {
         self.model_usage.count(meter, sign);
     }
 
+    fn count_issue(
+        &mut self,
+        db: &Connection,
+        key: RequestKey<'_>,
+        meter: &RequestMeter,
+        sign: i64,
+    ) -> Result<()> {
+        let agent = system::agent_meter(db, key)?;
+        self.count(&model_with_agent(meter, agent.as_ref()), sign);
+        Ok(())
+    }
+
     fn merge(&mut self, other: &Self, sign: i64) {
         self.tokens.merge(other.tokens, sign);
         self.model_usage.merge(&other.model_usage, sign);
     }
+}
+
+// An Issue owns the metering and its exact counts. Corroborating Server
+// evidence can change only its model projection, never the underlying meter.
+fn model_with_agent(issue: &RequestMeter, agent: Option<&RequestMeter>) -> RequestMeter {
+    let mut projected = issue.clone();
+    let comparable = |meter: &RequestMeter| {
+        if meter.provider_counts {
+            meter.counts
+        } else {
+            meter.counts.without_unproven_optional_zeros()
+        }
+    };
+    if let Some(agent) = agent
+        && let Some(agent_model) = agent.model.as_ref()
+        && !matches!(agent_model, protocol::TokenModel::Unresolved)
+        && comparable(issue).merge_known(comparable(agent)).is_some()
+    {
+        projected.model = protocol::TokenModel::merge(issue.model.clone(), agent.model.clone());
+    }
+    projected
+}
+
+fn agent_model_changed(
+    db: &Connection,
+    key: RequestKey<'_>,
+    old: Option<&RequestMeter>,
+    new: Option<&RequestMeter>,
+) -> Result<()> {
+    let row = db
+        .prepare_cached(
+            "SELECT run_id, last FROM token_requests
+         WHERE thread_id=?1 AND turn_id=?2 AND response_id=?3 AND conflict IS NULL",
+        )?
+        .query_row(key, |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    let Some((run_id, raw)) = row else {
+        return Ok(());
+    };
+    let meter = serde_json::from_str(&raw)?;
+    let before = model_with_agent(&meter, old);
+    let after = model_with_agent(&meter, new);
+    if before.model != after.model {
+        let run = verified_run(db, &run_id)?.expect("request references verified Run");
+        let mut tally = run.tally.clone();
+        tally.count(&before, -1);
+        tally.count(&after, 1);
+        save_delta(db, &run_id, &run, tally)?;
+        rebuild::mark_dirty(db, &run_id)?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -285,12 +353,12 @@ fn persist_verified_request(
         return Ok(());
     }
     let last = serde_json::to_string(&meter)?;
-    let key = params![usage.thread_id, usage.turn_id, usage.response_id];
+    let key = (&*usage.thread_id, &*usage.turn_id, &*usage.response_id);
     if db.prepare_cached(
         "INSERT INTO token_requests (thread_id, turn_id, response_id, run_id, last, observed_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) ON CONFLICT DO NOTHING",
     )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, usage.run_id, last, usage.observed_at])? == 1 {
-        tally.count(&meter, 1);
+        tally.count_issue(db, key, &meter, 1)?;
         return Ok(());
     }
     let previous = db.prepare_cached(
@@ -305,14 +373,14 @@ fn persist_verified_request(
                 db.prepare_cached(
                     "UPDATE token_requests SET last = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
                 )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, serde_json::to_string(&merged)?])?;
-                tally.count(&old, -1);
-                tally.count(&merged, 1);
+                tally.count_issue(db, key, &old, -1)?;
+                tally.count_issue(db, key, &merged, 1)?;
             }
         } else {
             db.prepare_cached(
                 "UPDATE token_requests SET conflict = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
             )?.execute(params![usage.thread_id, usage.turn_id, usage.response_id, last])?;
-            tally.count(&old, -1);
+            tally.count_issue(db, key, &old, -1)?;
         }
     }
     Ok(())

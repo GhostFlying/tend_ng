@@ -300,12 +300,11 @@ def verify(args, root, address):
                 assert expected["subtree"]["total_tokens"] == old_projection["subtree"]["total_tokens"]
                 assert expected["subtree"]["reported_requests"] == old_projection["subtree"]["reported_requests"]
                 models = {row["model"]: row for row in expected["subtree"]["models"]}
-                assert set(models) == {None, "gpt-6.2-astra"}
+                assert set(models) == {None, "gpt-6.2-astra", "gpt-6.2-sol", "deepseek-v4.1-flash"}
                 assert models["gpt-6.2-astra"]["response_model_requests"] == 1
-                assert models[None]["requested_models"] == {
-                    "gpt-6.2-sol": 27, "deepseek-v4.1-flash": 26,
-                }
-                assert models[None]["reported_requests"] == expected["subtree"]["reported_requests"] - 1
+                assert models["gpt-6.2-sol"]["selected_model_requests"] == 27
+                assert models["deepseek-v4.1-flash"]["selected_model_requests"] == 26
+                assert models[None]["reported_requests"] == expected["subtree"]["reported_requests"] - 54
                 assert maint("overview")["total"] == expected["subtree"]
                 for job, scope in (("again", ("--all",)), ("issue", ("--issue", "#1")),
                                    ("runner", ("--runner", ORIGINAL)), ("host", ("--host", "fixture-host"))):

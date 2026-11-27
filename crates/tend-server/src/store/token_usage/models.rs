@@ -1,9 +1,12 @@
 //! Request-level input overlap and pricing tiers are resolved before rollup.
 //! Reads apply a versioned, offline public rate table to projected units.
 use super::{Field, Totals};
-use protocol::{RequestMeter, TokenCounts, TokenModel};
+use protocol::{
+    RequestMeter, TokenCounts, TokenModel,
+    token_prices::{Price, UnsupportedPrice, price, snapshot_date},
+};
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, sync::LazyLock};
+use std::collections::BTreeMap;
 
 const LONG_INPUT: i64 = 272_000;
 const TIER_COUNT: usize = 3;
@@ -11,16 +14,23 @@ const TIER_COUNT: usize = 3;
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub(super) struct ModelProjection {
     confirmed: BTreeMap<String, ModelTally>,
-    requested: BTreeMap<String, i64>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    selected: BTreeMap<String, ModelTally>,
     fresh: Quantity,
 }
 
 #[derive(Clone, Default, Deserialize, Eq, PartialEq, Serialize)]
 struct ModelTally {
     tokens: Totals,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    request_level_selections: i64,
     // Standard, long, unknown. A request is projected into one band before
     // aggregation. Rate changes within a band require no request scan.
     tiers: [Billable; TIER_COUNT],
+}
+
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 #[derive(Clone, Copy, Default, Deserialize, Eq, PartialEq, Serialize)]
@@ -103,6 +113,19 @@ fn partition(counts: TokenCounts) -> (usize, [Option<i64>; 4]) {
 }
 
 impl ModelTally {
+    fn count(&mut self, counts: TokenCounts, tier: usize, billable: [Option<i64>; 4], sign: i64) {
+        self.tokens.count(counts, sign);
+        self.tiers[tier].count(billable, sign);
+    }
+
+    fn merge(&mut self, other: &Self, sign: i64) {
+        self.tokens.merge(other.tokens, sign);
+        self.request_level_selections += sign * other.request_level_selections;
+        for (tier, other) in self.tiers.iter_mut().zip(other.tiers) {
+            tier.merge(other, sign);
+        }
+    }
+
     fn fresh(&self) -> Quantity {
         let mut total = Quantity::default();
         for tier in &self.tiers {
@@ -121,93 +144,85 @@ impl ModelProjection {
         };
         let (tier, counts) = partition(meter.counts);
         self.fresh.count(counts[0], sign);
-        match model {
-            TokenModel::Response(id) => {
-                let entry = self.confirmed.entry(id.clone()).or_default();
-                entry.tokens.count(meter.counts, sign);
-                entry.tiers[tier].count(counts, sign);
-                if entry.tokens.valid_records == 0 {
-                    self.confirmed.remove(id);
-                }
-            }
-            TokenModel::TurnContext(id) => adjust(&mut self.requested, id, sign),
-            _ => {}
+        if let TokenModel::Response(id) = model.basis() {
+            count_model(
+                &mut self.confirmed,
+                id,
+                meter.counts,
+                tier,
+                counts,
+                sign,
+                false,
+            );
+        } else {
+            self.count_selection(meter, tier, counts, sign);
         }
+    }
+
+    fn count_selection(
+        &mut self,
+        meter: &RequestMeter,
+        tier: usize,
+        billable: [Option<i64>; 4],
+        sign: i64,
+    ) {
+        let model = meter.model.as_ref().map(TokenModel::basis);
+        if let Some(TokenModel::TurnContext(id) | TokenModel::RequestSelection(id)) = model {
+            count_model(
+                &mut self.selected,
+                id,
+                meter.counts,
+                tier,
+                billable,
+                sign,
+                matches!(model, Some(TokenModel::RequestSelection(_))),
+            );
+        }
+    }
+
+    // Schema 48 already included the request and its input split in the
+    // totals, but not its model's quantities. Migrate only the missing part.
+    pub(super) fn migrate_selection(&mut self, meter: &RequestMeter) {
+        let (tier, counts) = partition(meter.counts);
+        self.count_selection(meter, tier, counts, 1);
     }
 
     pub(super) fn merge(&mut self, other: &Self, sign: i64) {
         self.fresh.merge(other.fresh, sign);
-        for (id, tally) in &other.confirmed {
-            let entry = self.confirmed.entry(id.clone()).or_default();
-            entry.tokens.merge(tally.tokens, sign);
-            for i in 0..TIER_COUNT {
-                entry.tiers[i].merge(tally.tiers[i], sign);
+        for (entries, other) in [
+            (&mut self.confirmed, &other.confirmed),
+            (&mut self.selected, &other.selected),
+        ] {
+            for (id, tally) in other {
+                let entry = entries.entry(id.clone()).or_default();
+                entry.merge(tally, sign);
+                // Signed deltas can enrich the fields of a request without
+                // changing the request count.
+                if *entry == ModelTally::default() {
+                    entries.remove(id);
+                }
             }
-            // Signed deltas can enrich a request without changing the model's
-            // request count. Remove only the additive identity.
-            if *entry == ModelTally::default() {
-                self.confirmed.remove(id);
-            }
-        }
-        for (id, requests) in &other.requested {
-            adjust(&mut self.requested, id, sign * requests);
         }
     }
 }
 
-fn adjust(entries: &mut BTreeMap<String, i64>, id: &str, delta: i64) {
-    let count = entries.entry(id.to_owned()).or_default();
-    *count += delta;
-    if *count == 0 {
+fn count_model(
+    entries: &mut BTreeMap<String, ModelTally>,
+    id: &str,
+    counts: TokenCounts,
+    tier: usize,
+    billable: [Option<i64>; 4],
+    sign: i64,
+    request_level: bool,
+) {
+    let entry = entries.entry(id.to_owned()).or_default();
+    entry.count(counts, tier, billable, sign);
+    if request_level {
+        entry.request_level_selections += sign;
+    }
+    if *entry == ModelTally::default() {
         entries.remove(id);
     }
-}
-
-#[derive(Deserialize)]
-struct Catalog {
-    reference_date: &'static str,
-    models: Vec<Price>,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Price {
-    id: &'static str,
-    canonical_slug: &'static str,
-    standard: Rates,
-    long: Option<Rates>,
-    unsupported: Option<UnsupportedPrice>,
-}
-
-#[derive(Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "snake_case")]
-enum UnsupportedPrice {
-    UtcSchedule,
-    OtherConditions,
-}
-
-type Rates = [Option<i64>; 4];
-
-static CATALOG: LazyLock<Catalog> = LazyLock::new(|| {
-    serde_json::from_str(include_str!("openrouter-prices.json")).expect("bundled OpenRouter rates")
-});
-
-fn price(model: &str) -> Option<&'static Price> {
-    let mut matches = CATALOG.models.iter().filter(|item| {
-        model == item.id
-            || model == item.canonical_slug
-            || item
-                .id
-                .split_once('/')
-                .is_some_and(|(_, slug)| slug == model)
-            || item
-                .canonical_slug
-                .split_once('/')
-                .is_some_and(|(_, slug)| slug == model)
-    });
-    // A bare name must identify one entry. Never silently select a vendor
-    // when a future catalog adds another model with the same short slug.
-    matches.next().filter(|_| matches.next().is_none())
 }
 
 #[derive(Clone, Serialize)]
@@ -253,6 +268,9 @@ fn decimal(value: i128, places: u32) -> String {
 pub(super) struct ModelRow {
     model: Option<String>,
     response_model_requests: i64,
+    selected_model_requests: i64,
+    request_level_selected_model_requests: i64,
+    // Older Web bundles expect this property when opening row details.
     requested_models: BTreeMap<String, i64>,
     reported_requests: i64,
     total_tokens: Field,
@@ -264,6 +282,7 @@ pub(super) struct ModelRow {
     reasoning_output_tokens: Field,
     estimate: Estimate,
     price: Option<ModelPrice>,
+    estimate_gap: Option<&'static str>,
 }
 
 #[derive(Clone, Serialize)]
@@ -358,7 +377,7 @@ fn quote(p: &Price, tally: &ModelTally) -> (ModelPrice, Accumulator) {
         ModelPrice {
             openrouter_id: p.id,
             canonical_slug: p.canonical_slug,
-            snapshot_date: CATALOG.reference_date,
+            snapshot_date: snapshot_date(),
             long_input_above: p
                 .long
                 .filter(|_| p.unsupported.is_none())
@@ -366,7 +385,14 @@ fn quote(p: &Price, tally: &ModelTally) -> (ModelPrice, Accumulator) {
             unsupported: p.unsupported,
             tiers,
         },
-        total,
+        if p.unsupported.is_some() {
+            Accumulator {
+                partial: true,
+                ..Accumulator::default()
+            }
+        } else {
+            total
+        },
     )
 }
 
@@ -375,7 +401,8 @@ impl ModelRow {
         model: Option<String>,
         tokens: Totals,
         fresh: Quantity,
-        requested_models: BTreeMap<String, i64>,
+        response_model_requests: i64,
+        request_level_selected_model_requests: i64,
         quote: Option<ModelPrice>,
         estimate: Accumulator,
     ) -> Self {
@@ -388,9 +415,24 @@ impl ModelRow {
             reasoning_output_tokens,
         ] = tokens.fields();
         Self {
-            response_model_requests: model.as_ref().map_or(0, |_| tokens.valid_records),
+            response_model_requests,
+            request_level_selected_model_requests,
+            selected_model_requests: model
+                .as_ref()
+                .map_or(0, |_| tokens.valid_records - response_model_requests),
+            estimate_gap: if model.is_none() {
+                Some("unknown_model")
+            } else if quote.is_none() {
+                Some("no_exact_price")
+            } else if quote.as_ref().is_some_and(|p| p.unsupported.is_some()) {
+                Some("unsupported_price")
+            } else if estimate.partial {
+                Some("incomplete_components")
+            } else {
+                None
+            },
             model,
-            requested_models,
+            requested_models: BTreeMap::new(),
             uncached_input_tokens: fresh.field(),
             reported_requests: tokens.valid_records,
             total_tokens,
@@ -406,11 +448,27 @@ impl ModelRow {
 }
 
 pub(super) fn rows(models: ModelProjection, totals: Totals) -> (Vec<ModelRow>, Estimate) {
-    let mut rows = Vec::with_capacity(models.confirmed.len() + 1);
+    let mut grouped = BTreeMap::<String, (String, ModelTally, i64)>::new();
+    for (entries, confirmed) in [(models.confirmed, true), (models.selected, false)] {
+        for (id, tally) in entries {
+            // Only the catalog's exact IDs, canonical snapshots and unique
+            // short names are equivalent. Do not approximate unlisted IDs.
+            let key = price(&id).map_or(id.as_str(), |p| p.id).to_owned();
+            let (label, combined, responses) = grouped.entry(key).or_default();
+            if label.is_empty() || (id.len(), &id) < (label.len(), label) {
+                *label = id;
+            }
+            combined.merge(&tally, 1);
+            if confirmed {
+                *responses += tally.tokens.valid_records;
+            }
+        }
+    }
+    let mut rows = Vec::with_capacity(grouped.len() + 1);
     let mut unknown = totals;
     let mut unknown_fresh = models.fresh;
     let mut total = Accumulator::default();
-    for (id, tally) in models.confirmed {
+    for (id, tally, responses) in grouped.into_values() {
         unknown.merge(tally.tokens, -1);
         unknown_fresh.merge(tally.fresh(), -1);
         let (price, cost) = price(&id).map_or_else(
@@ -433,7 +491,8 @@ pub(super) fn rows(models: ModelProjection, totals: Totals) -> (Vec<ModelRow>, E
             Some(id),
             tally.tokens,
             tally.fresh(),
-            BTreeMap::new(),
+            responses,
+            tally.request_level_selections,
             price,
             cost,
         ));
@@ -449,7 +508,8 @@ pub(super) fn rows(models: ModelProjection, totals: Totals) -> (Vec<ModelRow>, E
             None,
             unknown,
             unknown_fresh,
-            models.requested,
+            0,
+            0,
             None,
             cost,
         ));

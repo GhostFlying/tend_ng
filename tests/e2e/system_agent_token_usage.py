@@ -1,5 +1,6 @@
 """Exercise all Tend meter producers, restart, historical overlap and the actual global screen."""
 import argparse
+from decimal import Decimal
 import json
 import os
 from pathlib import Path
@@ -103,6 +104,19 @@ def run(args, root):
             speak("main", "Hello, Tend.")
             speak("main", "Next input.")
             assert requests("router") == 2
+            router = sources()["router"]["usage"]
+            models = {model["model"]: model for model in router["models"]}
+            assert set(models) == {"gpt-6.2-sol", "gpt-6.2-astra"}, router
+            assert models["gpt-6.2-sol"]["selected_model_requests"] == 1
+            assert models["gpt-6.2-astra"]["response_model_requests"] == 1
+            # Only the reported cache read and output can be priced here.
+            assert models["gpt-6.2-sol"]["estimate"] == {"usd": "0.000338", "partial": True}
+            assert models["gpt-6.2-astra"]["estimate"] == {"usd": "0.001352", "partial": True}
+            assert router["estimate"] == {"usd": "0.00169", "partial": True}
+            if args.screenshots:
+                subprocess.run(
+                    ["node", "tests/system-agent-token-usage.mjs", "2"],
+                    cwd=WEB, env={**env, "TEND_SCREENSHOTS": str(args.screenshots)}, check=True, timeout=45)
             [(same_thread, num_turns, num_keys)] = sql(
                 "SELECT count(DISTINCT thread),count(DISTINCT turn),count(DISTINCT response) FROM token_agent_requests")
             assert (same_thread, num_turns, num_keys) == (1, 2, 1)
@@ -165,16 +179,22 @@ def run(args, root):
             assert merged["total"]["reported_requests"] == sum(row["usage"]["reported_requests"] for row in merged["sources"])
             assert int(merged["total"]["total_tokens"]["tokens"]) == sum(
                 int(row["usage"]["total_tokens"]["tokens"] or 0) for row in merged["sources"])
+            for source in merged["sources"]:
+                usage = source["usage"]
+                assert usage["reported_requests"] == sum(row["reported_requests"] for row in usage["models"])
+                assert int(usage["total_tokens"]["tokens"] or 0) == sum(
+                    int(row["total_tokens"]["tokens"] or 0) for row in usage["models"])
+                parts = [Decimal(row["estimate"]["usd"]) for row in usage["models"]
+                         if row["estimate"]["usd"] is not None]
+                assert (Decimal(usage["estimate"]["usd"]) if usage["estimate"]["usd"] is not None else None
+                        ) == (sum(parts) if parts else None)
+            sol = next(row for row in sources()["router"]["usage"]["models"] if row["model"] == "gpt-6.2-sol")
+            assert sol["selected_model_requests"] > 0 and sol["response_model_requests"] > 0
             cli("token-usage", "rebuild", "--all")
             assert overview() == merged
             for job_id in ("system-history-first", "system-history-repeat"):
                 job(job_id)
                 assert overview() == merged
-            if args.screenshots:
-                targets = subprocess.run(
-                    ["node", "tests/system-agent-token-usage.mjs", str(merged["total"]["reported_requests"])],
-                    cwd=WEB, env={**env, "TEND_SCREENSHOTS": str(args.screenshots)}, check=True, timeout=45)
-                assert targets.returncode == 0
     if args.legacy_runner:
         # Reuse only the local database and retained evidence of this isolated
         # fixture, with the actual pre-feature Runner attached to the new Server.

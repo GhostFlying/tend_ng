@@ -125,11 +125,10 @@ try {
     await pane.getByRole("button", { name: "含所有后代" }).click();
     await total.getByText("127,200", { exact: true }).waitFor();
     await models.getByText("deepseek-v4.1-flash", { exact: true }).waitFor();
-    await models.getByText("模型未知", { exact: true }).waitFor();
     const childFlash = models
       .locator(".model-row > summary")
       .filter({ hasText: "deepseek-v4.1-flash" });
-    await childFlash.getByText("82,400", { exact: true }).waitFor();
+    await childFlash.getByText("86,000", { exact: true }).waitFor();
     await pane
       .getByText("已观测 2 / 3 个已开始 Run", { exact: true })
       .waitFor();

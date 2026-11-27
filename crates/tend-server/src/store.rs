@@ -91,7 +91,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 48;
+pub(crate) const SCHEMA_VERSION: i64 = 49;
 
 pub struct Store {
     db: Connection,
@@ -145,6 +145,16 @@ impl Store {
             version <= SCHEMA_VERSION,
             "unsupported Server database version {version}"
         );
+        // Read and partition the existing meters before acquiring the write
+        // lock. The deferred transaction pins the inputs through publication.
+        let selected_models = if (45..49).contains(&version) {
+            Some(token_usage::selected_migration::capture(
+                &tx,
+                version >= 48,
+            )?)
+        } else {
+            None
+        };
         tx.execute_batch(
             "CREATE TABLE IF NOT EXISTS chat_messages (
                  seq INTEGER PRIMARY KEY,
@@ -352,6 +362,9 @@ impl Store {
         }
         if version < 48 {
             agent_metering::migrate(&tx)?;
+        }
+        if let Some(selected_models) = selected_models {
+            selected_models.publish(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 mod runner;
 pub use runner::*;
+pub mod token_prices;
 mod token_usage;
 pub use token_usage::*;
 mod discussion;

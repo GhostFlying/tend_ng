@@ -430,7 +430,14 @@ export type TokenEstimate = {
 export type TokenModelRow = {
   model: string | null;
   response_model_requests: number;
-  requested_models: Record<string, number>;
+  selected_model_requests?: number;
+  request_level_selected_model_requests?: number;
+  estimate_gap?:
+    | "unknown_model"
+    | "no_exact_price"
+    | "unsupported_price"
+    | "incomplete_components"
+    | null;
   reported_requests: number;
   total_tokens: TokenField;
   input_tokens: TokenField;

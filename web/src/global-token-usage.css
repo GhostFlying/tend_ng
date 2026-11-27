@@ -151,37 +151,65 @@
   font-size: 16px;
 }
 
-.usage-sources ul {
+.usage-source-list {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
   gap: 0 22px;
   margin: 0;
   padding: 0;
   list-style: none;
 }
 
-.usage-sources li {
+.usage-source {
+  border-top: 1px solid var(--border);
+}
+
+.usage-source > summary {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+  align-items: baseline;
   gap: 8px;
-  padding-block: 9px;
-  border-top: 1px solid var(--border);
+  min-height: 44px;
+  padding: 9px 6px;
+  cursor: pointer;
   overflow-wrap: anywhere;
 }
 
-.usage-sources h3 {
-  margin: 0;
+.usage-source > summary:hover,
+.usage-source[open] > summary {
+  background: var(--active);
+}
+
+.usage-source-name {
+  display: grid;
+  gap: 2px;
+  padding-inline-start: 14px;
+  font-size: 12px;
+}
+
+.usage-source-name strong {
+  position: relative;
   font-size: 14px;
   font-weight: 650;
 }
 
-.usage-sources li p {
-  margin: 2px 0 0;
-  font-size: 12px;
+.usage-source-name strong::before {
+  content: "›";
+  position: absolute;
+  inset-inline-start: -14px;
+  color: var(--muted);
+}
+
+.usage-source[open] .usage-source-name strong::before {
+  content: "⌄";
 }
 
 .usage-source-amount {
+  display: grid;
+  gap: 2px;
   text-align: end;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -189,8 +217,13 @@
   font-weight: 650;
 }
 
+.usage-source-empty {
+  margin: 8px 6px 12px 20px;
+  font-size: 12px;
+}
+
 @media (max-width: 760px) {
-  .usage-sources ul {
+  .usage-source-list {
     grid-template-columns: minmax(0, 1fr);
   }
 }

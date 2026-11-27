@@ -31,6 +31,16 @@ pub(in crate::store) fn abandon(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+pub(super) fn mark_dirty(db: &Connection, run: &str) -> Result<()> {
+    db.prepare_cached(
+        "INSERT INTO token_rebuild_dirty
+         SELECT ?1, 1 WHERE (SELECT collecting FROM token_rebuild_state WHERE id=1)
+         ON CONFLICT(run_id) DO UPDATE SET revision=revision+1",
+    )?
+    .execute([run])?;
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Level {
     Direct,
@@ -188,15 +198,24 @@ fn encode(summary: &Summary) -> Result<String> {
 }
 
 fn tally(db: &Connection, run: &str) -> Result<Tally> {
-    let mut requests = db
-        .prepare_cached("SELECT last FROM token_requests WHERE run_id = ?1 AND conflict IS NULL")?;
+    let mut requests = db.prepare_cached(
+        "SELECT i.last, a.meter FROM token_requests i
+         LEFT JOIN token_agent_requests a ON a.thread=i.thread_id AND a.turn=i.turn_id
+             AND a.response=i.response_id AND a.conflict IS NULL
+         WHERE i.run_id = ?1 AND i.conflict IS NULL",
+    )?;
     let mut rows = requests.query([run])?;
     let mut tally = Tally::default();
     while let Some(row) = rows.next()? {
         let raw = row.get_ref(0)?.as_str()?;
         let meter: RequestMeter = serde_json::from_str(raw)?;
         if meter.valid() {
-            tally.count(&meter, 1);
+            let agent = row
+                .get::<_, Option<String>>(1)?
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?;
+            tally.count(&super::model_with_agent(&meter, agent.as_ref()), 1);
         }
     }
     Ok(tally)

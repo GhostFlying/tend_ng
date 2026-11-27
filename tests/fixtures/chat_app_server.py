@@ -103,18 +103,29 @@ def meter(thread, turn, text):
               "cached_input_tokens": 180, "output_tokens": 32}
     path = meter_path(thread)
     path.parent.mkdir(exist_ok=True, parents=True)
+    selected = "gpt-6.2-sol"
+    actual = {"Hello, Tend.": None, "Next input.": "gpt-6.2-astra"}.get(text, selected)
     with path.open("a") as output:
         if output.tell() == 0:
             print(json.dumps({"type": "session_meta", "payload": {"id": thread}}), file=output)
+        print(json.dumps({"type": "turn_context", "payload": {
+            "turn_id": turn, "model": selected,
+        }}), file=output)
+        if actual is None:
+            # No response ID: this warning must not change model attribution.
+            print(json.dumps({"type": "event_msg", "payload": {
+                "type": "model_reroute", "from_model": selected, "to_model": "unbound-model",
+            }}), file=output)
         print(json.dumps({"type": "token_usage_record", "payload": {
             "thread_id": thread, "turn_id": turn, "response_id": response_id,
             "usage": counts, "thread_token_usage": {"total_tokens": 18000},
-            "response_model": "gpt-6.2-sol",
+            **({"response_model": actual} if actual else {}),
         }}), file=output)
     for _ in range(2):
         notify("rawResponse/completed", threadId=thread, turnId=turn, responseId=response_id,
-               responseModel="gpt-6.2-sol", usage={"totalTokens": counts["total_tokens"],
-               "inputTokens": input_count, "cachedInputTokens": 180, "outputTokens": 32})
+               requestedModel=selected, usage={"totalTokens": counts["total_tokens"],
+               "inputTokens": input_count, "cachedInputTokens": 180, "outputTokens": 32},
+               **({"responseModel": actual} if actual else {}))
 
 
 def thread_response(params, thread):

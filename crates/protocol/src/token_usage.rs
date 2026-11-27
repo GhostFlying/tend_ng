@@ -89,15 +89,218 @@ impl TokenCounts {
 
 /// Model evidence from the native rollout, not from the assigned Agent.
 #[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
-#[serde(rename_all = "snake_case", tag = "source", content = "id")]
+#[serde(from = "ModelWire", into = "ModelWire")]
 pub enum TokenModel {
+    /// Native actual model associated with the exact response.
     Response(String),
+    /// Model selected at execution time, from the native turn.
     TurnContext(String),
+    /// Model selected at execution time and bound to the specific request.
+    RequestSelection(String),
     /// A normalized request was checked without finding model evidence.
     /// Absent (None) means a legacy writer did not perform this check.
     Unresolved,
     Ambiguous,
+    TurnConflict,
+    RequestSelectionConflict,
+    LegacyResponseConflict,
     ResponseConflict,
+    /// An exact request carries a reason why an old reader lost attribution.
+    Rechecked(Box<Self>, ModelRepair),
+    /// An older peer reported uncertainty. Keep independent observations
+    /// even when that uncertainty temporarily masks the displayed model.
+    PendingLegacy(Box<Self>, LegacyModelMarkers),
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct LegacyModelMarkers {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    turn: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    response: bool,
+}
+
+impl LegacyModelMarkers {
+    fn empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn combine(self, other: Self) -> Self {
+        Self {
+            turn: self.turn || other.turn,
+            response: self.response || other.response,
+        }
+    }
+
+    fn repair(self, proof: ModelRepair) -> Self {
+        Self {
+            turn: self.turn && !(proof.unkeyed_reroute || proof.equivalent_turn_ids),
+            response: self.response && !(proof.malformed_response || proof.equivalent_response_ids),
+        }
+    }
+
+    fn visible(self, observed: &TokenModel) -> &TokenModel {
+        if self.response && !matches!(observed, TokenModel::ResponseConflict) {
+            &TokenModel::LegacyResponseConflict
+        } else if self.turn
+            && matches!(
+                observed,
+                TokenModel::Unresolved | TokenModel::TurnContext(_)
+            )
+        {
+            &TokenModel::Ambiguous
+        } else {
+            observed
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct ModelRepair {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    unkeyed_reroute: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    malformed_response: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    equivalent_response_ids: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    equivalent_turn_ids: bool,
+}
+
+impl ModelRepair {
+    pub fn native(unkeyed_reroute: bool, malformed_response: bool) -> Self {
+        Self {
+            unkeyed_reroute,
+            malformed_response,
+            ..Self::default()
+        }
+    }
+
+    fn empty(&self) -> bool {
+        *self == Self::default()
+    }
+
+    fn combine(self, other: Self) -> Self {
+        Self {
+            unkeyed_reroute: self.unkeyed_reroute || other.unkeyed_reroute,
+            malformed_response: self.malformed_response || other.malformed_response,
+            equivalent_response_ids: self.equivalent_response_ids || other.equivalent_response_ids,
+            equivalent_turn_ids: self.equivalent_turn_ids || other.equivalent_turn_ids,
+        }
+    }
+}
+
+#[derive(Deserialize, Serialize)]
+struct ModelWire {
+    #[serde(flatten)]
+    visible: ModelKind,
+    #[serde(default, skip_serializing_if = "ModelRepair::empty")]
+    rechecked: ModelRepair,
+    // Unknown remains unknown for older peers. New peers use the held
+    // claim when independent native evidence clears the legacy marker.
+    #[serde(default, skip_serializing_if = "LegacyModelMarkers::empty")]
+    pending: LegacyModelMarkers,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    held_model: Option<ModelKind>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct ModelKind {
+    #[serde(flatten)]
+    value: ModelValue,
+    // Older peers still recognize `turn_context` and `ambiguous`. They
+    // retain the request counts even if they cannot rank this evidence.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    request_level: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    observed_conflict: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+#[serde(rename_all = "snake_case", tag = "source", content = "id")]
+enum ModelValue {
+    Response(String),
+    TurnContext(String),
+    Unresolved,
+    Ambiguous,
+    ResponseConflict,
+}
+
+impl From<ModelWire> for TokenModel {
+    fn from(wire: ModelWire) -> Self {
+        let visible = Self::from(wire.visible);
+        let (observed, _, implicit) = visible.split();
+        let (observed, held) = wire.held_model.filter(|_| !implicit.empty()).map_or(
+            (observed, LegacyModelMarkers::default()),
+            |held| {
+                let (observed, _, pending) = Self::from(held).split();
+                (observed, pending)
+            },
+        );
+        Self::compose(
+            observed,
+            wire.rechecked,
+            wire.pending.combine(implicit).combine(held),
+        )
+    }
+}
+
+impl From<ModelKind> for TokenModel {
+    fn from(kind: ModelKind) -> Self {
+        match kind.value {
+            ModelValue::Response(id) => Self::Response(id),
+            ModelValue::TurnContext(id) if kind.request_level => Self::RequestSelection(id),
+            ModelValue::TurnContext(id) => Self::TurnContext(id),
+            ModelValue::Unresolved => Self::Unresolved,
+            ModelValue::Ambiguous if kind.request_level => Self::RequestSelectionConflict,
+            ModelValue::Ambiguous if kind.observed_conflict => Self::TurnConflict,
+            ModelValue::Ambiguous => Self::Ambiguous,
+            ModelValue::ResponseConflict if kind.observed_conflict => Self::ResponseConflict,
+            ModelValue::ResponseConflict => Self::LegacyResponseConflict,
+        }
+    }
+}
+
+impl From<TokenModel> for ModelWire {
+    fn from(model: TokenModel) -> Self {
+        let visible = model.basis().clone();
+        let (observed, rechecked, mut pending) = model.split();
+        if matches!(visible, TokenModel::Ambiguous) {
+            pending.turn = false;
+        }
+        if matches!(visible, TokenModel::LegacyResponseConflict) {
+            pending.response = false;
+        }
+        Self {
+            held_model: (observed != visible && observed != TokenModel::Unresolved)
+                .then(|| ModelKind::from(observed)),
+            visible: ModelKind::from(visible),
+            rechecked,
+            pending,
+        }
+    }
+}
+
+impl From<TokenModel> for ModelKind {
+    fn from(model: TokenModel) -> Self {
+        let (value, request_level, observed_conflict) = match model {
+            TokenModel::Response(id) => (ModelValue::Response(id), false, false),
+            TokenModel::TurnContext(id) => (ModelValue::TurnContext(id), false, false),
+            TokenModel::RequestSelection(id) => (ModelValue::TurnContext(id), true, false),
+            TokenModel::Unresolved => (ModelValue::Unresolved, false, false),
+            TokenModel::Ambiguous => (ModelValue::Ambiguous, false, false),
+            TokenModel::TurnConflict => (ModelValue::Ambiguous, false, true),
+            TokenModel::RequestSelectionConflict => (ModelValue::Ambiguous, true, false),
+            TokenModel::LegacyResponseConflict => (ModelValue::ResponseConflict, false, false),
+            TokenModel::ResponseConflict => (ModelValue::ResponseConflict, false, true),
+            TokenModel::Rechecked(_, _) | TokenModel::PendingLegacy(_, _) => unreachable!(),
+        };
+        Self {
+            value,
+            request_level,
+            observed_conflict,
+        }
+    }
 }
 
 impl TokenModel {
@@ -111,14 +314,136 @@ impl TokenModel {
 
     pub fn valid(&self) -> bool {
         match self {
-            Self::Response(id) | Self::TurnContext(id) => Self::valid_id(id),
-            Self::Unresolved | Self::Ambiguous | Self::ResponseConflict => true,
+            Self::Response(id) | Self::TurnContext(id) | Self::RequestSelection(id) => {
+                Self::valid_id(id)
+            }
+            Self::Unresolved
+            | Self::Ambiguous
+            | Self::TurnConflict
+            | Self::RequestSelectionConflict
+            | Self::LegacyResponseConflict
+            | Self::ResponseConflict => true,
+            Self::Rechecked(model, _) | Self::PendingLegacy(model, _) => model.valid(),
+        }
+    }
+
+    pub fn basis(&self) -> &Self {
+        match self {
+            Self::Rechecked(model, _) => model.basis(),
+            Self::PendingLegacy(model, pending) => pending.visible(model.basis()),
+            model => model,
+        }
+    }
+
+    fn split(self) -> (Self, ModelRepair, LegacyModelMarkers) {
+        match self {
+            Self::Rechecked(model, repair) => {
+                let (model, inner, pending) = model.split();
+                (model, repair.combine(inner), pending)
+            }
+            Self::PendingLegacy(model, pending) => {
+                let (model, repair, inner) = model.split();
+                (model, repair, pending.combine(inner))
+            }
+            Self::Ambiguous => (
+                Self::Unresolved,
+                ModelRepair::default(),
+                LegacyModelMarkers {
+                    turn: true,
+                    response: false,
+                },
+            ),
+            Self::LegacyResponseConflict => (
+                Self::Unresolved,
+                ModelRepair::default(),
+                LegacyModelMarkers {
+                    turn: false,
+                    response: true,
+                },
+            ),
+            model => (model, ModelRepair::default(), LegacyModelMarkers::default()),
+        }
+    }
+
+    pub fn rechecked(self, repair: ModelRepair) -> Self {
+        let (model, old, pending) = self.split();
+        Self::compose(model, repair.combine(old), pending)
+    }
+
+    fn compose(observed: Self, repair: ModelRepair, pending: LegacyModelMarkers) -> Self {
+        let pending = pending.repair(repair);
+        let model = match (pending.turn, pending.response, observed) {
+            (false, false, model) => model,
+            (true, false, Self::Unresolved) => Self::Ambiguous,
+            (false, true, Self::Unresolved) => Self::LegacyResponseConflict,
+            (_, _, model) => Self::PendingLegacy(Box::new(model), pending),
+        };
+        if repair.empty() {
+            model
+        } else {
+            Self::Rechecked(Box::new(model), repair)
+        }
+    }
+
+    /// Remove new metadata from the bytes of a pre-child reader's snapshot.
+    fn legacy(self) -> Self {
+        match self.basis().clone() {
+            Self::TurnConflict => Self::Ambiguous,
+            Self::ResponseConflict => Self::LegacyResponseConflict,
+            model => model,
+        }
+    }
+
+    /// Pre-child readers retain their original representation and exact
+    /// raw-string comparisons so a previously issued page can be replayed.
+    pub fn merge_legacy(old: Option<Self>, new: Option<Self>) -> Option<Self> {
+        Self::merge_basis(old.map(Self::legacy), new.map(Self::legacy)).map(Self::legacy)
+    }
+
+    fn selected_id(&self) -> Option<(u8, &str)> {
+        match self {
+            Self::Response(id) => Some((3, id)),
+            Self::RequestSelection(id) => Some((2, id)),
+            Self::TurnContext(id) => Some((1, id)),
+            _ => None,
         }
     }
 
     /// No evidence cannot revoke existing evidence. A contradiction at the
     /// same evidence level must not silently choose a new model.
     pub fn merge(old: Option<Self>, new: Option<Self>) -> Option<Self> {
+        if old.is_none() && new.is_none() {
+            return None;
+        }
+        let (old, old_repair, old_pending) = old.unwrap_or(Self::Unresolved).split();
+        let (new, new_repair, new_pending) = new.unwrap_or(Self::Unresolved).split();
+        let mut repair = old_repair.combine(new_repair);
+        let pending = old_pending.combine(new_pending);
+        let old_id = old.selected_id();
+        let new_id = new.selected_id();
+        if let (Some((rank, a)), Some((other_rank, b))) = (old_id, new_id)
+            && rank == other_rank
+            && a != b
+            && crate::token_prices::price(a)
+                .zip(crate::token_prices::price(b))
+                .is_some_and(|(a, b)| a.id == b.id)
+        {
+            // Which spelling was seen first has no bearing on identity.
+            repair.equivalent_response_ids |= rank == 3;
+            repair.equivalent_turn_ids |= rank == 1;
+            let model = if (a.len(), a) <= (b.len(), b) {
+                old
+            } else {
+                new
+            };
+            return Some(Self::compose(model, repair, pending));
+        }
+        // Combine evidence first, then apply legacy uncertainty only to its
+        // visible projection. Later rescans must still see earlier claims.
+        Self::merge_basis(Some(old), Some(new)).map(|model| Self::compose(model, repair, pending))
+    }
+
+    fn merge_basis(old: Option<Self>, new: Option<Self>) -> Option<Self> {
         match (old, new) {
             (None, m) | (m, None) => m,
             (Some(Self::Unresolved), m) | (m, Some(Self::Unresolved)) => m,
@@ -126,8 +451,161 @@ impl TokenModel {
             (Some(Self::ResponseConflict), _)
             | (_, Some(Self::ResponseConflict))
             | (Some(Self::Response(_)), Some(Self::Response(_))) => Some(Self::ResponseConflict),
+            (Some(Self::LegacyResponseConflict), _) | (_, Some(Self::LegacyResponseConflict)) => {
+                Some(Self::LegacyResponseConflict)
+            }
             (Some(m @ Self::Response(_)), _) | (_, Some(m @ Self::Response(_))) => Some(m),
+            (Some(Self::RequestSelectionConflict), _)
+            | (_, Some(Self::RequestSelectionConflict))
+            | (Some(Self::RequestSelection(_)), Some(Self::RequestSelection(_))) => {
+                Some(Self::RequestSelectionConflict)
+            }
+            (Some(m @ Self::RequestSelection(_)), _) | (_, Some(m @ Self::RequestSelection(_))) => {
+                Some(m)
+            }
+            (Some(Self::TurnConflict), _)
+            | (_, Some(Self::TurnConflict))
+            | (Some(Self::TurnContext(_)), Some(Self::TurnContext(_))) => Some(Self::TurnConflict),
             _ => Some(Self::Ambiguous),
+        }
+    }
+}
+
+#[cfg(test)]
+mod model_tests {
+    use super::*;
+
+    #[test]
+    fn exact_selection_outranks_turn_context() {
+        let context = TokenModel::TurnContext("context".into());
+        let exact = TokenModel::RequestSelection("selected".into());
+        let actual = TokenModel::Response("rerouted".into());
+        assert_eq!(
+            TokenModel::merge(Some(exact.clone()), Some(context)),
+            Some(exact.clone())
+        );
+        assert_eq!(
+            TokenModel::merge(Some(exact.clone()), Some(actual.clone())),
+            Some(actual)
+        );
+        assert_eq!(
+            TokenModel::merge(
+                Some(exact),
+                Some(TokenModel::RequestSelection("other".into()))
+            ),
+            Some(TokenModel::RequestSelectionConflict)
+        );
+    }
+
+    #[test]
+    fn native_recheck_only_removes_the_explained_legacy_marker() {
+        let selected = TokenModel::TurnContext("selected".into());
+        let reroute = selected.clone().rechecked(ModelRepair {
+            unkeyed_reroute: true,
+            ..Default::default()
+        });
+        let malformed = selected.rechecked(ModelRepair {
+            malformed_response: true,
+            ..Default::default()
+        });
+        for (marker, repair) in [
+            (TokenModel::Ambiguous, reroute.clone()),
+            (TokenModel::LegacyResponseConflict, malformed.clone()),
+        ] {
+            assert_eq!(
+                TokenModel::merge(Some(marker.clone()), Some(repair.clone())),
+                Some(repair.clone())
+            );
+            assert_eq!(
+                TokenModel::merge(Some(repair.clone()), Some(marker)),
+                Some(repair)
+            );
+        }
+        assert_eq!(
+            TokenModel::merge(Some(reroute.clone()), Some(TokenModel::TurnConflict))
+                .as_ref()
+                .map(TokenModel::basis),
+            Some(&TokenModel::TurnConflict)
+        );
+        assert_eq!(
+            TokenModel::merge(Some(malformed), Some(TokenModel::ResponseConflict))
+                .as_ref()
+                .map(TokenModel::basis),
+            Some(&TokenModel::ResponseConflict)
+        );
+        assert_eq!(
+            TokenModel::merge(Some(reroute), Some(TokenModel::LegacyResponseConflict))
+                .as_ref()
+                .map(TokenModel::basis),
+            Some(&TokenModel::LegacyResponseConflict)
+        );
+    }
+
+    #[test]
+    fn exact_catalog_aliases_resolve_at_every_evidence_rank() {
+        for model in [
+            TokenModel::TurnContext as fn(String) -> TokenModel,
+            TokenModel::RequestSelection,
+            TokenModel::Response,
+        ] {
+            let short = model("gpt-6.2-sol".into());
+            let full = model("openai/gpt-6.2-sol-20261117".into());
+            let unlisted = model("gpt-6.2-sol:batch".into());
+            let forward = TokenModel::merge(Some(full.clone()), Some(short.clone())).unwrap();
+            let reverse = TokenModel::merge(Some(short.clone()), Some(full)).unwrap();
+            assert_eq!(forward, reverse);
+            assert_eq!(forward.basis(), &short);
+            assert!(
+                TokenModel::merge(Some(short), Some(unlisted))
+                    .unwrap()
+                    .selected_id()
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_uncertainty_never_discards_later_actual_evidence() {
+        let legacy = TokenModel::LegacyResponseConflict;
+        let live = TokenModel::Response("gpt-6.2-sol".into());
+        let native = TokenModel::Response("gpt-6.2-astra".into())
+            .rechecked(ModelRepair::native(false, true));
+        let held = TokenModel::merge(Some(legacy.clone()), Some(live.clone())).unwrap();
+        assert_eq!(held.basis(), &legacy);
+        assert_eq!(
+            serde_json::to_value(&held).unwrap(),
+            serde_json::json!({"source":"response_conflict",
+                "held_model":{"source":"response","id":"gpt-6.2-sol"}})
+        );
+        assert_eq!(
+            TokenModel::merge(
+                Some(held.clone()),
+                Some(live.rechecked(ModelRepair::native(false, true)))
+            )
+            .unwrap()
+            .basis(),
+            &TokenModel::Response("gpt-6.2-sol".into())
+        );
+        let evidence = [legacy, TokenModel::Response("gpt-6.2-sol".into()), native];
+        for order in [
+            [0, 1, 2],
+            [0, 2, 1],
+            [1, 0, 2],
+            [1, 2, 0],
+            [2, 0, 1],
+            [2, 1, 0],
+        ] {
+            let evidence = order
+                .into_iter()
+                .fold(None, |merged, index| {
+                    let next = TokenModel::merge(merged, Some(evidence[index].clone())).unwrap();
+                    let encoded = serde_json::to_string(&next).unwrap();
+                    let decoded = serde_json::from_str(&encoded).unwrap();
+                    assert_eq!(next, decoded);
+                    Some(decoded)
+                })
+                .unwrap();
+            assert_eq!(evidence.basis(), &TokenModel::ResponseConflict);
         }
     }
 }

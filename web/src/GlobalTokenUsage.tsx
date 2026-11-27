@@ -147,56 +147,95 @@ const sourceNames: Record<string, string> = {
   feishu: "飞书研判",
 };
 
+function SourceRow({ row }: { row: TokenUsageSource }) {
+  const [expanded, setExpanded] = useState(false);
+  const usage = row.usage;
+  const name = sourceNames[row.source] ?? row.source;
+  const unit = row.source === "runner" ? "Run" : "回合";
+  const hasRequests = usage.reported_requests > 0;
+  const notes = [
+    row.source === "runner" && "含该 Run 的原生子 Agent",
+    usage.unobserved_before_collection > 0 &&
+      `采集启用前 ${format.format(usage.unobserved_before_collection)} 个`,
+    row.responses_without_usage !== null &&
+      row.responses_without_usage > 0 &&
+      `${format.format(row.responses_without_usage)} 条请求用量未知`,
+    row.attempts_without_turn > 0 &&
+      `${format.format(row.attempts_without_turn)} 次尝试未核实回合`,
+    row.shared_turn_attempts > 0 &&
+      `${format.format(row.shared_turn_attempts)} 次共享回合已合并`,
+    row.shared_issue_responses > 0 &&
+      `${format.format(row.shared_issue_responses)} 条重叠请求归 Issue`,
+    row.conflicts > 0 && `${format.format(row.conflicts)} 条请求用量冲突`,
+  ].filter(Boolean);
+  return (
+    <li>
+      <details
+        className="usage-source"
+        onToggle={(event) => setExpanded(event.currentTarget.open)}
+      >
+        <summary>
+          <span className="usage-source-name">
+            <strong>{name}</strong>
+            <span className="detail-muted">
+              已观测 {format.format(usage.observed_runs)} /{" "}
+              {format.format(usage.started_runs)} 个{unit}
+            </span>
+            {notes.length > 0 && (
+              <span className="detail-muted">{notes.join(" · ")}</span>
+            )}
+          </span>
+          <span className="usage-source-amount">
+            {hasRequests ? (
+              <>
+                <span>
+                  <bdi>{tokens(usage.total_tokens)}</bdi> Token
+                </span>
+                <span className="detail-muted">
+                  {format.format(usage.reported_requests)} 条已识别请求
+                </span>
+                {usage.estimate && (
+                  <span>
+                    <EstimateValue estimate={usage.estimate} />
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="detail-muted">无数据</span>
+            )}
+          </span>
+        </summary>
+        {expanded &&
+          (hasRequests ? (
+            <TokenModelUsage
+              usage={usage}
+              label={`${name} · 模型明细`}
+              compact
+            />
+          ) : (
+            <p className="detail-muted usage-source-empty">
+              该来源暂无已记录请求。
+            </p>
+          ))}
+      </details>
+    </li>
+  );
+}
+
 function SourceRows({ rows }: { rows: TokenUsageSource[] }) {
   return (
     <section className="usage-sources" aria-labelledby="usage-sources-heading">
       <h2 id="usage-sources-heading">按调用来源</h2>
-      <ul>
-        {rows.map((row) => {
-          const usage = row.usage;
-          const unit = row.source === "runner" ? "Run" : "回合";
-          const notes = [
-            row.source === "runner" && "含该 Run 的原生子 Agent",
-            usage.unobserved_before_collection > 0 &&
-              `采集启用前 ${format.format(usage.unobserved_before_collection)} 个`,
-            row.responses_without_usage !== null &&
-              row.responses_without_usage > 0 &&
-              `${format.format(row.responses_without_usage)} 条请求用量未知`,
-            row.attempts_without_turn > 0 &&
-              `${format.format(row.attempts_without_turn)} 次尝试未核实回合`,
-            row.shared_turn_attempts > 0 &&
-              `${format.format(row.shared_turn_attempts)} 次共享回合已合并`,
-            row.shared_issue_responses > 0 &&
-              `${format.format(row.shared_issue_responses)} 条重叠请求归 Issue`,
-            row.conflicts > 0 &&
-              `${format.format(row.conflicts)} 条请求用量冲突`,
-          ].filter(Boolean);
-          return (
-            <li key={row.source}>
-              <div className="usage-source-name">
-                <h3>{sourceNames[row.source] ?? row.source}</h3>
-                <p className="detail-muted">
-                  已观测 {format.format(usage.observed_runs)} /{" "}
-                  {format.format(usage.started_runs)} 个{unit}
-                </p>
-                {notes.length > 0 && (
-                  <p className="detail-muted">{notes.join(" · ")}</p>
-                )}
-              </div>
-              <div className="usage-source-amount">
-                <div>
-                  <bdi>{tokens(usage.total_tokens)}</bdi> Token
-                </div>
-                <p className="detail-muted">
-                  {format.format(usage.reported_requests)} 条已识别请求
-                </p>
-              </div>
-            </li>
-          );
-        })}
+      <p className="detail-muted token-metric-note">
+        展开来源查看模型明细。费用按 OpenRouter 公示价估算，已观测不代表完整。
+      </p>
+      <ul className="usage-source-list">
+        {rows.map((row) => (
+          <SourceRow key={row.source} row={row} />
+        ))}
       </ul>
       <p className="detail-muted token-metric-note">
-        已观测不代表完整。未保留或无法验证的原始证据不估算，飞书研判不会为计量保存会话原文。
+        未保留或无法验证的原始证据不估算，飞书研判不会为计量保存会话原文。
       </p>
     </section>
   );

@@ -190,14 +190,14 @@ def test_tree(args):
             assert (subtree["started_runs"], subtree["observed_runs"], subtree["unobserved_no_usage"]) == (3, 2, 1)
             models = {row["model"]: row for row in subtree["models"]}
             assert {k: v["response_model_requests"] for k, v in models.items()} == {
-                "gpt-6.2-sol": 1, "gpt-6.2-astra": 1, "deepseek-v4.1-flash": 1, None: 0,
+                "gpt-6.2-sol": 1, "gpt-6.2-astra": 1, "deepseek-v4.1-flash": 1,
             }
-            assert models[None]["requested_models"] == {"deepseek-v4.1-flash": 1}
+            assert models["deepseek-v4.1-flash"]["selected_model_requests"] == 1
             assert models["gpt-6.2-sol"]["uncached_input_tokens"]["tokens"] is None
             assert models["deepseek-v4.1-flash"]["uncached_input_tokens"]["tokens"] == "60000"
             assert models["gpt-6.2-astra"]["uncached_input_tokens"]["tokens"] == "9904"
-            assert models[None]["total_tokens"]["tokens"] == "3600"
-            assert subtree["estimate"] == {"usd": "0.1351816", "partial": True}, models
+            assert models["deepseek-v4.1-flash"]["total_tokens"]["tokens"] == "86000"
+            assert subtree["estimate"] == {"usd": "0.1353496", "partial": True}, models
             assert {r["model"] for r in after_loss["direct"]["models"]} == {"gpt-6.2-sol", "gpt-6.2-astra"}
             nodes = {node["issue_id"]: node for node in after_loss["nodes"]}
             assert set(nodes) == {parent, metered, missing}
