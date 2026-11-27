@@ -276,6 +276,8 @@ pub struct IssueOverview {
     pub short_number: Option<i64>,
     pub title: String,
     pub stage: BoardStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner_agent_id: Option<String>,
     pub objective: String,
     pub repo_ids: Vec<String>,
     pub chat_id: String,

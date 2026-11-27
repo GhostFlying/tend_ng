@@ -83,14 +83,22 @@ def main():
                 "running_slots": 0, "available_for_assignment": 1, "shared_reviews": True,
             }}
 
-            def sync(payload, path=f"/api/v1/runners/{RUNNER}/sync"):
-                request = urllib.request.Request(env["TEND_URL"] + path, data=json.dumps(payload).encode(),
+            def request_json(path, payload=None):
+                data = json.dumps(payload).encode() if payload is not None else None
+                request = urllib.request.Request(env["TEND_URL"] + path, data=data,
                                                  headers={"Content-Type": "application/json",
                                                           "Authorization": "Bearer " + env["TEND_TOKEN"]})
                 with urllib.request.urlopen(request, timeout=5) as response:
                     return json.load(response)
 
+            def sync(payload):
+                return request_json(f"/api/v1/runners/{RUNNER}/sync", payload)
+
+            def overview(issue):
+                return request_json(f"/api/v1/issues/{issue}/overview")
+
             assert sync(heartbeat)["assignments"] == []
+            assert "owner_agent_id" not in overview(legacy)
             other, other_source = dispatch(OTHER_REQUEST, "other")
             other_page = cli("issue", "messages", other)
             [other_dispatch] = other_page["messages"]
@@ -108,10 +116,12 @@ def main():
             assert dispatch_event["source_message_id"] == source
             [(assignment, state)] = sql("SELECT id,state FROM runner_assignments WHERE task_id=?", task["task_id"])
             assert state == "reserved"
+            assert "owner_agent_id" not in overview(parent)
             [contract] = sync(heartbeat)["assignments"]
             assert contract["placement"]["assignment_id"] == assignment
             assert sql("SELECT state FROM runner_assignments WHERE id=?", assignment) == [("issued",)]
             assert timeline(parent) == [dispatch_event]
+            assert "owner_agent_id" not in overview(parent)
             browser("issued", PARENT=parent, SOURCE=source, LEGACY=legacy, LEGACY_SOURCE=legacy_source,
                     OTHER=other, OTHER_SOURCE=other_source)
 
@@ -135,6 +145,8 @@ def main():
                     assert child_claim["author"] == "worker"
                     assert rows[0] == dispatch_event and rows[1] == parent_claim
                     child = str(child_claim["short_number"])
+                    assert overview(parent)["owner_agent_id"] == "coordinator"
+                    assert overview(child)["owner_agent_id"] == "worker"
                     child_rows = timeline(child)
                     child_dispatch = child_rows[0]
                     assert child_dispatch["dispatch_provenance"] == {

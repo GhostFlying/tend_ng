@@ -4,6 +4,8 @@
 
 时间线里的派发者、历史接手 Agent 和当前 Owner 是不同事实。只在 Server 提交 Runner 的接受回执时展示该 assignment 合同中的接手 Agent。预分配和取件不能提前创建接手事件，后续 Owner 或 Run 也不改写历史。 [派发与投递](server-runner.md#分配与投递)
 
+Issue 详情的「负责 Agent」展示该 Issue 最近确认领取的具名 Owner。首次领取前显示「未领取」。等待、没有活跃 Run 或接续分配尚未确认时保留已生效的归属，子 Issue 不继承父级的 Owner。
+
 ## 工作委派与 Issue 结案
 
 顶层 Owner 保留用户原目标、授权和停点。单人交付由 Work Agent 在原顶层 Task 执行，不创建占位子 Issue。协调工作由 Issue Agent 委派，直接 Owner 也可以按需委派真正独立的目标。Server 按 category 分配具名配置，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。

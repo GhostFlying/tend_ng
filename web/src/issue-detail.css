@@ -343,6 +343,10 @@ p.issue-objective {
   gap: 4px;
 }
 
+.detail-properties dl > div {
+  grid-template-columns: 6em minmax(0, 1fr);
+}
+
 .detail-properties dl {
   margin: 12px 0 0;
 }

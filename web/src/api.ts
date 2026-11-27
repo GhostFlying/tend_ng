@@ -164,6 +164,7 @@ export type IssueOverviewData = {
   short_number?: number;
   title: string;
   stage: BoardStage;
+  owner_agent_id?: string;
   objective: string;
   repo_ids: string[];
   chat_id: string;

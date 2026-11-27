@@ -511,6 +511,10 @@ function IssueProperties({ data }: { data: IssueOverviewData }) {
           <dt>阶段</dt>
           <dd>{issueStageLabels[data.stage]}</dd>
         </div>
+        <div>
+          <dt>负责 Agent</dt>
+          <dd>{data.owner_agent_id ?? "未领取"}</dd>
+        </div>
         {data.repo_ids.length > 0 && (
           <div>
             <dt>仓库</dt>

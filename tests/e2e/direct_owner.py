@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import urllib.request
 
 from chat import lose_first_response, server, wait_for
 from child_windows import expire_child_window
@@ -79,6 +80,12 @@ def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
     def state(issue, expected):
         return wait_for(lambda: cli("issue", "read", issue), lambda view: view["status"] == expected)
 
+    def overview(issue):
+        request = urllib.request.Request(f"{env['TEND_URL']}/api/v1/issues/{issue}/overview",
+                                         headers={"Authorization": "Bearer " + env["TEND_TOKEN"]})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            return json.load(response)
+
     def report(original, snippet):
         return wait_for(lambda: next((m for m in cli("chat", "read", "main")["messages"]
                                      if m.get("reply_to") == original and snippet in m["text"]), None), bool)
@@ -129,6 +136,7 @@ def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
                 assert rejected.returncode and "409" in rejected.stderr, rejected.stderr
                 assert sql("server", "SELECT predecessor, successor FROM runner_replacements") == []
             assert finished["placement"]["agent"]["id"] == "worker"
+            assert overview(merge)["owner_agent_id"] == "worker"
             assert finished["placement"]["agent"]["reasoning_effort"] == "medium"
             assert finished["placement"]["host_id"] == config["host_id"]
             original_merge = original
@@ -150,6 +158,8 @@ def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
             assert waiting["placement"]["agent"]["id"] == "economy"
             assert waiting["run"]["phase"]["waiting_for_external"]
             assert waiting["issue_state"] == "open"
+            waiting_overview = overview(ci)
+            assert waiting_overview["stage"] == "waiting" and waiting_overview["owner_agent_id"] == "economy"
             no_children(ci, task)
             assert sql("runner", "SELECT execution_state, retains_workspace FROM received_assignments "
                        "WHERE task_id = ?", task) == [("waiting_external", 1)]
@@ -165,6 +175,7 @@ def exercise(server_bin, cli_bin, runner_bin, root, legacy_bin):
                              and view.get("placement", {}).get("runner_id") == "next-runner")
             assert moved["task_id"] == task and moved["placement"]["host_id"] == config["host_id"]
             assert moved["placement"]["agent"] == waiting["placement"]["agent"]
+            assert overview(ci)["owner_agent_id"] == "economy"
             assert predecessor.wait(12) == 0
             assert cli("runner", "retire", config["runner_id"])["state"] == "retired"
             assert sql("next", "SELECT execution_state, retains_workspace FROM received_assignments "

@@ -108,6 +108,19 @@ impl Store {
         else {
             return Ok(None);
         };
+        // A new reservation can belong to a continuation or handoff. Only an
+        // accepted assignment establishes or changes this Issue's named Owner.
+        let owner_agent_id = tx
+            .query_row(
+                "SELECT json_extract(a.contract, '$.placement.agent.id')
+                 FROM tasks t JOIN runner_assignments a ON a.task_id = t.id
+                 WHERE t.issue_id = ?1 AND a.state = 'accepted'
+                 ORDER BY t.rowid DESC, a.rowid DESC LIMIT 1",
+                [id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            .optional()?
+            .flatten();
         let roots = serde_json::to_string(&[id])?;
         enrich_cards(
             &tx,
@@ -207,6 +220,7 @@ impl Store {
             short_number: card.short_number,
             title: card.title,
             stage: card.stage,
+            owner_agent_id,
             objective,
             repo_ids: card.repo_ids,
             chat_id,
@@ -486,4 +500,43 @@ fn attach_pulls(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn issue_overview_keeps_the_last_accepted_owner_without_a_run() -> Result<()> {
+        let store = Store::initialize(Path::new(":memory:"))?;
+        store.db.execute_batch(
+            r#"INSERT INTO chat_messages (id, chat_id, text) VALUES ('source', 'main', 'Fixture');
+               INSERT INTO issues (id, source_seq, title, objective, parent_issue_id) VALUES
+                   ('parent', 1, 'Parent', '', NULL), ('child', 1, 'Child', '', 'parent');
+               INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities) VALUES
+                   ('original', 'parent', 'issue-router', 'completed', '[]', '[]'),
+                   ('continuation', 'parent', 'issue-router', 'awaiting_receipt', '[]', '[]'),
+                   ('child-task', 'child', 'implementation', 'reserved', '[]', '[]');
+               INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host', '{}', 0);
+               INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at) VALUES
+                   ('original-claim', 'original', 'runner', '{"placement":{"agent":{"id":"prior"}}}', 'accepted', 0),
+                   ('next-claim', 'continuation', 'runner', '{"placement":{"agent":{"id":"next"}}}', 'issued', 0),
+                   ('child-claim', 'child-task', 'runner', '{"placement":{"agent":{"id":"worker"}}}', 'reserved', 0);
+               UPDATE tasks SET current_assignment = 'next-claim' WHERE id = 'continuation';
+               UPDATE tasks SET current_assignment = 'child-claim' WHERE id = 'child-task';"#,
+        )?;
+        let owner = |issue| -> Result<Option<String>> {
+            Ok(store.issue_overview(issue)?.unwrap().owner_agent_id)
+        };
+        assert_eq!(owner("parent")?.as_deref(), Some("prior"));
+        assert_eq!(owner("child")?, None);
+        store.db.execute_batch(
+            "UPDATE runner_assignments SET state = 'accepted' WHERE id IN ('next-claim', 'child-claim');
+             UPDATE tasks SET status = 'accepted' WHERE id IN ('continuation', 'child-task');",
+        )?;
+        assert_eq!(owner("parent")?.as_deref(), Some("next"));
+        assert_eq!(owner("child")?.as_deref(), Some("worker"));
+        Ok(())
+    }
 }

@@ -80,6 +80,55 @@ function dispatchRow(page, text) {
     .filter({ has: page.getByText(text, { exact: true }) });
 }
 
+async function verifyOwner(page, expected, size, capture = false) {
+  const properties = page.getByRole("complementary", { name: "工作属性" });
+  const labels = properties.locator("dl dt");
+  const owner = properties.getByText(expected, { exact: true });
+  await owner.waitFor();
+  assert.deepEqual((await labels.allTextContents()).slice(0, 2), [
+    "阶段",
+    "负责 Agent",
+  ]);
+  assert.equal(
+    await properties.locator("dl dd").nth(1).textContent(),
+    expected,
+  );
+  assert(
+    await labels.nth(1).evaluate((label) => {
+      const range = document.createRange();
+      range.selectNodeContents(label);
+      return (
+        range.getBoundingClientRect().height <
+        1.5 * parseFloat(globalThis.getComputedStyle(label).fontSize)
+      );
+    }),
+    "the Owner label fits on one line",
+  );
+  if (!capture) return;
+
+  const panel = await properties.boundingBox();
+  const summary = await page.locator(".issue-detail-summary").boundingBox();
+  if (size === "mobile") {
+    assert.equal(panel.x, summary.x);
+    assert(panel.y > summary.y + summary.height);
+    await page
+      .getByRole("navigation", { name: "Issue 入口" })
+      .getByRole("link", { name: "工作属性" })
+      .click();
+    await page.waitForURL(/#issue-properties$/);
+  } else {
+    assert(panel.x > summary.x + summary.width);
+  }
+  await owner.scrollIntoViewIfNeeded();
+  assert(await owner.isVisible());
+  if (screenshots) {
+    await mkdir(screenshots, { recursive: true });
+    await page.screenshot({
+      path: join(screenshots, `issue-owner-${size}.png`),
+    });
+  }
+}
+
 try {
   for (const [size, width, height] of [
     ["desktop", 1440, 1000],
@@ -104,6 +153,7 @@ try {
     const claims = page.locator(".takeover-row");
     if (phase === "issued") {
       assert.equal(await claims.count(), 0);
+      await verifyOwner(page, "未领取", size);
       await verifyAndCapture(page, "issued", size);
       await dispatch.getByRole("link", { name: "原对话" }).click();
       await page.waitForURL(`${url}/#message-${source}`);
@@ -112,6 +162,7 @@ try {
         .getByText(originalText, { exact: true })
         .waitFor();
       await openIssue(page, legacy, "稍后整理发布说明");
+      await verifyOwner(page, "未领取", size);
       const unnamed = dispatchRow(page, legacyObjective);
       await unnamed.getByText("来自主会话", { exact: true }).waitFor();
       assert.equal(
@@ -176,6 +227,7 @@ try {
         ["coordinator 已接手", childObjective, "worker 已接手"],
       );
       await verifyAndCapture(page, "accepted", size);
+      await verifyOwner(page, "coordinator", size, true);
       const childLink = claims.getByRole("link", {
         name: `#${child} 整理快速上手指南`,
       });
@@ -190,6 +242,7 @@ try {
         .waitFor();
       await claims.getByText("worker 已接手", { exact: true }).waitFor();
       assert.equal(await claims.count(), 1);
+      await verifyOwner(page, "worker", size);
       await verifyAndCapture(page, "child", size);
     }
     await page.close();
@@ -198,4 +251,6 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`PASS built Issue timeline (${phase}) at 1440×1000 and 390×844`);
+console.log(
+  `PASS built Issue timeline and owner (${phase}) at 1440×1000 and 390×844`,
+);
