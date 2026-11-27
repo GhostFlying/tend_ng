@@ -250,3 +250,21 @@ tend discussion restore "$DISCUSSION_ID"
 ```
 
 Web 的「转交主 Chat」和 CLI `tend discussion handoff-now` 会用原讨论上下文写出下一步请求、最终结论或待决事项，再投递到主 Chat。重复请求使用同一个操作 ID，失败不发送，可查证后重试。主 Chat Router 根据可查证的讨论原话行动：已明确授权的工作正常派发，只讨论或待决定的事项不启动实施。生成正文、引用和点击不新增授权，转交也不能代答 Attention。可从「预览 / 编辑」手动发送，CLI 保留 `draft`、`draft-read` 和 `handoff`，另有 `draft-manual` 不依赖模型。手动发送丢失响应时使用相同操作 ID 和原 JSON 重试。 [讨论 API 与迁移边界](docs/chat-routing.md#独立讨论与显式转交)
+
+### 飞书建议（可选 Server 配置）
+
+给 Server 传入 `--feishu-suggestions-config <json-file>` 才会启用读取。Server 运行用户需能执行正式 `lark-cli` 并已有飞书用户 OAuth 授权。用 `lark-cli whoami` 核对 profile 与 `onBehalfOf.openId`，填写应用范围内的用户身份。不开通 Bot 授权、不把令牌放进 Tend 或配置文件。
+
+```json
+{
+  "owner_open_id": "ou_example",
+  "profile": "your-lark-cli-profile",
+  "agent": {
+    "id": "FeishuTriage",
+    "home": "./feishu-assessor-home",
+    "cwd": "./empty-feishu-assessor-cwd"
+  }
+}
+```
+
+`profile` 可省略，`cli` 默认 `lark-cli`（需在 Server 的 PATH 上）。采集子进程用 GNU `timeout` 限时，使用 UTC 解析 CLI 文本时间。省略 `agent` 时仍采集并显示来源，不生成模型研判。配置具名研判时，`home` 是独立用户目录（默认 `codex-ark` 从其中的 `.codex-ark` 读取已准备好的 Ark 配置），`cwd` 是单独的空目录。可选覆盖 `program`、`model`、`reasoning_effort`，默认值分别为 `codex-ark`、`deepseek-v4.1-flash`、`high`。扫描及研判不使用 Runner，显式快转沿已有 Discussion 配置与权限。用 `tend feishu-suggestions --help` 查 CLI，用 `tend feishu-suggestions list` 查最后一次成功扫描与来源缺口。

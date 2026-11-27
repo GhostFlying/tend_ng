@@ -1,0 +1,151 @@
+"""Local lark-cli contract fixture. No provider account or network."""
+from datetime import datetime, timezone
+import json
+import os
+from pathlib import Path
+import sys
+
+root = Path(__file__).parent
+state = json.loads((root / "feishu-scenario.json").read_text())
+args = sys.argv[1:]
+assert os.environ.get("TZ") == "UTC" and not os.environ.get("TEND_TOKEN")
+assert args[-2:] == ["--profile", "fixture-user"]
+args = args[:-2]
+owner = "ou_fixture_owner"
+with (root / "feishu-cli-calls.jsonl").open("a") as log:
+    log.write(json.dumps(args) + "\n")
+
+
+def arg(flag):
+    return args[args.index(flag) + 1]
+
+
+def now_label(epoch):
+    return datetime.fromtimestamp(epoch, timezone.utc).strftime("%Y-%m-%d %H:%M")
+
+
+def msg(key, chat, name, text, at, *, mentions=None, author="林青", sender="ou_colleague", thread=None,
+        root_id=None, parent_id=None, position=120):
+    output = {
+        "message_id": f"om_{key}", "chat_id": f"oc_{chat}", "chat_name": name,
+        "chat_type": "group", "content": text, "msg_type": "text", "create_time": now_label(at),
+        "update_time": now_label(at), "deleted": False, "message_position": position,
+        "mentions": mentions or [],
+        "sender": {"id": sender, "id_type": "open_id", "name": author, "sender_type": "user"},
+        "message_app_link": f"https://applink.feishu.cn/client/chat/open?openChatId=oc_{chat}&position={position}",
+    }
+    if thread:
+        output["thread_id"] = f"omt_{thread}"
+    if root_id:
+        output["root_id"] = f"om_{root_id}"
+    if parent_id:
+        output["parent_id"] = f"om_{parent_id}"
+    return output
+
+
+def page(messages, *, more=False, token="", total=None):
+    data = {"messages": messages, "has_more": more, "page_token": token}
+    if total is not None:
+        data["total"] = total
+    print(json.dumps({"ok": True, "identity": "user", "data": data}, ensure_ascii=False))
+
+
+epoch = state["at"]
+mark = [{"id": owner, "key": "@_user_1", "name": "本人"}]
+qa = msg("qa_anchor", "qa", "移动端发布协作", "@你 今天能确认 Android 灰度窗口吗？先沿用 5%，需要补上回滚阈值。",
+         epoch - 1800, mentions=mark, thread="qa")
+qa_reply = msg("qa_reply", "qa", "移动端发布协作", "候选包已通过冒烟测试。灰度比例先维持 5%，回滚阈值还在等 QA 答复。",
+               epoch - 1200, author="沈言", thread="qa", root_id="qa_anchor", position=124)
+docs = msg("docs_anchor", "docs", "研发体验", "@你 能看一下新文档的本地启动流程吗？", epoch - 3000, mentions=mark, author="周韵")
+docs_reply = msg("docs_reply", "docs", "研发体验", "本地启动步骤已补齐，示例经两位同学核对，文档项可以关闭。",
+                 epoch - 900, root_id="docs_anchor", author="周韵", position=128)
+if args == ["whoami"]:
+    print(json.dumps({"brand": "feishu", "identity": "user", "available": True, "onBehalfOf": {
+        "openId": "ou_other" if state["mode"] == "wrong-user" else owner,
+    }}))
+elif args[:3] == ["api", "POST", "/open-apis/im/v1/messages/search"]:
+    raw = json.loads(arg("--data"))
+    query = json.loads(arg("--params"))
+    assert arg("--as") == "user" and raw["filter"]["is_at_me"] and raw["query"] == ""
+    assert query["page_size"] == "50"
+    time_range = raw["filter"]["time_range"]
+    start = datetime.fromisoformat(time_range["start_time"]).timestamp()
+    end = datetime.fromisoformat(time_range["end_time"]).timestamp()
+
+    def search_page(messages, *, more=False, token=""):
+        (root / "feishu-hydration.json").write_text(json.dumps(messages, ensure_ascii=False))
+        items = [{"meta_data": {"message_id": m["message_id"], "chat_id": m["chat_id"],
+                               "create_time": m["create_time"], "update_time": m["update_time"]}}
+                 for m in messages]
+        print(json.dumps({"ok": True, "identity": "user", "data": {
+            "items": items, "has_more": more, "page_token": token}}))
+
+    assert 0 <= end - start <= 86400 + 900
+    if state["mode"] in ("failure", "gap") or state.get("fail_after") == "yes":
+        if "page_token" in query:
+            if state["mode"] == "failure":
+                sys.exit(4)
+            search_page([], more=True, token="fixture-cursor")
+        else:
+            problem = msg("failed_page", "skip", "不能提交的页", "@你 cursor 未完成", int(end)-90, mentions=mark)
+            search_page([problem], more=True, token="fixture-cursor")
+        sys.exit(0)
+    if state["mode"] == "missing-detail":
+        search_page([qa])
+        sys.exit(0)
+    if state["mode"] == "empty":
+        search_page([])
+        sys.exit(0)
+    old = msg("too_old", "skip", "超期", "存储期以前的材料", epoch - 8 * 86400 + 3600, mentions=mark)
+    mention_variant = [{"id": {"open_id": owner}, "key": "@_user_1", "name": "本人"}]
+    release = msg("release_anchor", "release", "发布支持", "@你 周五发布看板还缺一个负责人，请问这次谁确认？",
+                  epoch - 4200, mentions=mention_variant, author="顾宁")
+    release2 = msg("release_update", "release", "发布支持", "@你 已经确认发布窗口，负责人还需要明确。",
+                   epoch - 3600, mentions=mark, author="顾宁", position=122)
+    all_only = msg("all", "qa", "移动端发布协作", "@全员 不应进入建议", epoch - 1300,
+                   mentions=[{"id": "all", "name": "所有人"}])
+    self_post = msg("self", "qa", "移动端发布协作", "@你 不应采集本人发言", epoch - 1500, mentions=mark, sender=owner)
+    name_only = msg("nameonly", "qa", "移动端发布协作", "仅文字 @你 无结构化提及", epoch - 800)
+    other_topic = msg("other_topic", "qa", "移动端发布协作", "@你 另一个话题不应归入灰度",
+                      epoch - 5400, mentions=mark, thread="qa_other", position=101)
+    messages = [qa, docs, old, release, release2, all_only, self_post, name_only, other_topic]
+    matched = [m for m in messages if start - 59 <= datetime.fromisoformat(m["create_time"] + "+00:00").timestamp() <= end]
+    if "page_token" in query:
+        assert query["page_token"] == "fixture-cursor" and len(matched) > 1
+        search_page(matched[1:])
+    elif len(matched) > 1:
+        search_page(matched[:1], more=True, token="fixture-cursor")
+    else:
+        search_page(matched)
+elif args[:2] == ["im", "+messages-mget"]:
+    assert arg("--as") == "user" and "--no-reactions" in args
+    hydrated = json.loads((root / "feishu-hydration.json").read_text())
+    assert {m["message_id"] for m in hydrated} == set(arg("--message-ids").split(","))
+    for m in hydrated:
+        m.pop("chat_name")
+    page([] if state["mode"] == "missing-detail" else hydrated, total=len(hydrated))
+elif args[:3] == ["im", "chats", "get"]:
+    assert arg("--as") == "user"
+    title = {"oc_qa": "移动端发布协作", "oc_docs": "研发体验", "oc_release": "发布支持"}[arg("--chat-id")]
+    print(json.dumps({"ok": True, "identity": "user", "data": {"name": title}}, ensure_ascii=False))
+elif args[:2] == ["im", "+threads-messages-list"]:
+    assert arg("--as") == "user" and arg("--order") == "desc"
+    if arg("--thread") == "omt_qa":
+        rows = [qa_reply, qa]
+        if state.get("progress"):
+            rows.insert(0, msg("qa_next", "qa", "移动端发布协作", "新进展：QA 要求验收设备覆盖 Android 12 和 15，阈值继续待确认。",
+                               epoch - 300, author="沈言", thread="qa", root_id="qa_anchor", position=127))
+        page(rows)
+    else:
+        assert arg("--thread") == "omt_qa_other"
+        page([])
+elif args[:2] == ["im", "+chat-messages-list"]:
+    assert arg("--as") == "user" and arg("--start")
+    if arg("--chat-id") == "oc_docs":
+        noise = msg("noise", "docs", "研发体验", "不相关的群聊", epoch - 200)
+        page([noise, docs_reply, docs])
+    else:
+        assert arg("--chat-id") == "oc_release"
+        page([])
+else:
+    raise AssertionError(f"unexpected command {args!r}")

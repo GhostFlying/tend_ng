@@ -11,7 +11,10 @@ export type Source =
   | { kind: "issue"; issue_id: string }
   | { kind: "pull"; url: string }
   | { kind: "worktree"; issue_id: string; task_id: string; repo_id: string };
-export type Reference = Source & {
+export type Reference = (
+  | Source
+  | { kind: "feishu_suggestion"; suggestion_id: string; revision: number }
+) & {
   id: string;
   label: string;
   href: string | null;

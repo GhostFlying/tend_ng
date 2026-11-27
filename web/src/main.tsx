@@ -28,6 +28,12 @@ const GlobalTokenUsage = lazy(() =>
   })),
 );
 
+const FeishuSuggestions = lazy(() =>
+  import("./FeishuSuggestions").then(({ FeishuSuggestions }) => ({
+    default: FeishuSuggestions,
+  })),
+);
+
 const DiscussionSidebar = lazy(() =>
   import("./Discussions").then(({ DiscussionSidebar }) => ({
     default: DiscussionSidebar,
@@ -141,6 +147,7 @@ function App() {
   const page = path === "/agents" ? path : path + search;
   const board = path === "/issues";
   const discussions = path === "/discussions";
+  const feishu = path === "/feishu-suggestions";
   const resourceTitle =
     path === "/agents"
       ? "Agents"
@@ -192,7 +199,7 @@ function App() {
             <a
               href="/"
               aria-current={
-                issue || board || discussions || resourceTitle
+                issue || board || discussions || feishu || resourceTitle
                   ? undefined
                   : "page"
               }
@@ -226,6 +233,13 @@ function App() {
             >
               <NavIcon name="board" />
               <span>看板</span>
+            </a>
+            <a
+              href="/feishu-suggestions"
+              aria-current={feishu ? "page" : undefined}
+            >
+              <NavIcon name="feishu" />
+              <span>飞书建议</span>
             </a>
             <div className="resource-nav">
               <h2>资源</h2>
@@ -266,7 +280,8 @@ function App() {
               {(connected &&
                 (resourceTitle ||
                   (board && "Issue 看板") ||
-                  (discussions && "讨论"))) ||
+                  (discussions && "讨论") ||
+                  (feishu && "飞书建议"))) ||
                 "Tend"}
             </h1>
           )}
@@ -321,6 +336,15 @@ function App() {
                 onReachable={setReachable}
               />
             </Suspense>
+          ) : feishu ? (
+            <Suspense
+              fallback={<main className="resource-page" aria-busy="true" />}
+            >
+              <FeishuSuggestions
+                selected={query.get("id")}
+                onReachable={setReachable}
+              />
+            </Suspense>
           ) : path === "/agents" ? (
             <Agents onReachable={setReachable} />
           ) : path === "/hosts" ? (
@@ -352,6 +376,7 @@ function App() {
             resource={!!resourceTitle}
             board={board || !!issue}
             discussions={discussions}
+            feishu={feishu}
           />
         )}
       </div>

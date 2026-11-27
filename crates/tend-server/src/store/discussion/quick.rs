@@ -10,7 +10,7 @@ use protocol::{
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 
-const PROMPT: &str = "Write the Main Chat handoff message for this standalone discussion. Use the whole relevant discussion within Tend's request boundary, using the saved history tool when earlier context is missing. Write directly to the Main Chat assistant: convey the user's established intent and final outcome as a standalone request, a conclusion to share, or a specific decision they want help with. Do not retell the discussion or use fixed headings or a form. Include only reasons, actual constraints and unresolved choices necessary for the next step. Ignore unrelated last turns, examples, UI/button prompts and the act of transferring; none is a new goal or authorization. Distinguish the user's decisions from the assistant's suggestions and use only real user messages as evidence of authorization. Do not infer a target Issue or turn exploration, a report, or a request for help deciding into an instruction to implement. Where scope matters, state exactly what the user authorized and where it stops. Tend adds the reference list and authorization notice separately. Return only the natural-language message in the user's language, with no JSON, template, or code fence. If this discussion has no substantive intent to carry over, return exactly TEND_NO_HANDOFF.";
+const PROMPT: &str = "Write the Main Chat handoff message for this standalone discussion. Use the whole relevant discussion within Tend's request boundary, using the saved history tool when earlier context is missing. Write directly to the Main Chat assistant: convey the user's established intent and final outcome as a standalone request, a conclusion to share, or a specific decision they want help with. Do not retell the discussion or use fixed headings or a form. Include only reasons, actual constraints and unresolved choices necessary for the next step. Ignore unrelated last turns, examples, UI/button prompts and the act of transferring; none is a new goal or authorization. Distinguish the user's decisions from the assistant's suggestions and use only real user messages as evidence of authorization. Do not infer a target Issue or turn exploration, a report, or a request for help deciding into an instruction to implement. Where scope matters, state exactly what the user authorized and where it stops. Tend adds the reference list and authorization notice separately. Return only the natural-language message in the user's language, with no JSON, template, or code fence. An explicitly selected Feishu suggestion is substantive context even without a user prompt. Otherwise, if there is nothing substantive to carry over, return exactly TEND_NO_HANDOFF.";
 
 pub(super) fn migrate(db: &Connection) -> Result<()> {
     db.execute_batch(
@@ -85,7 +85,11 @@ fn current_operation(db: &Connection, chat: &str) -> Result<String> {
     ))
 }
 
-fn status(db: &Connection, chat: &str, operation: &str) -> Result<DiscussionQuickHandoff> {
+pub(in crate::store) fn quick_status(
+    db: &Connection,
+    chat: &str,
+    operation: &str,
+) -> Result<DiscussionQuickHandoff> {
     let request = db
         .query_row(
             "SELECT q.generation,i.outcome,i.error,h.message_id
@@ -141,6 +145,61 @@ pub(in crate::store) enum HandoffMode {
     WithSource(HandoffSource),
 }
 
+pub(in crate::store) fn request_quick_in_tx(
+    db: &Connection,
+    chat: &str,
+    request: &DiscussionQuickRequest,
+) -> Result<Change<DiscussionQuickHandoff>> {
+    let operation = &request.operation_id;
+    let original = quick_status(db, chat, operation)?;
+    if let Some(original) = original.request {
+        if original.status == DiscussionQuickState::Failed
+            && request.retry_generation == Some(original.generation)
+        {
+            let seq: i64 = db.query_row(
+                    "SELECT i.seq FROM discussion_quick_handoffs q
+                       JOIN discussion_drafts d ON d.id=q.draft_id
+                       JOIN chat_messages m ON m.id=d.message_id JOIN router_inputs i ON i.message_seq=m.seq
+                       WHERE q.operation_id=?1",
+                    [operation],
+                    |row| row.get(0),
+                )?;
+            db.execute(
+                    "UPDATE discussion_quick_handoffs SET generation=generation+1,
+                      after_attempt=COALESCE((SELECT MAX(number) FROM router_attempts WHERE seq=?2),0)
+                      WHERE operation_id=?1",
+                    params![operation, seq],
+                )?;
+            db.execute(
+                "UPDATE router_inputs SET outcome=NULL,error=NULL WHERE seq=?1",
+                [seq],
+            )?;
+        }
+    } else {
+        if request.retry_generation.is_some() || current_operation(db, chat)? != *operation {
+            return Ok(Change::Conflict);
+        }
+        let used: bool = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE operation_id=?1)",
+            [operation],
+            |row| row.get(0),
+        )?;
+        if used || Store::reserved_chat_operation(db, operation)? {
+            return Ok(Change::Conflict);
+        }
+        let refs = serde_json::to_string(&read_refs(db, chat)?)?;
+        let (thread, frontier) = native_frontier(db, chat)?;
+        let draft_id = protocol::new_id();
+        insert_draft_input(db, chat, &draft_id, false, PROMPT)?;
+        db.execute(
+                "INSERT INTO discussion_quick_handoffs(operation_id,draft_id,references_snapshot,native_thread_id,native_turn_frontier)
+                 VALUES(?1,?2,?3,?4,?5)",
+                params![operation, draft_id, refs, thread, frontier],
+            )?;
+    }
+    Ok(Change::Ok(quick_status(db, chat, operation)?))
+}
+
 impl Store {
     pub fn quick_handoff(
         &self,
@@ -155,7 +214,7 @@ impl Store {
                 &current
             }
         };
-        status(&self.db, chat, operation)
+        quick_status(&self.db, chat, operation)
     }
 
     pub fn request_quick_handoff(
@@ -163,57 +222,12 @@ impl Store {
         chat: &str,
         request: &DiscussionQuickRequest,
     ) -> Result<Change<DiscussionQuickHandoff>> {
-        let operation = &request.operation_id;
-        let (tx, timing) = timing::begin(&mut self.db, "discussion_quick_request")?;
-        let original = status(&tx, chat, operation)?;
-        if let Some(original) = original.request {
-            if original.status == DiscussionQuickState::Failed
-                && request.retry_generation == Some(original.generation)
-            {
-                let seq: i64 = tx.query_row(
-                    "SELECT i.seq FROM discussion_quick_handoffs q
-                       JOIN discussion_drafts d ON d.id=q.draft_id
-                       JOIN chat_messages m ON m.id=d.message_id JOIN router_inputs i ON i.message_seq=m.seq
-                       WHERE q.operation_id=?1",
-                    [operation],
-                    |row| row.get(0),
-                )?;
-                tx.execute(
-                    "UPDATE discussion_quick_handoffs SET generation=generation+1,
-                      after_attempt=COALESCE((SELECT MAX(number) FROM router_attempts WHERE seq=?2),0)
-                      WHERE operation_id=?1",
-                    params![operation, seq],
-                )?;
-                tx.execute(
-                    "UPDATE router_inputs SET outcome=NULL,error=NULL WHERE seq=?1",
-                    [seq],
-                )?;
-            }
-        } else {
-            if request.retry_generation.is_some() || current_operation(&tx, chat)? != *operation {
-                return Ok(Change::Conflict);
-            }
-            let used: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM chat_messages WHERE operation_id=?1)",
-                [operation],
-                |row| row.get(0),
-            )?;
-            if used || Self::reserved_chat_operation(&tx, operation)? {
-                return Ok(Change::Conflict);
-            }
-            let refs = serde_json::to_string(&read_refs(&tx, chat)?)?;
-            let (thread, frontier) = native_frontier(&tx, chat)?;
-            let draft_id = protocol::new_id();
-            insert_draft_input(&tx, chat, &draft_id, false, PROMPT)?;
-            tx.execute(
-                "INSERT INTO discussion_quick_handoffs(operation_id,draft_id,references_snapshot,native_thread_id,native_turn_frontier)
-                 VALUES(?1,?2,?3,?4,?5)",
-                params![operation, draft_id, refs, thread, frontier],
-            )?;
+        let (tx, clock) = timing::begin(&mut self.db, "discussion_quick_request")?;
+        let receipt = request_quick_in_tx(&tx, chat, request)?;
+        if matches!(receipt, Change::Ok(_)) {
+            timing::commit(tx, clock)?;
         }
-        let receipt = status(&tx, chat, operation)?;
-        timing::commit(tx, timing)?;
-        Ok(Change::Ok(receipt))
+        Ok(receipt)
     }
 
     pub fn quick_input(&self, message: &str) -> Result<Option<QuickInput>> {

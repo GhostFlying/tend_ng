@@ -79,6 +79,19 @@ fn cookie_routes_are_explicit_and_method_specific() {
             "/api/v1/discussions/fixture/handoff?operation_id=opaque",
         ),
         (Method::Post, "/api/v1/discussions/fixture/handoff"),
+        (Method::Get, protocol::FEISHU_SUGGESTIONS_PATH),
+        (Method::Get, "/api/v1/feishu-suggestions/fixture"),
+        (
+            Method::Get,
+            "/api/v1/feishu-suggestions/fixture/handoff?revision=1",
+        ),
+        (Method::Post, "/api/v1/feishu-suggestions/sync"),
+        (Method::Post, "/api/v1/feishu-suggestions/fixture/ignore"),
+        (
+            Method::Post,
+            "/api/v1/feishu-suggestions/fixture/discussions",
+        ),
+        (Method::Post, "/api/v1/feishu-suggestions/fixture/handoff"),
         (Method::Get, "/api/v1/artifacts/fixture"),
         (Method::Get, "/api/v1/runs/fixture/rollout"),
     ] {
@@ -99,6 +112,13 @@ fn cookie_routes_are_explicit_and_method_specific() {
         (
             Method::Post,
             "/api/v1/issues/42/attentions/question/approve",
+        ),
+        (Method::Patch, "/api/v1/feishu-suggestions/fixture/handoff"),
+        (Method::Get, "/api/v1/feishu-suggestions/fixture/ignore"),
+        (Method::Post, "/api/v1/feishu-suggestions/fixture/arbitrary"),
+        (
+            Method::Post,
+            "/api/v1/feishu-suggestions/not%20an%20id/handoff",
         ),
         (Method::Patch, "/api/v1/discussions/fixture/handoff"),
         (Method::Delete, "/api/v1/discussions/fixture/handoff"),

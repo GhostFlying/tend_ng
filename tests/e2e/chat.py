@@ -20,13 +20,14 @@ FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "chat_app_server.py
 @contextmanager
 def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=None, web_origin=None,
            discussion_config=None, router_name=None, router_fixture=FIXTURE, codebase_cli=None,
-           router_launcher=None, router_model=None, router_effort=None):
+           router_launcher=None, router_model=None, router_effort=None, feishu_config=None):
     origin = ["--web-origin", web_origin] if web_origin is not None else []
     web = ["--web-dir", web_dir] if web_dir is not None else []
     provider = ["--github-cli", github_cli] if github_cli is not None else []
     if codebase_cli is not None:
         provider.extend(["--codebase-cli", codebase_cli])
     discussion = ["--discussion-config", discussion_config] if discussion_config else []
+    feishu = ["--feishu-suggestions-config", feishu_config] if feishu_config else []
     name = ["--router-name", router_name] if router_name is not None else []
     model = ["--router-model", router_model] if router_model else []
     effort = ["--router-effort", router_effort] if router_effort else []
@@ -35,7 +36,7 @@ def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=Non
     process = subprocess.Popen(
         [
             binary, "--db", root / "server.sqlite", "--listen", listen,
-            "--router-cwd", root, *web, *provider, *origin, *discussion, *name, *model, *effort, "--app-server", *app,
+            "--router-cwd", root, *web, *provider, *origin, *discussion, *feishu, *name, *model, *effort, "--app-server", *app,
         ],
         stdin=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=env,
     )

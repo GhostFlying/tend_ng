@@ -251,8 +251,33 @@ impl Client {
         tools: &[Value],
         model: Option<&str>,
     ) -> Result<String> {
+        self.start_thread_inner(cwd, instructions, tools, model, false)
+    }
+
+    /// Assess isolated material without saving a second copy in a Codex rollout.
+    pub fn start_ephemeral_analysis(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        model: &str,
+    ) -> Result<String> {
+        ensure!(
+            self.routing_cwd.is_some(),
+            "analysis requires a verified restricted App Server"
+        );
+        self.start_thread_inner(cwd, instructions, &[], Some(model), true)
+    }
+
+    fn start_thread_inner(
+        &mut self,
+        cwd: &Path,
+        instructions: &str,
+        tools: &[Value],
+        model: Option<&str>,
+        ephemeral: bool,
+    ) -> Result<String> {
         let mut params = json!({
-                "cwd": cwd, "ephemeral": false, "historyMode": "legacy",
+                "cwd": cwd, "ephemeral": ephemeral, "historyMode": "legacy",
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
                 "developerInstructions": instructions, "dynamicTools": tools, "model": model
         });

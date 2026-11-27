@@ -8,7 +8,13 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
     let path = request.url().split('?').next()?;
     let (file, mime) = if matches!(
         path,
-        "/" | "/discussions" | "/issues" | "/agents" | "/hosts" | "/token-usage" | "/more"
+        "/" | "/discussions"
+            | "/issues"
+            | "/agents"
+            | "/hosts"
+            | "/token-usage"
+            | "/more"
+            | "/feishu-suggestions"
     ) || path
         .strip_prefix("/issues/")
         .map(|route| route.strip_suffix("/overview").unwrap_or(route))

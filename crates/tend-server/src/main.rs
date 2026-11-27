@@ -2,6 +2,7 @@ mod artifacts;
 mod codebase;
 mod codebase_comments;
 mod discussion;
+mod feishu;
 mod github;
 mod inspect;
 mod pull_worker;
@@ -27,7 +28,7 @@ use std::{
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--discussion-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--discussion-config <json-file>] [--feishu-suggestions-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = protocol::MAX_REQUEST_BYTES as u64;
 
 fn main() -> Result<()> {
@@ -40,6 +41,7 @@ fn main() -> Result<()> {
     let mut router_effort = None;
     let mut router_name = None;
     let mut discussion_config = None;
+    let mut feishu_config = None;
     let mut router_model = None;
     let mut program = OsString::from("codex");
     let mut github_cli = OsString::from("gh");
@@ -109,6 +111,12 @@ fn main() -> Result<()> {
                         .context("--discussion-config needs a JSON file")?,
                 ));
             }
+            Some("--feishu-suggestions-config") => {
+                feishu_config = Some(PathBuf::from(
+                    args.next()
+                        .context("--feishu-suggestions-config needs a JSON file")?,
+                ));
+            }
             Some("--codebase-cli") => {
                 codebase_cli = args.next().context("--codebase-cli needs a program")?
             }
@@ -153,6 +161,7 @@ fn main() -> Result<()> {
         auth.clone(),
     )?);
     let discussion_api = discussion.serve_api(&db)?;
+    let feishu_api = feishu::serve(feishu_config.as_deref(), &db)?;
     thread::spawn(move || schedule(placement));
     pull_worker::spawn(
         Store::open(&db)?,
@@ -245,6 +254,17 @@ fn main() -> Result<()> {
                 token_usage_maintenance.try_send(request)
             {
                 let (_, body) = api_error(503, "Token history API is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
+        }
+        if route == protocol::FEISHU_SUGGESTIONS_PATH
+            || route.starts_with("/api/v1/feishu-suggestions/")
+        {
+            if let Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) =
+                feishu_api.try_send(request)
+            {
+                let (_, body) = api_error(503, "Feishu suggestions API is busy");
                 let _ = request.respond(json_response(503, &body)?);
             }
             continue;

@@ -6,6 +6,7 @@ export const issuePath =
 const pages = new Set([
   "/",
   "/discussions",
+  "/feishu-suggestions",
   "/issues",
   "/agents",
   "/hosts",

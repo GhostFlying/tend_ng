@@ -4,6 +4,7 @@ type IconName =
   | "chat"
   | "discussion"
   | "board"
+  | "feishu"
   | "agents"
   | "hosts"
   | "usage"
@@ -14,6 +15,9 @@ export function NavIcon({ name }: { name: IconName }) {
   const shape = {
     chat: <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5z" />,
     discussion: <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5zM7 8h6m-6 2.5h4" />,
+    feishu: (
+      <path d="m2.7 9 14.5-5.4-4.4 13.1-3.3-5-6.8-2.7Zm6.8 2.7 4.4-4.2" />
+    ),
     board: (
       <>
         <rect x="3.5" y="4.5" width="13" height="11" rx="1.5" />
@@ -72,17 +76,21 @@ export function PhoneNavigation({
   resource,
   board,
   discussions,
+  feishu,
 }: {
   resource: boolean;
   board: boolean;
   discussions: boolean;
+  feishu: boolean;
 }) {
   return (
     <nav className="phone-nav" aria-label="手机导航">
       <a
         className="phone-item"
         href="/"
-        aria-current={!resource && !board && !discussions ? "page" : undefined}
+        aria-current={
+          !resource && !board && !discussions && !feishu ? "page" : undefined
+        }
       >
         <NavIcon name="chat" />
         对话
@@ -103,6 +111,14 @@ export function PhoneNavigation({
       >
         <NavIcon name="discussion" />
         讨论
+      </a>
+      <a
+        className="phone-item"
+        href="/feishu-suggestions"
+        aria-current={feishu ? "page" : undefined}
+      >
+        <NavIcon name="feishu" />
+        飞书建议
       </a>
       <Notifications mobileIcon={<NavIcon name="notice" />} />
       <a

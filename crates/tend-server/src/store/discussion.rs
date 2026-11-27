@@ -6,7 +6,7 @@ use protocol::{
     CreateDiscussion, DiscussionDraft, DiscussionOrigin, DiscussionReference, DiscussionSend,
     DiscussionSource, Receipt, SendMessage,
 };
-pub(super) use quick::HandoffMode;
+pub(super) use quick::{HandoffMode, quick_status, request_quick_in_tx};
 pub use quick::{HandoffSource, QuickInput};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
@@ -366,8 +366,9 @@ impl Store {
 
     pub fn discussion_list(&self, archived: bool) -> Result<Vec<Value>> {
         let mut st = self.db.prepare(
-            "SELECT chat_id,title,created_at,updated_at,archived FROM discussions
-             WHERE archived=?1 ORDER BY updated_at DESC, rowid DESC",
+            "SELECT chat_id,title,created_at,updated_at,archived FROM discussions d
+             WHERE archived=?1 AND NOT EXISTS(SELECT 1 FROM feishu_handoff_bridges b WHERE b.chat_id=d.chat_id)
+             ORDER BY updated_at DESC, rowid DESC",
         )?;
         Ok(st
             .query_map([archived], discussion_header)?

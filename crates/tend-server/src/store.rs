@@ -10,6 +10,7 @@ pub mod discussion;
 mod execution_hosts;
 mod external;
 pub(crate) mod external_routing;
+pub mod feishu;
 mod handoff;
 mod issue_chat;
 mod notification;
@@ -74,7 +75,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 45;
+pub(crate) const SCHEMA_VERSION: i64 = 46;
 
 pub struct Store {
     db: Connection,
@@ -326,6 +327,9 @@ impl Store {
         }
         if version < 44 {
             token_usage::overview::migrate(&tx)?;
+        }
+        if version < 46 {
+            feishu::migrate(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

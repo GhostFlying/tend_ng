@@ -57,6 +57,10 @@ pub enum DiscussionSource {
     Pull {
         url: String,
     },
+    FeishuSuggestion {
+        suggestion_id: String,
+        revision: i64,
+    },
     Worktree {
         issue_id: String,
         task_id: String,

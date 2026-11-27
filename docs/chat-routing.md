@@ -155,3 +155,12 @@ Web 的「讨论」入口打开 `/discussions`，单个讨论使用 `/discussion
 共享 API 为 `GET/POST /api/v1/discussions/<id>/handoff`。GET 返回当前操作 ID 与请求状态（尚未发起时为 null），也能按 `operation_id` 读历史请求。POST 使用该 `operation_id` 显式登记。同一讨论在下一条真实用户消息前复用相同操作 ID，不因 Agent 回复、引用修改或丢回执重复发送。原操作仍可显式查证和重放。失败不降级投递，提供错误及 `generation`，以同一操作 ID 和失败代次 `retry_generation` 重试。重复重试不启动另一代，原快照和请求边界不变。旧失败与当前提示的操作分别显示，发送新提示后仍可发起新的转交。CLI 在未收到完整回执时保留已经选择的操作 ID，沿原 ID 查证或重试。
 
 「预览 / 编辑」保留独立的手动路径。可以请求模型生成草稿，或不依赖模型手动填写，再编辑待定事项、挑选参考资料与指定主 Chat 范围内的推进 Issue。只有显式发送才投递。原 `/draft` 与 `/handoffs` 以及 CLI `draft`、`draft-read`、`handoff` 继续支持，旧草稿没有待定字段时按空白处理。参考 Issue 可以来自其他 Chat，但不能默认为推进目标。 [实施及验收计划](plans/discussion-quick-handoff-and-titles.md)
+
+## 飞书建议与两种显式动作
+
+飞书建议常驻 Web 与 CLI。Server 在后台采集明确 @ 当前用户的消息并合并同一话题，不自动发主 Chat、通知、Issue 或 Owner。后续回复和来源缺口与研判分开展示。可选具名 `feishu-router` 在 Server 上隔离研判材料，明确已经解决的事项退出待查看。忽略当前版本可撤销，有新来源版本时重新浮现。
+
+- 「带入讨论」只附上所选材料，不发用户消息、不启回合。可以进入已有讨论或创建、继续该建议的讨论。用户后来补充的决定由普通讨论快转按原话授权规则处理。
+- 「转交主 Chat」把当前选定材料交给现有只读 Discussion Agent 写说明，再走现有受限 Router 接收。该入口没有原始 Tend 用户指令。外部材料、判断结果和点击本身不授予执行、派发或代答权限。两种动作分别记账，直接转交提供原主 Chat 消息链接，内部快转上下文不增加普通讨论列表项目。
+
+[实施与验收](plans/feishu-suggestions.md)

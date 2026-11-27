@@ -248,6 +248,17 @@ for line in sys.stdin:
                 history_page = read(request, thread, turn, "quick-history", "tend_read_discussion_history", {})
                 assert history_page["success"], history_page
                 current = json.loads(history_page["contentItems"][0]["text"])["messages"]
+                if "Feishu evidence explicitly selected" in context:
+                    assert "applink.feishu.cn" in context
+                    assert "不相关的群聊" not in context
+                    additions = [m["text"] for m in current if m["role"] == "user" and "仅记录" in m["text"]]
+                    answer = "飞书来源请核对 Android 灰度窗口。测试范围和回滚值仍待确认。没有实施授权。"
+                    if "om_docs_anchor" in context:
+                        answer = "飞书文档项已关闭，仅供主 Chat 参考。没有实施授权。"
+                    else:
+                        assert "om_qa_anchor" in context
+                    if additions:
+                        answer += f" 用户补充：{additions[-1]}"
                 if any(m["text"].startswith("Fixture final instruction") for m in current):
                     answer = "CSV marker implementation request. The assistant recommends deployment as well."
                 if any(m["text"].startswith("Fixture authorizes relay") for m in current):
