@@ -1,0 +1,16 @@
+{
+  "dispatch_request": "请对比 Lynx weekly 脱敏样例的两版分类。需要查归类规则和输入，找出造成统计差异的变更，只报告发现。",
+  "dispatch_acceptance": "已受理派发，等待 Agent 接手。",
+  "relay_request": "同一份比较也请核对被过滤的条目，不用再开一项。",
+  "relay_acceptance": "已将这条补充加入 Issue 的处理队列。",
+  "self_request": "这次请你直接核对我给的两份脱敏 Lynx weekly 样例，列出分类计数的差异。",
+  "progress": "我会先读取两份样例，再逐类核对计数，找出变化最大的分类。",
+  "answer": "样例里「构建失败」从 3 条降到 1 条，「配置失败」仍为 2 条。",
+  "multi_request": "把样例的规则比较和时间窗口核对分成两项调查。",
+  "cold_request": "刚才的两项样例调查受理了吗？",
+  "second_issue_reply": "这项请补查周日边界，不要另开 Issue。",
+  "relay_receipt_reply": "也加上周一的边界。",
+  "issue_title": "对比 Lynx weekly 脱敏样例的分类",
+  "before": {"构建失败": 3, "配置失败": 2},
+  "after": {"构建失败": 1, "配置失败": 2}
+}

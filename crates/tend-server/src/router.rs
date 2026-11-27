@@ -14,7 +14,7 @@ use std::{
 };
 
 pub(crate) const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 20;
+const TOOL_REVISION: i64 = 21;
 const HANDOFF_WRITES: &[&str] = &[
     "tend_dispatch_issue",
     "tend_record_issue",
@@ -33,6 +33,10 @@ const HANDOFF_READS: &[&str] = &[
 ];
 const ROUTER_INSTRUCTIONS: &str = concat!(
     "You are the user's Tend Router. Answer ordinary chat directly. ",
+    "For a project request that needs repository reading or multi-step verification, prefer routing it to an investigation Agent rather than doing the investigation yourself. ",
+    "Judge the work required, not keywords. Reuse a matching Issue when one already covers the same work: read its facts or relay the new request if the Owner needs to act. ",
+    "If you choose to handle time-consuming work yourself for a direct Main Chat user request, call tend_publish_progress before starting the multi-step tool work. ",
+    "Publish one concise, concrete sentence in the user's language about what you will check or do. Do not rely on native commentary, publish reasoning, or send a progress message for an ordinary direct answer. ",
     "Use tend_dispatch_issue to assign project work. Its receipt tells you the current assignment status. ",
     "When one person can deliver the outcome, explicitly set category to implementation or investigation so the Work Agent owns and works on the original top-level Issue and Task. ",
     "For a small, clear implementation you may explicitly choose implementation-economy. Use issue-router only when multiple independent deliveries need coordination. Do not create a placeholder child for one person's work. ",
@@ -68,7 +72,8 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "When the user wants to record work for later, use tend_record_issue to save it without scheduling execution. ",
     "When the user asks to start recorded or parked work, use tend_start_issue with its Issue ID or displayed short number. ",
     "When the user asks to move a started open Issue back to backlog, use tend_backlog_issue. This requests stops for its subtree, preserves history, and does not prove an active Run has stopped. ",
-    "Finish routing the current input, acknowledge the durable handoff, and end the turn. ",
+    "Finish routing the current input and end the turn. Main Chat automatically shows a linked acceptance receipt after a successful dispatch or relay. ",
+    "Acceptance does not mean the Runner claimed the work. Do not claim success for a failed operation. If the automatic receipt covers everything the user needs now, answer exactly TEND_NO_UPDATE. Otherwise add only useful context. ",
     "Do not poll or wait for delegated work, a report, or an Attention to arrive in this turn. ",
     "Tend delivers these as separate inputs, including when the user asks for an eventual result. ",
     "For other dispatches, when a named configuration matters, use tend_agent_candidates before specifying the Agent and Runner. ",
@@ -285,6 +290,17 @@ fn consume_inputs(
         read_dispatch_tool(),
         relay_tool(),
         subscribe_tool(),
+        json!({
+            "type": "function",
+            "name": "tend_publish_progress",
+            "description": "Publish one concrete progress message for the current direct Main Chat user input before doing lengthy work yourself. Tend shows it immediately and returns the original message ID on retry.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "minLength": 1, "maxLength": 500}},
+                "required": ["text"],
+                "additionalProperties": false
+            }
+        }),
         json!({
             "type":"function", "name":"tend_list_issues",
             "description":"List the latest Issue and PR statuses, including each Issue short number, for this Chat.",
@@ -646,6 +662,19 @@ impl TurnHandler for DispatchHandler<'_> {
                 )
             }
             "tend_dispatch_issue" | "tend_record_issue" => self.dispatch(&call),
+            "tend_publish_progress" => {
+                let Some(text) = call.arguments["text"]
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|text| !text.is_empty() && text.chars().count() <= 500)
+                else {
+                    return Ok(tool_error("Provide a concise, nonempty progress message"));
+                };
+                tool_receipt(
+                    self.store.publish_router_progress(self.attempt_id, &call, text)?,
+                    "Progress belongs to a current direct Main Chat user request",
+                )
+            }
             "tend_list_issues" | "tend_read_issue" | "tend_start_issue" | "tend_backlog_issue" => {
                 let Some(chat) = self.store.router_chat(self.attempt_id, &call)? else {
                     return Ok(tool_error("Cannot verify the current Chat"));
@@ -916,7 +945,10 @@ pub(crate) fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()>
         TurnStatus::Completed if input.attention_id.is_some() => store.finish(input.seq, &[], None),
         TurnStatus::Completed => {
             let mut answers = turn.answers()?;
-            if input.external_batch.is_some() {
+            if input.external_batch.is_some()
+                || (answers.iter().any(|answer| answer.text.trim() == "TEND_NO_UPDATE")
+                    && store.has_work_acceptance(input.seq)?)
+            {
                 answers.retain(|answer| answer.text.trim() != "TEND_NO_UPDATE");
             }
             store.finish(input.seq, &answers, None)

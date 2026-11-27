@@ -69,7 +69,8 @@ def main():
             with server(args.server, root, env, listen=address):
                 message = cli(address, "chat", "send", "main", "Dispatch from Chat.")
                 page = wait_for(
-                    lambda: cli(address, "chat", "read", "main")["messages"], lambda rows: len(rows) == 2,
+                    lambda: cli(address, "chat", "read", "main")["messages"],
+                    lambda rows: rows and rows[0]["router_state"] == "completed",
                 )
                 [issue_id] = page[0]["issue_ids"]
                 active = wait_for(

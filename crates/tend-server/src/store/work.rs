@@ -203,6 +203,14 @@ impl Store {
         )?;
         if !record_only {
             start_first_task(&tx, &issue_id, &operation_id, dispatch)?;
+            if !background {
+                super::router_feedback::accept_work(
+                    &tx,
+                    &source_id,
+                    &issue_id,
+                    "已受理派发，等待 Agent 接手。",
+                )?;
+            }
         }
         let result = receipt(&tx, &operation_id)?;
         super::board::commit(tx)?;

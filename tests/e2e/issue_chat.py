@@ -109,7 +109,8 @@ def main():
                 try:
                     original = cli("chat", "send", "main", REQUEST)["message_id"]
                     messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
-                                        lambda messages: len(messages) == 2)
+                                        lambda rows: any(m.get("reply_to") == original and m.get("issue_ids")
+                                                         for m in rows))
                     [parent] = messages[0]["issue_ids"]
                     [parent_number] = messages[0]["issue_numbers"]
                     first = wait_message(parent, FIRST)
@@ -178,7 +179,8 @@ def main():
                     assert not any(row["text"] == DETAIL for row in rows(parent))
                     wait_for(lambda: cli("issue", "read", child),
                              lambda issue: issue["status"] == "completed")
-                    relayed = cli("chat", "send", "main", RELAY, "--reply-to", messages[1]["id"])["message_id"]
+                    [accepted] = [row for row in messages if row.get("reply_to") == original and row.get("issue_ids")]
+                    relayed = cli("chat", "send", "main", RELAY, "--reply-to", accepted["id"])["message_id"]
                     relay = wait_message(parent, RELAY)
                     assert relay["source_message_id"] == relayed and relay["kind"] == "relay"
                     assert relay["issue_id"] == parent and relay["short_number"] == parent_number

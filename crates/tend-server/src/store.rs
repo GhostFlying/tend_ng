@@ -20,6 +20,7 @@ mod reclaim;
 pub(crate) mod report_revisions;
 mod reports;
 mod review;
+mod router_feedback;
 mod run;
 mod runner;
 mod short_numbers;
@@ -75,7 +76,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 46;
+pub(crate) const SCHEMA_VERSION: i64 = 47;
 
 pub struct Store {
     db: Connection,
@@ -331,6 +332,9 @@ impl Store {
         if version < 46 {
             feishu::migrate(&tx)?;
         }
+        if version < 47 {
+            router_feedback::migrate(&tx)?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -425,12 +429,14 @@ impl Store {
         let discussion = self.is_discussion(chat_id)?;
         let mut statement = self.db.prepare(
             "SELECT m.seq, m.id, m.text, m.created_at, m.reply_to, i.seq,
-                    i.outcome, i.error, a.id, h.chat_id
+                    i.outcome, i.error, a.id, h.chat_id, f.issue_id, n.number
                FROM chat_messages m
                LEFT JOIN router_inputs i ON i.message_seq = m.seq
                  AND i.report_id IS NULL AND i.attention_id IS NULL AND i.external_batch IS NULL
                LEFT JOIN router_attempts a ON a.seq = i.seq AND a.number = 1
                LEFT JOIN discussion_handoffs h ON h.message_id = m.id
+               LEFT JOIN router_chat_feedback f ON f.message_seq = m.seq
+               LEFT JOIN issue_short_numbers n ON n.issue_id = f.issue_id
               WHERE m.chat_id = ?1 AND m.seq < ?2
                 AND NOT EXISTS(SELECT 1 FROM discussion_drafts d WHERE d.message_id=m.id)
               ORDER BY m.seq DESC LIMIT ?3",
@@ -465,8 +471,8 @@ impl Store {
                     reply_to: row.get(4)?,
                     router_state,
                     router_error: row.get(7)?,
-                    issue_ids: Vec::new(),
-                    issue_numbers: Vec::new(),
+                    issue_ids: row.get::<_, Option<_>>(10)?.into_iter().collect(),
+                    issue_numbers: row.get::<_, Option<_>>(11)?.into_iter().collect(),
                     artifacts: Vec::new(),
                     attention: None,
                     discussion_id: row.get(9)?,
@@ -654,13 +660,27 @@ impl Store {
                     [&reply_to],
                     |row| row.get(0),
                 )?;
+                // A quoted receipt singles out its own Issue even when
+                // the originating request was dispatched to several Issues.
                 let mut query = self.db.prepare(
                     "WITH RECURSIVE thread(seq, reply_to) AS (
                          SELECT seq, reply_to FROM chat_messages WHERE id = ?1
                          UNION ALL SELECT m.seq, m.reply_to FROM chat_messages m JOIN thread t ON m.id = t.reply_to
-                     ) SELECT i.id, n.number FROM thread t JOIN issues i ON i.source_seq = t.seq
+                     ), quoted_issue(id) AS (
+                         SELECT f.issue_id FROM chat_messages m
+                           JOIN router_chat_feedback f ON f.message_seq=m.seq
+                          WHERE m.id=?1 AND f.issue_id IS NOT NULL
+                     ), related(id) AS (
+                         SELECT id FROM quoted_issue
+                         UNION
+                         SELECT i.id FROM thread t JOIN issues i ON i.source_seq=t.seq
+                          WHERE i.parent_issue_id IS NULL AND NOT EXISTS(SELECT 1 FROM quoted_issue)
+                         UNION
+                         SELECT f.issue_id FROM thread t JOIN router_chat_feedback f ON f.message_seq=t.seq
+                          WHERE f.issue_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM quoted_issue)
+                     ) SELECT i.id, n.number FROM related r JOIN issues i ON i.id=r.id
                        JOIN issue_short_numbers n ON n.issue_id = i.id
-                       WHERE i.parent_issue_id IS NULL ORDER BY i.rowid",
+                       ORDER BY i.rowid",
                 )?;
                 let (issues, numbers): (Vec<_>, Vec<_>) = query
                     .query_map([&reply_to], |row| Ok((row.get(0)?, row.get(1)?)))?
@@ -737,7 +757,7 @@ impl Store {
     }
 
     pub fn recent_context(&self, chat_id: &str, before: i64) -> Result<Option<String>> {
-        let mut statement = self.db.prepare(
+        const RECENT_INPUTS: &str =
             "WITH recent AS (
                 SELECT message_seq AS seq, outcome FROM router_inputs
                  WHERE chat_id = ?1 AND message_seq < ?2 AND outcome IS NOT NULL
@@ -748,22 +768,26 @@ impl Store {
                                   JOIN discussion_quick_handoffs q ON q.draft_id=h.draft_id
                                   WHERE m.seq=router_inputs.message_seq)
                  ORDER BY message_seq DESC LIMIT 6
-             )
-             SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome
+             )";
+        let mut statement = self.db.prepare(&format!(
+            "{RECENT_INPUTS}
+             SELECT m.seq, 'user', substr(m.text, 1, 512), i.outcome, m.id
                FROM recent i JOIN chat_messages m ON m.seq = i.seq
              UNION ALL
-             SELECT m.seq, 'assistant', substr(m.text, 1, 512), NULL
+             SELECT m.seq, 'assistant', substr(m.text, 1, 512), NULL, m.id
                FROM recent i JOIN chat_messages source ON source.seq = i.seq
                JOIN chat_messages m ON m.reply_to = source.id AND m.operation_id IS NULL
                 AND m.seq<?2
-             ORDER BY 1 DESC LIMIT 12",
-        )?;
+                AND NOT EXISTS(SELECT 1 FROM router_chat_feedback f WHERE f.message_seq=m.seq)
+             ORDER BY 1 DESC LIMIT 12"
+        ))?;
         let mut messages = statement
             .query_map(params![chat_id, before], |row| {
                 Ok(json!({
                     "author": row.get::<_, String>(1)?,
                     "text": row.get::<_, String>(2)?,
                     "outcome": row.get::<_, Option<String>>(3)?,
+                    "message_id": row.get::<_, String>(4)?,
                 }))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
@@ -771,10 +795,43 @@ impl Store {
             return Ok(None);
         }
         messages.reverse();
-        Ok(Some(format!(
-            "Recent settled messages in this Tend conversation. Use them as context.\n{}\nThe current user request follows separately.",
+        let mut context = format!(
+            "Recent settled messages in this Tend conversation. Use them as context.\n{}",
             serde_json::to_string(&messages)?
-        )))
+        );
+        if chat_id == "main" {
+            // Keep committed work facts even when the Router's final answer
+            // was suppressed, without restoring transient progress as answers.
+            let mut statement = self.db.prepare(&format!(
+                "{RECENT_INPUTS}
+                 SELECT source.id, reply.id, f.issue_id, n.number, substr(i.title,1,256)
+                   FROM recent r JOIN chat_messages source ON source.seq=r.seq
+                   JOIN chat_messages reply ON reply.chat_id=source.chat_id AND reply.reply_to=source.id
+                    AND reply.seq>source.seq AND reply.seq<?2
+                   JOIN router_chat_feedback f ON f.message_seq=reply.seq
+                   JOIN issues i ON i.id=f.issue_id
+                   JOIN issue_short_numbers n ON n.issue_id=i.id
+                  ORDER BY reply.seq DESC LIMIT 12"
+            ))?;
+            let mut work = statement
+                .query_map(params![chat_id, before], |row| {
+                    Ok(json!({
+                        "source_message_id": row.get::<_, String>(0)?,
+                        "receipt_message_id": row.get::<_, String>(1)?,
+                        "issue_id": row.get::<_, String>(2)?,
+                        "issue_number": row.get::<_, i64>(3)?,
+                        "issue_title": row.get::<_, String>(4)?,
+                    }))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            if !work.is_empty() {
+                work.reverse();
+                context.push_str("\nRecent work acceptances in this Tend conversation. They establish durable admission, not a Runner claim or a new request. Read the Issue for current status.\n");
+                context.push_str(&serde_json::to_string(&work)?);
+            }
+        }
+        context.push_str("\nThe current user request follows separately.");
+        Ok(Some(context))
     }
 
     pub fn save_turn_id(&self, attempt: &str, turn: &str) -> Result<()> {

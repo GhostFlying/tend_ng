@@ -399,6 +399,7 @@ impl Store {
         )?;
         let saved = message(&tx, &id)?;
         enqueue(&tx, &task, &task, &saved)?;
+        super::router_feedback::accept_work(&tx, &source, issue, "已将这条补充加入 Issue 的处理队列。")?;
         super::board::commit(tx)?;
         Ok(Some(saved))
     }

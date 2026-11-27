@@ -81,7 +81,7 @@ Repo 在 Runner 注册，Git 访问及实际 workspace 由本机管理。需要�
 
 顶层 Issue 结案后保留 workspace。一期按 CLI 显式请求回收，由 Runner 核对实际目录占用及执行停妥情况。 [Workspace 保留与回收](server-runner.md#workspace-保留与回收)
 
-Agent 在 Skill 指引下使用本机注入的 Tend 工具。Router 直接在 Server 本地提交操作。Runner 上的 Agent 由 Runner 持久受理并立即返回操作 ID，Server 异步应用并按原 ID 回传结算。Issue 关联与 Owner 输入都已持久入队时，Chat 显示「已派发」。 [Agent 工具与本地受理](agent-tools.md)
+Agent 在 Skill 指引下使用本机注入的 Tend 工具。Router 直接在 Server 本地提交操作。Runner 上的 Agent 由 Runner 持久受理并立即返回操作 ID，Server 异步应用并按原 ID 回传结算。主 Chat 在派发持久提交后立即可读到关联 Issue 的受理回执。实际领取另有证据。 [Agent 工具与本地受理](agent-tools.md)
 
 ## 4. 消息投递、外部事件与等待
 

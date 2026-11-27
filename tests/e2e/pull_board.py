@@ -64,7 +64,7 @@ def main():
             try:
                 original = cli("chat", "send", "main", REQUEST)["message_id"]
                 messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
-                                    lambda rows: len(rows) == 2)
+                                    lambda rows: rows and rows[0]["router_state"] == "completed")
                 [parent] = messages[0]["issue_ids"]
                 wait_for(lambda: (root / "delegation.json").exists(), bool)
                 child = json.loads((root / "delegation.json").read_text())["action"]["issue_id"]

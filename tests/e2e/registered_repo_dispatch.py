@@ -53,10 +53,11 @@ def exercise(args, root, env):
         receipt = cli(address, "chat", "send", chat, text, *options)
         rows = wait_for(
             lambda: cli(address, "chat", "read", chat)["messages"],
-            lambda messages: messages and messages[-1].get("reply_to") == receipt["message_id"],
+            lambda messages: messages and messages[-1]["text"] == answer,
         )
-        check_answer(rows[-2:], receipt, text, answer)
-        return rows[-2:]
+        exchange = [next(row for row in rows if row["id"] == receipt["message_id"]), rows[-1]]
+        check_answer(exchange, receipt, text, answer)
+        return exchange
 
     with server(args.server, root, env, github_cli=gh) as address:
         exchange(address, "empty", "Another chat.", "The other chat can continue.")

@@ -30,6 +30,8 @@ jobs:
         run: python3 -B tests/e2e/web_session.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check direct Issue ownership and delivery endpoints
         run: python3 -B tests/e2e/direct_owner.py target/release/tend-server target/release/tend target/release/tend-runner
+      - name: Check live main Chat routing feedback
+        run: python3 -B tests/e2e/router_feedback.py target/release/tend-server target/release/tend
       - name: Check isolated Feishu suggestions and recovery
         run: python3 -B tests/e2e/feishu_suggestions.py target/release/tend-server target/release/tend
       - name: Check the Runner protocol window

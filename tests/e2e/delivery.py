@@ -155,7 +155,8 @@ def main():
         with runner(address):
             with server(args.server, root, env, listen=address, web_dir=web_dir):
                 origin = json.loads(browser("send")) if args.web else read("chat", "send", "main", "Dispatch from Chat.")
-                messages = wait_for(lambda: read("chat", "read", "main")["messages"], lambda rows: len(rows) == 2)
+                messages = wait_for(lambda: read("chat", "read", "main")["messages"],
+                                    lambda rows: rows and rows[0]["router_state"] == "completed")
                 [parent] = messages[0]["issue_ids"]
                 wait_for(lambda: (root / "delegation.json").is_file(), bool)
                 child = json.loads((root / "delegation.json").read_text())["action"]["issue_id"]
@@ -203,14 +204,14 @@ def main():
                     supplement = "I also verified the repository command."
                     page = wait_for(lambda: read("chat", "read", "main")["messages"],
                                     lambda rows: any(message["text"] == supplement for message in rows))
-                    assert len(page) == 8, page
+                    assert len(page) == 9, page
                     assert sum(file["id"] == file_id for row in page for file in row.get("artifacts", [])) == 1
                     assert sql("server", "SELECT count(*) FROM report_artifacts WHERE artifact_id = ?", file_id) == [(2,)]
                 else:
                     starts = sql("app", "SELECT input FROM start_requests ORDER BY rowid")
                     assert starts[-3] == (queued,) and starts[-2] == starts[-1]
                     assert starts[-1][0].startswith("Tend Issue report")
-                    assert len(page) == 7, page
+                    assert len(page) == 8, page
                 downloaded = cli("artifact", "download", file_id)
                 assert downloaded.returncode == 0 and downloaded.stdout == CONTENTS
                 assert uploads == [(f"/api/v1/runners/delivery-runner/artifacts/{file_id}", 200)]

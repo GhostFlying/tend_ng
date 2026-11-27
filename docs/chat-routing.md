@@ -6,7 +6,9 @@ Router 的个人助理职责、主 Chat 与 Issue Chat 的对话边界、Attenti
 
 **已确认。** 用户在主 Chat 始终与同一个助手对话。Router Agent 接收全部用户消息、追问和 Attention 答复，并以同一助手身份在原话题送回答复、交付和需要用户处理的问题。用户可以留在原对话继续交流，需要时按引用查看工作详情。主动在 Issue Chat 发言时，可以直接和对应 Owner 对话。Web 和 CLI 使用同一套对话规则，消息与工作的关联可跨 session 恢复。
 
-发送消息后，Server 持久收件，Chat 显示已收到。Router 在 Server 本地提交派发并取得操作 ID。Issue 关联与 Owner 的待投递输入已持久入队后，Chat 显示已派发。缺少合格 Runner 时，原派发记录显示待分配原因。Owner 开工、处理完成和结果送回 Chat 分别有实际证据。平常的排队和运行进展显示在关联工作上，用户需要时可以展开。 [Agent 工具与本地受理](agent-tools.md)
+发送消息后，Server 持久收件，Chat 显示已收到。Router 在 Server 本地提交派发并取得操作 ID。主 Chat 在同一事务中保存一条回复原输入的受理消息，并附目标 Issue 链接。新派发和向已有 Issue 入队补充都不等 Router 的最终回复或 Runner 领取。仅保存待办、读取回执或派发失败不会生成受理消息。缺少合格 Runner 时，原派发记录显示待分配原因。Owner 开工、处理完成和结果送回 Chat 分别有实际证据。 [Agent 工具与本地受理](agent-tools.md)
+
+需要读仓库或多步核验的项目调查优先派给 `investigation` Agent，已有匹配 Issue 则复用。Router 自行承担耗时工作时，在开始多步工具作业前用 `tend_publish_progress` 给原输入发布一句具体进展。进展和派发回执是完整消息，由正常轮询在当前回合读到。普通直接回答不发进展，原生 commentary 不投递到 Chat。 [验证计划](plans/main-chat-router-feedback.md)
 
 一期的回复和回报以完整消息进入各自的对话。Router 在 Server 写入主 Chat 的回复和回报。工作 Agent 的 Issue 留言在 Runner 落盘后即可进入下一批同步。 [Server 与 Runner 契约](server-runner.md)
 
@@ -42,6 +44,8 @@ Router 空闲时按这个顺序选取已到达的输入。一轮可处理多条�
 | 原回合已成功结束 | 读齐该回合的输出，按原生消息身份补齐应进入 Chat 的完整消息，再结算该次输入消费。已派发 Issue 的推进和结算沿各自的持久记录继续。 |
 
 一个 Chat 输入可以产生多次合法派发。消息身份锚定用户话题，原生尝试身份关联一次 App Server 执行，业务操作 ID 则用于派发或回复写入的去重。Router 接续时从已提交的派发和回复恢复上下文。 [操作身份及首次回执丢失](agent-tools.md#操作身份及首次回执丢失)
+
+回复某条受理回执时，回执直接链接的 Issue 是明确目标，不混入同一原输入派发的其他 Issue。重建主 Chat 原生线程时，Router 会收到近期直接用户输入对应的已受理工作事实，即使原回合只有回执、没有最终答复。这些事实不表示 Runner 已领取，也不是新授权。临时进展不作为历史回答恢复。
 
 进程仍运行或停妥证据暂不可用时，原尝试保持待查。同一 Chat 的实际执行保持串行，其他 Chat 的 Router 可以继续。原 thread 无法继续时，新 session 从已保存的对话和工作事实接续。用户可以在原 Chat 重新交代处理失败的请求。
 

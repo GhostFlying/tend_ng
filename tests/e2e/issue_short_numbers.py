@@ -150,7 +150,7 @@ def check_upgrade(root, legacy_server, version, args, env):
 
         receipt = cli("chat", "send", "main", "Dispatch from Chat.")
         messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
-                            lambda rows: len(rows) == 3)
+                            lambda rows: len(rows) > 1 and rows[1]["router_state"] == "completed")
         assert messages[1]["id"] == receipt["message_id"]
         [issue] = messages[1]["issue_ids"]
         [number] = messages[1]["issue_numbers"]

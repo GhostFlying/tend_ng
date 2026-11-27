@@ -79,7 +79,7 @@ def main():
                 with server(args.server, root, env, listen=address):
                     cli("chat", "send", "main", "Dispatch from Chat.")
                     messages = wait_for(lambda: cli("chat", "read", "main")["messages"],
-                                        lambda rows: len(rows) == 2)
+                                        lambda rows: rows and rows[0]["router_state"] == "completed")
                     [parent] = messages[0]["issue_ids"]
                     first = wait_for(lambda: cli("issue", "read", parent),
                                      lambda view: view["status"] == "running")

@@ -131,7 +131,8 @@ def test_tree(args):
         with runner_process([*command, "--app-server", sys.executable, native, root], env, root):
             with server(args.server, root, env, listen=address):
                 cli("chat", "send", "main", "Dispatch from Chat.")
-                timeline = wait_for(lambda: cli("chat", "read", "main")["messages"], lambda rows: len(rows) == 2)
+                timeline = wait_for(lambda: cli("chat", "read", "main")["messages"],
+                                    lambda rows: rows and rows[0]["router_state"] == "completed")
                 [parent] = timeline[0]["issue_ids"]
                 original = wait_for(lambda: cli("issue", "read", parent), lambda issue: issue["status"] == "running")
                 wait_for(lambda: (root / "notice-consumed").exists(), bool)
@@ -154,9 +155,11 @@ def test_tree(args):
                 assert snapshot["subtree"]["observed_runs"] == 1, snapshot
                 task = cli("issue", "read", metered)["task_id"]
                 wait_for(lambda: cli("issue", "read", missing)["status"], lambda status: status == "completed")
-                cli("chat", "send", "main", "先记下稍后整理发布说明。")
-                timeline = wait_for(lambda: cli("chat", "read", "main")["messages"], lambda rows: len(rows) >= 4)
-                [empty] = next(row["issue_ids"] for row in timeline if row["text"] == "先记下稍后整理发布说明。")
+                source = cli("chat", "send", "main", "先记下稍后整理发布说明。")["message_id"]
+                [empty] = wait_for(
+                    lambda: next((row.get("issue_ids") for row in cli("chat", "read", "main")["messages"]
+                                  if row["id"] == source), None), bool,
+                )
 
             # The Runner finishes with no Server process. Its saved usage is unacknowledged.
             (root / "release-usage").touch()
@@ -305,7 +308,8 @@ def test_stop(args):
                    "--app-server", sys.executable, native, root, "stop"]
         with server(args.server, root, env, listen=address), runner_process(command, env, root):
             cli("chat", "send", "main", "Dispatch from Chat.")
-            timeline = wait_for(lambda: cli("chat", "read", "main")["messages"], lambda rows: len(rows) == 2)
+            timeline = wait_for(lambda: cli("chat", "read", "main")["messages"],
+                                lambda rows: rows and rows[0]["router_state"] == "completed")
             [issue] = timeline[0]["issue_ids"]
             before = wait_for(lambda: cli("issue", "token-usage", issue)["direct"],
                               lambda usage: usage["reported_requests"] == 1)

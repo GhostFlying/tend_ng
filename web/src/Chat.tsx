@@ -256,6 +256,7 @@ function RunRow({
 function MessageRow({
   message,
   source,
+  linkedReplyIssues,
   showReference,
   sourceChat,
   descendant,
@@ -265,6 +266,7 @@ function MessageRow({
 }: {
   message: Message;
   source?: Message;
+  linkedReplyIssues?: ReadonlySet<string>;
   showReference: boolean;
   sourceChat: string;
   descendant: boolean;
@@ -342,6 +344,7 @@ function MessageRow({
         )
       )}
       {message.issue_ids?.map((id, index, ids) => {
+        if (linkedReplyIssues?.has(id)) return null;
         const number = message.issue_numbers?.[index];
         return (
           <a className="issue-link" key={id} href={issueLink(id, number)}>
@@ -801,7 +804,22 @@ export function Chat({
     }
   }, [anchor, readyForAnchor, before, historyMode, anchorError, loadHistory]);
 
-  const byId = new Map(messages.map((message) => [message.id, message]));
+  const byId = new Map<string, Message>();
+  const linkedReplies = new Map<string, Set<string>>();
+  for (const message of messages) {
+    byId.set(message.id, message);
+    if (
+      !issue &&
+      chatId === "main" &&
+      message.author === "router" &&
+      message.reply_to &&
+      message.issue_ids?.length
+    ) {
+      const linked = linkedReplies.get(message.reply_to) ?? new Set<string>();
+      for (const id of message.issue_ids) linked.add(id);
+      linkedReplies.set(message.reply_to, linked);
+    }
+  }
   let lastUser: string | null = null;
   const rows = messages.map((message) => {
     if (message.approval) {
@@ -859,6 +877,7 @@ export function Chat({
         key={message.id}
         message={message}
         source={source}
+        linkedReplyIssues={linkedReplies.get(message.id)}
         showReference={showReference}
         sourceChat={sourceChat}
         descendant={descendant}

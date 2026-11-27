@@ -63,7 +63,7 @@ def main():
             receipt = execute(address, args.cli, "chat", "send", "main", "Dispatch from Chat.")
             timeline = wait_for(
                 lambda: execute(address, args.cli, "chat", "read", "main")["messages"],
-                lambda messages: len(messages) == 2,
+                lambda rows: rows and rows[0]["router_state"] == "completed",
             )
             [issue_id] = timeline[0]["issue_ids"]
             pending = issue(address)
