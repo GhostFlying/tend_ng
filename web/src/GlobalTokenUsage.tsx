@@ -4,6 +4,7 @@ import type {
   TokenBreakdown,
   TokenOverviewIssue,
   TokenOverviewPage,
+  TokenUsageSource,
 } from "./api";
 import {
   coverageLabel,
@@ -137,6 +138,70 @@ function IssueRow({
   );
 }
 
+const sourceNames: Record<string, string> = {
+  runner: "Issue Agent",
+  router: "主 Chat Router",
+  discussion: "讨论回复",
+  discussion_summary: "讨论转交总结",
+  handoff_receiver: "隔离转交接收",
+  feishu: "飞书研判",
+};
+
+function SourceRows({ rows }: { rows: TokenUsageSource[] }) {
+  return (
+    <section className="usage-sources" aria-labelledby="usage-sources-heading">
+      <h2 id="usage-sources-heading">按调用来源</h2>
+      <ul>
+        {rows.map((row) => {
+          const usage = row.usage;
+          const unit = row.source === "runner" ? "Run" : "回合";
+          const notes = [
+            row.source === "runner" && "含该 Run 的原生子 Agent",
+            usage.unobserved_before_collection > 0 &&
+              `采集启用前 ${format.format(usage.unobserved_before_collection)} 个`,
+            row.responses_without_usage !== null &&
+              row.responses_without_usage > 0 &&
+              `${format.format(row.responses_without_usage)} 条请求用量未知`,
+            row.attempts_without_turn > 0 &&
+              `${format.format(row.attempts_without_turn)} 次尝试未核实回合`,
+            row.shared_turn_attempts > 0 &&
+              `${format.format(row.shared_turn_attempts)} 次共享回合已合并`,
+            row.shared_issue_responses > 0 &&
+              `${format.format(row.shared_issue_responses)} 条重叠请求归 Issue`,
+            row.conflicts > 0 &&
+              `${format.format(row.conflicts)} 条请求用量冲突`,
+          ].filter(Boolean);
+          return (
+            <li key={row.source}>
+              <div className="usage-source-name">
+                <h3>{sourceNames[row.source] ?? row.source}</h3>
+                <p className="detail-muted">
+                  已观测 {format.format(usage.observed_runs)} /{" "}
+                  {format.format(usage.started_runs)} 个{unit}
+                </p>
+                {notes.length > 0 && (
+                  <p className="detail-muted">{notes.join(" · ")}</p>
+                )}
+              </div>
+              <div className="usage-source-amount">
+                <div>
+                  <bdi>{tokens(usage.total_tokens)}</bdi> Token
+                </div>
+                <p className="detail-muted">
+                  {format.format(usage.reported_requests)} 条已识别请求
+                </p>
+              </div>
+            </li>
+          );
+        })}
+      </ul>
+      <p className="detail-muted token-metric-note">
+        已观测不代表完整。未保留或无法验证的原始证据不估算，飞书研判不会为计量保存会话原文。
+      </p>
+    </section>
+  );
+}
+
 function UsageLevel({
   parent,
   label,
@@ -196,17 +261,23 @@ function UsageLevel({
           aria-labelledby="usage-total-heading"
         >
           <h2 id="usage-total-heading" className="token-state-heading">
-            已归属 Issue 的全局用量
+            全系统 Agent 用量
           </h2>
           <TokenTotal usage={page.total} />
+          {page.sources && (
+            <p className="usage-request-count">
+              {format.format(page.total.reported_requests)} 条已识别请求
+            </p>
+          )}
           <RunCoverage usage={page.total} />
           <p className="detail-muted token-metric-note">
-            按各 Issue 直属用量汇总，每个 Issue 只计算一次。不含未归属 Issue
-            的用量。
+            按原生响应归并已知用量。Issue
+            用量只加直属一次，下方另列各调用来源。费用是公开费率估算，不是账单。
           </p>
           <TokenModelUsage usage={page.total} label="模型明细与费用估算" />
         </section>
       )}
+      {page?.sources && <SourceRows rows={page.sources} />}
       {page && !parent && (
         <div className="usage-tree-heading">
           <h2>Issue 树</h2>
@@ -273,7 +344,7 @@ export function GlobalTokenUsage({
     <main className="resource-page">
       <div className="usage-page-inner">
         <div className="usage-page-toolbar">
-          <p className="detail-muted">基于已同步的 Issue 执行数据</p>
+          <p className="detail-muted">已采集的模型请求 · 缓存汇总</p>
           <button
             className="token-action"
             type="button"

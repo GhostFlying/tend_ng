@@ -58,15 +58,16 @@ pub fn matches(path: &str) -> bool {
             .is_some_and(|tail| tail.starts_with('/'))
 }
 
-pub fn serve(db: &Path) -> Result<SyncSender<Request>> {
+pub fn serve(db: &Path, history: SyncSender<()>) -> Result<SyncSender<Request>> {
     let mut store = Store::open(db)?;
     let (sender, queue) = mpsc::sync_channel::<Request>(8);
     thread::spawn(move || {
         for mut request in queue {
-            let (status, body) = handle(&mut store, &mut request).unwrap_or_else(|error| {
-                eprintln!("Token history API: {error:#}");
-                api_error(500, "Server could not process token history request")
-            });
+            let (status, body) =
+                handle(&mut store, &mut request, &history).unwrap_or_else(|error| {
+                    eprintln!("Token history API: {error:#}");
+                    api_error(500, "Server could not process token history request")
+                });
             if let Ok(response) = json_response(status, &body) {
                 let _ = request.respond(response);
             }
@@ -75,7 +76,11 @@ pub fn serve(db: &Path) -> Result<SyncSender<Request>> {
     Ok(sender)
 }
 
-fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
+fn handle(
+    store: &mut Store,
+    request: &mut Request,
+    history: &SyncSender<()>,
+) -> Result<(u16, Value)> {
     let (path, query) = request.url().split_once('?').unwrap_or((request.url(), ""));
     if path == TOKEN_REBUILD_PATH || path == TOKEN_BACKFILL_PATH {
         let rebuild = path == TOKEN_REBUILD_PATH;
@@ -107,7 +112,12 @@ fn handle(store: &mut Store, request: &mut Request) -> Result<(u16, Value)> {
             ));
         }
         return Ok(match store.start_token_backfill(&job)? {
-            Some(receipt) => (202, receipt),
+            Some(receipt) => {
+                if job.scope == TokenUsageScope::All {
+                    let _ = history.try_send(());
+                }
+                (202, receipt)
+            }
             None => api_error(
                 409,
                 "backfill job ID already has a different scope or policy",

@@ -37,6 +37,8 @@ for line in sys.stdin:
                                        }}})
         case "thread/start":
             assert params["ephemeral"] and params["dynamicTools"] == []
+            if (root / "system-meter-fixture").exists():
+                assert params["experimentalRawEvents"]
             assert params["model"] == "deepseek-v4.1-flash"
             thread = str(uuid.uuid4())
             result(request, {"thread": {"id": thread}, "approvalPolicy": "never", "runtimeWorkspaceRoots": [],
@@ -81,6 +83,13 @@ for line in sys.stdin:
                         "disposition": disposition, "evidence_ids": [anchor] + [reply["id"] for reply in replies[:11]]}
             turn = str(uuid.uuid4())
             result(request, {"turn": {"id": turn, "status": "inProgress", "items": []}})
+            if (root / "system-meter-fixture").exists():
+                assert params["threadId"] == thread
+                for _ in range(2):
+                    print(json.dumps({"method": "rawResponse/completed", "params": {
+                        "threadId": thread, "turnId": turn, "responseId": "ephemeral-response",
+                        "usage": {"totalTokens": 1220, "inputTokens": 1000, "outputTokens": 220},
+                    }}), flush=True)
             item = {"type": "agentMessage", "id": turn + "-answer", "phase": "final_answer",
                     "text": json.dumps(response, ensure_ascii=False)}
             print(json.dumps({"method": "item/completed", "params": {"threadId": thread, "turnId": turn, "item": item}},

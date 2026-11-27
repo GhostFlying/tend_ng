@@ -1,4 +1,5 @@
 import json
+import os
 import sqlite3
 import sys
 import time
@@ -88,10 +89,38 @@ database.executescript("""
 release = Path(sys.argv[1]).with_suffix(".release")
 routing_config = dict(arg.split("=", 1) for arg in sys.argv[2:] if "=" in arg)
 routing_only = routing_config.get("features.shell_tool") == "false"
+metering = Path(sys.argv[1]).with_name("system-meter-fixture").exists()
+
+
+def meter_path(thread):
+    return Path(os.environ["CODEX_HOME"]) / "sessions" / f"rollout-2026-01-02T03-04-05-{thread}.jsonl"
+
+
+def meter(thread, turn, text):
+    response_id = "fixture-reused-response"
+    input_count = 820 + len(text)
+    counts = {"total_tokens": input_count + 32, "input_tokens": input_count,
+              "cached_input_tokens": 180, "output_tokens": 32}
+    path = meter_path(thread)
+    path.parent.mkdir(exist_ok=True, parents=True)
+    with path.open("a") as output:
+        if output.tell() == 0:
+            print(json.dumps({"type": "session_meta", "payload": {"id": thread}}), file=output)
+        print(json.dumps({"type": "token_usage_record", "payload": {
+            "thread_id": thread, "turn_id": turn, "response_id": response_id,
+            "usage": counts, "thread_token_usage": {"total_tokens": 18000},
+            "response_model": "gpt-6.2-sol",
+        }}), file=output)
+    for _ in range(2):
+        notify("rawResponse/completed", threadId=thread, turnId=turn, responseId=response_id,
+               responseModel="gpt-6.2-sol", usage={"totalTokens": counts["total_tokens"],
+               "inputTokens": input_count, "cachedInputTokens": 180, "outputTokens": 32})
 
 
 def thread_response(params, thread):
     result = {"thread": {"id": thread}}
+    if metering:
+        result["thread"]["path"] = str(meter_path(thread))
     if routing_only:
         assert "sandbox" not in params and params["permissions"] == "tend-router-routing"
         assert params["approvalPolicy"] == "never"
@@ -638,6 +667,8 @@ for line in sys.stdin:
                     "INSERT INTO turns (thread_id, turn, held) VALUES (?, ?, ?)",
                     (thread_id, json.dumps(turn), case.get("wait", False)),
                 )
+            if metering:
+                meter(thread_id, turn_id, text)
             if case.get("drop_start_response"):
                 sys.exit(0)
             if not case.get("dispatch") or starts > 1:

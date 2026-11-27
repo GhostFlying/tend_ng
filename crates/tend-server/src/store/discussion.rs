@@ -219,6 +219,15 @@ const WORKSPACE_CHOICES: &str = "SELECT t.id, i.id, i.title, n.number, t.repo_id
     LEFT JOIN runners r ON r.id=a.runner_id";
 
 impl Store {
+    pub(crate) fn is_discussion_model_draft(&self, message: &str) -> Result<bool> {
+        Ok(self
+            .db
+            .prepare_cached(
+                "SELECT EXISTS(SELECT 1 FROM discussion_drafts WHERE message_id=?1 AND manual=0)",
+            )?
+            .query_row([message], |r| r.get(0))?)
+    }
+
     pub fn discussion_thread_id(&self, chat: &str, revision: i64) -> Result<Option<String>> {
         // Older Discussion bindings stored an attachment-scope hash in model.
         // The binding is still valid; current permissions are applied on resume.
@@ -981,6 +990,7 @@ mod tests {
     fn legacy_database(db: &Connection) -> Result<()> {
         remove_quick_handoff_and_title_schema(db)?;
         crate::store::remove_token_usage_overview_schema(db)?;
+        crate::store::remove_agent_usage_schema(db)?;
         db.pragma_update(None, "user_version", 41)?;
         Ok(())
     }

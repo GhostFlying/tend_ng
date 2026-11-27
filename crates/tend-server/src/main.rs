@@ -152,7 +152,6 @@ fn main() -> Result<()> {
     let transfers = artifacts::serve(&db)?;
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let synchronization = runner_api::serve(&db, codebase_cli.clone())?;
-    let token_usage_maintenance = token_usage_api::serve(&db)?;
     let pull_links = serve_pull_links(&db, codebase_cli.clone())?;
     let discussion = std::sync::Arc::new(discussion::Service::new(
         discussion_config.as_deref(),
@@ -160,6 +159,13 @@ fn main() -> Result<()> {
         github_cli.clone(),
         auth.clone(),
     )?);
+    let router_home = std::env::var_os("CODEX_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| {
+            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
+        });
+    let history = store::agent_metering::spawn_history(&db, router_home, discussion.codex_home())?;
+    let token_usage_maintenance = token_usage_api::serve(&db, history)?;
     let discussion_api = discussion.serve_api(&db)?;
     let feishu_api = feishu::serve(feishu_config.as_deref(), &db)?;
     thread::spawn(move || schedule(placement));

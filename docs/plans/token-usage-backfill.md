@@ -1,5 +1,7 @@
 # 历史 Token 用量回溯与重建
 
+本文记录 Runner Run 的回溯和重建契约。全量作业同时包含已留存的 Server 原生回合，见 [全系统 Agent 请求用量](system-agent-token-usage.md#历史与覆盖)。
+
 ## 命令与范围
 
 - `tend token-usage backfill --all` 或指定一个 `--run ID`、`--task ID`、`--issue ID|#编号`（含子树）、`--runner ID`、`--host ID`。选择的是受理时 Server 已验证原生 Started 的 Run，Runner 和 Host 按原派发筛选。

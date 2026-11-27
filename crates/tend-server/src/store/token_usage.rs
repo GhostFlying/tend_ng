@@ -2,10 +2,11 @@ pub(super) mod backfill;
 mod models;
 pub(super) mod overview;
 pub(super) mod rebuild;
+pub(crate) mod system;
 
 use super::Store;
 use anyhow::Result;
-use protocol::{RequestMeter, RunObservation, RunPhase, RunTokenUsage, TokenCounts, TokenModel};
+use protocol::{RequestMeter, RunObservation, RunPhase, RunTokenUsage, TokenCounts};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -247,20 +248,40 @@ fn persist_request(
     usage: &RunTokenUsage,
     tally: &mut Tally,
 ) -> Result<()> {
+    let (thread, turn) = usage
+        .root
+        .as_ref()
+        .map_or((usage.thread_id.as_str(), usage.turn_id.as_str()), |root| {
+            (root.thread_id.as_str(), root.turn_id.as_str())
+        });
     if runner != run.runner
         || usage.assignment_id != run.assignment
         || usage.task_id != run.task
-        || usage.thread_id != run.thread
-        || usage.turn_id != run.turn
+        || thread != run.thread
+        || turn != run.turn
     {
         return Ok(());
     }
+    let child = usage.root.is_some();
+    let result = persist_verified_request(db, usage, tally);
+    if result.is_ok() && child {
+        system::sync_overlap(db, &usage.thread_id, &usage.turn_id)?;
+    }
+    result
+}
+
+fn persist_verified_request(
+    db: &Connection,
+    usage: &RunTokenUsage,
+    tally: &mut Tally,
+) -> Result<()> {
     if backfill::live(db, usage, tally)? {
         return Ok(());
     }
     let meter = RequestMeter {
         counts: usage.last,
         model: usage.model.clone(),
+        provider_counts: usage.provider_counts,
     };
     let last = serde_json::to_string(&meter)?;
     let key = params![usage.thread_id, usage.turn_id, usage.response_id];
@@ -278,11 +299,7 @@ fn persist_request(
     // evidence. For an identity conflict within the same Run, neither counts.
     if previous.0 == usage.run_id && previous.1 != last && previous.2.is_none() {
         let old: RequestMeter = serde_json::from_str(&previous.1)?;
-        if let Some(counts) = old.counts.merge_known(usage.last) {
-            let merged = RequestMeter {
-                counts,
-                model: TokenModel::merge(old.model.clone(), meter.model),
-            };
+        if let Some(merged) = old.merge(&meter) {
             if old != merged {
                 db.prepare_cached(
                     "UPDATE token_requests SET last = ?4 WHERE thread_id = ?1 AND turn_id = ?2 AND response_id = ?3",
@@ -374,8 +391,12 @@ pub(super) fn apply_batch(
             db.prepare_cached("DELETE FROM token_usage_pending WHERE run_id = ?1")?
                 .execute([id])?;
         }
+        let had_usage = !records.usage.is_empty();
         for record in records.usage {
             persist_request(db, &run, runner, record, &mut after)?;
+        }
+        if had_usage || new_start {
+            system::sync_overlap(db, &run.thread, &run.turn)?;
         }
         if &after != before {
             save_run_tally(db, id, &after)?;
@@ -407,6 +428,7 @@ fn save_run_tally(db: &Connection, id: &str, tally: &Tally) -> Result<()> {
 }
 
 fn save_delta(db: &Connection, id: &str, run: &VerifiedRun, after: Tally) -> Result<()> {
+    system::sync_overlap(db, &run.thread, &run.turn)?;
     if after != run.tally {
         save_run_tally(db, id, &after)?;
         update_rollups(

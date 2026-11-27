@@ -1,4 +1,5 @@
 mod process;
+pub mod usage;
 
 use anyhow::{Context, Result, ensure};
 pub use process::ProcessIdentity;
@@ -17,6 +18,7 @@ use std::{
 
 const DISCUSSION_PROFILE: &str = "tend-discussion";
 const ROUTING_PROFILE: &str = "tend-router-routing";
+const RESPONSE_COMPLETED: &str = "rawResponse/completed";
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
 const ROUTING_DISABLED_FEATURES: &[&str] = &[
     "shell_tool",
@@ -61,6 +63,7 @@ pub struct Client {
     notifications: VecDeque<Value>,
     request_id: u64,
     work_rollout: Option<(String, PathBuf)>,
+    rollout_fresh: bool,
     routing_cwd: Option<PathBuf>,
 }
 
@@ -147,6 +150,17 @@ pub trait TurnHandler {
     }
     fn usage(&mut self, _thread: &str, _turn: &str, _usage: &Value) -> Result<()> {
         Ok(())
+    }
+    /// A completion for this confirmed native turn, not a context snapshot.
+    fn request_usage(&mut self, _thread: &str, _turn: &str, _response: usage::Response) {}
+    fn child_request_usage(
+        &mut self,
+        _root_thread: &str,
+        _root_turn: &str,
+        _thread: &str,
+        _turn: &str,
+        _response: usage::Response,
+    ) {
     }
     fn observed_user_message(&mut self, _client_id: &str) -> Result<()> {
         Ok(())
@@ -248,13 +262,15 @@ impl Client {
             notifications: VecDeque::new(),
             request_id: 0,
             work_rollout: None,
+            rollout_fresh: false,
             routing_cwd: None,
         };
         client.call(
             "initialize",
             json!({
                 "clientInfo": { "name": "tend-ng", "version": env!("CARGO_PKG_VERSION") },
-                "capabilities": { "experimentalApi": true }
+                "capabilities": { "experimentalApi": true,
+                    "optOutNotificationMethods": ["rawResponseItem/completed"] }
             }),
         )?;
         client.write(&json!({"method": "initialized"}))?;
@@ -295,6 +311,7 @@ impl Client {
     ) -> Result<String> {
         let mut params = json!({
                 "cwd": cwd, "ephemeral": ephemeral, "historyMode": "legacy",
+                "experimentalRawEvents": true,
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
                 "developerInstructions": instructions, "dynamicTools": tools, "model": model
         });
@@ -314,10 +331,12 @@ impl Client {
             .context("thread/start missing thread ID")?
             .to_owned();
         self.remember_work_rollout(&response["thread"], &id);
+        self.rollout_fresh = true;
         Ok(id)
     }
 
     fn remember_work_rollout(&mut self, thread: &Value, id: &str) {
+        self.rollout_fresh = false;
         self.work_rollout = thread["path"]
             .as_str()
             .map(PathBuf::from)
@@ -354,16 +373,19 @@ impl Client {
         model: Option<&str>,
     ) -> Result<String> {
         let mut params = json!({
-            "ephemeral": false, "historyMode": "legacy",
+            "ephemeral": false, "historyMode": "legacy", "experimentalRawEvents": true,
             "developerInstructions": instructions, "dynamicTools": tools, "model": model,
         });
         scope.apply(&mut params)?;
         let response = self.call("thread/start", params)?;
         verify_discussion_permissions(&response, scope.roots)?;
-        Ok(response["thread"]["id"]
+        let id = response["thread"]["id"]
             .as_str()
             .context("thread/start missing thread ID")?
-            .to_owned())
+            .to_owned();
+        self.remember_work_rollout(&response["thread"], &id);
+        self.rollout_fresh = true;
+        Ok(id)
     }
 
     pub fn resume_discussion_thread(
@@ -381,6 +403,7 @@ impl Client {
                     response["thread"]["id"] == thread_id,
                     "resumed an unexpected Discussion thread"
                 );
+                self.remember_work_rollout(&response["thread"], thread_id);
                 Ok(true)
             }
             Err(error) if missing_thread(&error, thread_id) => Ok(false),
@@ -431,10 +454,11 @@ impl Client {
             fork != thread,
             "bounded Discussion fork reused its parent identity"
         );
-        Ok(
-            (self.discussion_tail_turn(fork)?.as_deref() == Some(through_turn))
-                .then(|| fork.to_owned()),
-        )
+        if self.discussion_tail_turn(fork)?.as_deref() != Some(through_turn) {
+            return Ok(None);
+        }
+        self.remember_work_rollout(&response["thread"], fork);
+        Ok(Some(fork.to_owned()))
     }
 
     pub fn process_identity(&self) -> Result<ProcessIdentity> {
@@ -475,6 +499,7 @@ impl Client {
                         "resumed an unexpected Router thread"
                     );
                 }
+                self.remember_work_rollout(&response["thread"], thread_id);
                 Ok(true)
             }
             Err(error) if missing_thread(&error, thread_id) => Ok(false),
@@ -663,6 +688,26 @@ impl Client {
         Ok(())
     }
 
+    /// Observation is best-effort and cannot fail or retry a model turn.
+    pub fn run_metered_turn(
+        &mut self,
+        input: TurnInput<'_>,
+        handler: &mut impl TurnHandler,
+    ) -> Result<Turn> {
+        let thread = input.thread_id;
+        let collector = self.work_rollout(thread).and_then(|path| {
+            usage::Collector::new(path, thread, !self.rollout_fresh).unwrap_or_else(|error| {
+                eprintln!("Open native request evidence: {error}");
+                None
+            })
+        });
+        self.rollout_fresh = false;
+        let mut metered = usage::MeteredTurn::new(handler, collector);
+        let result = self.run_turn(input, &mut metered);
+        metered.flush(thread);
+        result
+    }
+
     pub fn run_turn(
         &mut self,
         input: TurnInput<'_>,
@@ -703,6 +748,7 @@ impl Client {
         let mut turn_id: Option<String> = None;
         let mut before_start = VecDeque::new();
         let mut messages = Vec::new();
+        let mut child_turns = BTreeSet::new();
         let mut next_control = Instant::now();
         let mut history_due = Instant::now() + Duration::from_secs(10);
         let mut history_terminal = None;
@@ -718,6 +764,7 @@ impl Client {
                     // without waiting for more frames or dispatching tools
                     // after a control has ended the turn.
                     for event in self.notifications.drain(..) {
+                        observe_response(&event, thread_id, turn, handler, &mut child_turns);
                         if let Some(usage) = live_usage(&event, thread_id, turn) {
                             let _ = handler.usage(thread_id, turn, usage);
                         }
@@ -828,18 +875,25 @@ impl Client {
                 }))?;
                 continue;
             }
-            if params["threadId"] != thread_id {
-                continue;
-            }
             let Some(turn_id) = &turn_id else {
                 if matches!(
                     method,
-                    Some("item/completed" | "turn/completed" | "thread/tokenUsage/updated")
+                    Some(
+                        "item/completed"
+                            | "turn/completed"
+                            | "turn/started"
+                            | "thread/tokenUsage/updated"
+                            | RESPONSE_COMPLETED
+                    )
                 ) {
                     before_start.push_back(event);
                 }
                 continue;
             };
+            observe_response(&event, thread_id, turn_id, handler, &mut child_turns);
+            if params["threadId"] != thread_id {
+                continue;
+            }
             if matches!(method, Some("item/started" | "item/completed"))
                 && params["turnId"] == *turn_id
                 && params["item"]["type"] == "userMessage"
@@ -903,8 +957,10 @@ impl Client {
                     "item/started"
                     | "item/completed"
                     | "turn/completed"
+                    | "turn/started"
                     | "item/tool/call"
-                    | "thread/tokenUsage/updated",
+                    | "thread/tokenUsage/updated"
+                    | RESPONSE_COMPLETED,
                 ) => {
                     self.notifications.push_back(event);
                 }
@@ -932,6 +988,50 @@ impl Client {
         writeln!(stdin)?;
         stdin.flush()?;
         Ok(())
+    }
+}
+
+fn observe_response(
+    event: &Value,
+    thread: &str,
+    turn: &str,
+    handler: &mut impl TurnHandler,
+    child_turns: &mut BTreeSet<(String, String)>,
+) {
+    let p = &event["params"];
+    let Some(event_thread) = p["threadId"]
+        .as_str()
+        .filter(|id| usage::valid_native_id(id))
+    else {
+        return;
+    };
+    if event_thread != thread
+        && matches!(
+            event["method"].as_str(),
+            Some("turn/started" | "turn/completed")
+        )
+        && p["turn"]["rootTurnId"] == turn
+        && let Some(child_turn) = p["turn"]["id"]
+            .as_str()
+            .filter(|id| *id != turn && usage::valid_native_id(id))
+    {
+        child_turns.insert((event_thread.to_owned(), child_turn.to_owned()));
+    }
+    if event["method"] != RESPONSE_COMPLETED {
+        return;
+    }
+    let Some(event_turn) = p["turnId"].as_str().filter(|id| usage::valid_native_id(id)) else {
+        return;
+    };
+    let Some(response) = usage::Response::from_event(p) else {
+        return;
+    };
+    if event_thread == thread && event_turn == turn {
+        handler.request_usage(thread, turn, response);
+    } else if event_thread != thread
+        && child_turns.contains(&(event_thread.to_owned(), event_turn.to_owned()))
+    {
+        handler.child_request_usage(thread, turn, event_thread, event_turn, response);
     }
 }
 

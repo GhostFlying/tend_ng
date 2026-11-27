@@ -532,6 +532,37 @@ impl TurnHandler for Handler<'_> {
         Ok(())
     }
 
+    fn request_usage(&mut self, thread: &str, turn: &str, response: crate::usage::Response) {
+        if let Err(error) =
+            self.store
+                .persist_token_usage(&self.run.id, thread, turn, &response.id, response.meter)
+        {
+            eprintln!(
+                "Persist response identity for Run {}: {error:#}",
+                self.run.id
+            );
+        }
+    }
+
+    fn child_request_usage(
+        &mut self,
+        root_thread: &str,
+        root_turn: &str,
+        thread: &str,
+        turn: &str,
+        response: crate::usage::Response,
+    ) {
+        if let Err(error) = self.store.persist_child_token_usage(
+            &self.run.id,
+            (root_thread, root_turn),
+            (thread, turn),
+            &response.id,
+            response.meter,
+        ) {
+            eprintln!("Persist child response for Run {}: {error:#}", self.run.id);
+        }
+    }
+
     fn checks_controls(&self) -> bool {
         true
     }

@@ -52,6 +52,21 @@ impl TokenCounts {
         Some(Self::from_fields(fields))
     }
 
+    /// Exact provider usage takes precedence over compatible normalized
+    /// copies. A runtime default must not fill an omitted provider field.
+    pub fn merge_reported(self, self_exact: bool, other: Self, other_exact: bool) -> Option<Self> {
+        let merged = self.merge_known(other)?;
+        Some(match (self_exact, other_exact) {
+            (true, false) => self,
+            (false, true) => other,
+            _ => merged,
+        })
+    }
+
+    pub fn missing(self) -> bool {
+        self.fields().iter().all(Option::is_none)
+    }
+
     pub fn valid(self) -> bool {
         let fields = self.fields();
         fields.iter().any(Option::is_some) && fields.into_iter().flatten().all(|n| n >= 0)
@@ -111,6 +126,47 @@ pub struct RequestMeter {
     pub counts: TokenCounts,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<TokenModel>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provider_counts: bool,
+}
+
+impl RequestMeter {
+    pub fn merge(&self, other: &Self) -> Option<Self> {
+        Some(Self {
+            counts: self.counts.merge_reported(
+                self.provider_counts,
+                other.counts,
+                other.provider_counts,
+            )?,
+            model: TokenModel::merge(self.model.clone(), other.model.clone()),
+            provider_counts: self.provider_counts || other.provider_counts,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+pub struct NativeTurnKey {
+    pub thread_id: String,
+    pub turn_id: String,
+}
+
+impl NativeTurnKey {
+    pub fn valid(&self) -> bool {
+        [&self.thread_id, &self.turn_id]
+            .into_iter()
+            .all(|id| valid_native_id(id))
+    }
+}
+
+pub fn valid_native_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 256 && !id.chars().any(char::is_control)
+}
+
+pub fn native_request_cursor(child: Option<(&str, &str)>, response_id: &str) -> String {
+    match child {
+        None => response_id.to_owned(),
+        Some((thread, turn)) => format!("\x1f{thread}\x1f{turn}\x1f{response_id}"),
+    }
 }
 
 /// A native request observation with a corroborated upstream response ID.
@@ -123,7 +179,13 @@ pub struct RunTokenUsage {
     pub thread_id: String,
     pub turn_id: String,
     pub response_id: String,
+    /// The accepted Run lives on this causal root. The other thread and
+    /// turn are the request's original native identity, not aliases.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root: Option<NativeTurnKey>,
     pub last: TokenCounts,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub provider_counts: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<TokenModel>,
     pub observed_at: i64,
@@ -141,8 +203,11 @@ impl RunTokenUsage {
         .all(|id| crate::valid_id(id))
             && [&self.thread_id, &self.turn_id, &self.response_id]
                 .into_iter()
-                .all(|id| !id.is_empty() && id.len() <= 256)
-            && self.last.valid()
+                .all(|id| valid_native_id(id))
+            && self.root.as_ref().is_none_or(|root| {
+                root.valid() && root.thread_id != self.thread_id && root.turn_id != self.turn_id
+            })
+            && (self.last.valid() || (self.last.missing() && self.model.is_some()))
             && self.model.as_ref().is_none_or(TokenModel::valid)
             && self.observed_at > 0
     }
@@ -222,6 +287,9 @@ pub struct TokenBackfillWork {
     pub thread_id: String,
     pub turn_id: String,
     pub offset: i64,
+    /// A new Server explicitly opts in before a Runner may send child keys.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub include_children: bool,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -240,12 +308,25 @@ pub enum TokenSourceGap {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct NativeTokenRecord {
     pub response_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub child: Option<NativeTurnKey>,
     pub counts: Option<TokenCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<TokenModel>,
     pub invalid: bool,
     /// A second distinct variant proves that the native key is ambiguous.
     pub variant: Option<TokenCounts>,
+}
+
+impl NativeTokenRecord {
+    pub fn cursor(&self) -> String {
+        native_request_cursor(
+            self.child
+                .as_ref()
+                .map(|key| (key.thread_id.as_str(), key.turn_id.as_str())),
+            &self.response_id,
+        )
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -267,6 +348,8 @@ pub enum TokenBackfillContent {
         records: Vec<NativeTokenRecord>,
         done: bool,
         prefix: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        child_gap: Option<TokenSourceGap>,
     },
 }
 
@@ -296,13 +379,13 @@ impl TokenBackfillPage {
                     && records.len() <= crate::RUNNER_SYNC_BATCH
                     && (*done || records.len() == crate::RUNNER_SYNC_BATCH)
                     && records.iter().all(|record| {
-                        !record.response_id.is_empty()
-                            && record.response_id.len() <= 256
+                        valid_native_id(&record.response_id)
+                            && record.child.as_ref().is_none_or(NativeTurnKey::valid)
                             && record.model.as_ref().is_none_or(TokenModel::valid)
                     })
                     && records
                         .windows(2)
-                        .all(|rows| rows[0].response_id < rows[1].response_id)
+                        .all(|rows| rows[0].cursor() < rows[1].cursor())
             }
         }
     }

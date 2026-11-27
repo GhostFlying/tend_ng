@@ -496,8 +496,19 @@ export type TokenOverviewIssue = IssueTokenUsageData["nodes"][number] & {
   has_children: boolean;
 };
 
+export type TokenUsageSource = {
+  source: string;
+  usage: TokenBreakdown;
+  attempts_without_turn: number;
+  shared_turn_attempts: number;
+  shared_issue_responses: number;
+  responses_without_usage: number | null;
+  conflicts: number;
+};
+
 export type TokenOverviewPage = {
   total?: TokenBreakdown;
+  sources?: TokenUsageSource[];
   issues: TokenOverviewIssue[];
   next_before: string | null;
 };

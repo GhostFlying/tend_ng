@@ -53,6 +53,7 @@ pub fn migrate_providers(db: &Connection) -> Result<()> {
 
 #[cfg(test)]
 pub(crate) fn restore_legacy_schema(db: &Connection) -> Result<()> {
+    super::remove_agent_usage_schema(db)?;
     super::codebase_comments::drop_schema(db)?;
     db.execute_batch(
         "DROP INDEX pulls_due;

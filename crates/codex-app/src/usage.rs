@@ -3,7 +3,9 @@
 //! TokenCount also reports estimates, limit markers and restored context. Pair
 //! the wire values with exact per-response evidence from this turn's append
 //! segment. Never substitute counts from the file for missing wire fields.
-use protocol::{RequestMeter, TokenCounts, TokenModel};
+use protocol::{
+    RequestMeter, TokenCounts, TokenModel, TokenSourceGap, TokenSourceGap::SourceUnreadable,
+};
 use serde::Deserialize;
 use serde_json::Value;
 use std::{
@@ -12,6 +14,247 @@ use std::{
     io::{self, BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
 };
+
+/// Response identity exists even when the provider omits billable usage.
+pub struct Response {
+    pub id: String,
+    pub meter: RequestMeter,
+}
+
+impl Response {
+    pub(crate) fn from_event(params: &Value) -> Option<Self> {
+        let id = params["responseId"]
+            .as_str()
+            .filter(|id| valid_native_id(id))?;
+        let fields = [
+            "totalTokens",
+            "inputTokens",
+            "cachedInputTokens",
+            "cacheWriteInputTokens",
+            "outputTokens",
+            "reasoningOutputTokens",
+        ];
+        let read = |value: &Value| value.as_i64().filter(|count| *count >= 0);
+        let original = &params["usageMetadata"]["metadata"];
+        let provider_counts = original.is_object()
+            && ["total_tokens", "input_tokens", "output_tokens"]
+                .iter()
+                .any(|key| original.get(key).is_some());
+        let values = if provider_counts {
+            let input = &original["input_tokens_details"];
+            let output = &original["output_tokens_details"];
+            [
+                &original["total_tokens"],
+                &original["input_tokens"],
+                &input["cached_tokens"],
+                &input["cache_write_tokens"],
+                &original["output_tokens"],
+                &output["reasoning_tokens"],
+            ]
+            .map(read)
+        } else {
+            fields.map(|field| read(&params["usage"][field]))
+        };
+        let counts = TokenCounts::from_fields(values);
+        let model = params["responseModel"]
+            .as_str()
+            .filter(|id| TokenModel::valid_id(id))
+            .map(|id| TokenModel::Response(id.to_owned()))
+            .unwrap_or(TokenModel::Unresolved);
+        Some(Self {
+            id: id.to_owned(),
+            meter: RequestMeter {
+                counts,
+                model: Some(model),
+                provider_counts,
+            },
+        })
+    }
+}
+
+pub use protocol::valid_native_id;
+
+pub(crate) struct MeteredTurn<'a, H> {
+    inner: &'a mut H,
+    collector: Option<Collector>,
+    turn: Option<String>,
+}
+
+impl<'a, H: crate::TurnHandler> MeteredTurn<'a, H> {
+    pub(crate) fn new(inner: &'a mut H, collector: Option<Collector>) -> Self {
+        Self {
+            inner,
+            collector,
+            turn: None,
+        }
+    }
+
+    pub(crate) fn flush(&mut self, thread: &str) {
+        if let (Some(turn), Some(collector)) = (&self.turn, &mut self.collector) {
+            match collector.matched(thread, turn) {
+                Ok(records) => {
+                    for (id, meter) in records {
+                        self.inner
+                            .request_usage(thread, turn, Response { id, meter });
+                    }
+                }
+                Err(error) => eprintln!("Read native request evidence: {error}"),
+            }
+        }
+    }
+}
+
+impl<H: crate::TurnHandler> crate::TurnHandler for MeteredTurn<'_, H> {
+    fn started(&mut self, turn: &str) -> anyhow::Result<()> {
+        self.inner.started(turn)?;
+        self.turn = Some(turn.to_owned());
+        Ok(())
+    }
+
+    fn request_usage(&mut self, thread: &str, turn: &str, response: Response) {
+        self.inner.request_usage(thread, turn, response);
+    }
+
+    fn child_request_usage(
+        &mut self,
+        root_thread: &str,
+        root_turn: &str,
+        thread: &str,
+        turn: &str,
+        response: Response,
+    ) {
+        self.inner
+            .child_request_usage(root_thread, root_turn, thread, turn, response);
+    }
+
+    fn usage(&mut self, thread: &str, turn: &str, value: &Value) -> anyhow::Result<()> {
+        if let Some(collector) = &mut self.collector {
+            collector.notice(value);
+            self.flush(thread);
+        }
+        self.inner.usage(thread, turn, value)
+    }
+
+    fn tool(&mut self, call: crate::ToolCall) -> anyhow::Result<crate::ToolOutput> {
+        self.flush(&call.thread_id);
+        self.inner.tool(call)
+    }
+}
+
+pub type Rollouts = std::collections::HashMap<String, Option<PathBuf>>;
+
+/// Index only Codex's two session directories in the frozen home. Do not
+/// descend through symlinked entries or trust any pathname supplied by Server.
+pub fn rollout_index(home: &Path) -> Result<Rollouts, TokenSourceGap> {
+    let mut result = Rollouts::new();
+    let mut dirs = vec![home.join("sessions"), home.join("archived_sessions")];
+    while let Some(dir) = dirs.pop() {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(_) => return Err(SourceUnreadable),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| SourceUnreadable)?;
+            let kind = entry.file_type().map_err(|_| SourceUnreadable)?;
+            if kind.is_dir() {
+                dirs.push(entry.path());
+            } else if kind.is_file()
+                && let Some(name) = entry.file_name().to_str()
+                // Codex normally uses UUIDs, but its thread IDs are opaque
+                // here. Index by the suffix after its fixed ISO timestamp.
+                && let Some(thread) = rollout_thread(name)
+            {
+                result
+                    .entry(thread.to_owned())
+                    .and_modify(|slot| *slot = None)
+                    .or_insert_with(|| Some(entry.path()));
+            }
+        }
+    }
+    Ok(result)
+}
+
+fn rollout_thread(name: &str) -> Option<&str> {
+    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
+    let (date, thread) = stem.split_at_checked(20)?;
+    (date.ends_with('-') && !thread.is_empty()).then_some(thread)
+}
+/// Build a home-local index of native children only for an explicit job.
+pub struct ChildRollouts {
+    sessions: BTreeMap<String, Vec<(String, PathBuf)>>,
+    unreadable: bool,
+}
+
+impl ChildRollouts {
+    pub fn from_rollouts(rollouts: &Rollouts) -> Self {
+        let mut index = Self {
+            sessions: BTreeMap::new(),
+            unreadable: false,
+        };
+        for (thread, path) in rollouts {
+            let Some(path) = path else {
+                index.unreadable = true;
+                continue;
+            };
+            if let Some(session) = child_session(path, thread) {
+                index
+                    .sessions
+                    .entry(session)
+                    .or_default()
+                    .push((thread.clone(), path.clone()));
+            }
+        }
+        index
+    }
+
+    pub fn snapshot(
+        &self,
+        session: &str,
+        root_turn: &str,
+        active: bool,
+    ) -> (Vec<protocol::NativeTokenRecord>, Option<TokenSourceGap>) {
+        let mut found = Vec::new();
+        let mut gap = self.unreadable.then_some(TokenSourceGap::SourceAmbiguous);
+        if let Some(children) = self.sessions.get(session) {
+            for (thread, path) in children {
+                let result = File::open(path)
+                    .map_err(|_| TokenSourceGap::SourceUnreadable)
+                    .and_then(|file| {
+                        snapshot(file, thread, Scope::Child { session, root_turn }, active)
+                    });
+                match result {
+                    Ok(records) => found.extend(records),
+                    Err(error) => {
+                        gap.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        (found, gap)
+    }
+}
+
+fn child_session(path: &Path, thread: &str) -> Option<String> {
+    let mut line = Vec::new();
+    BufReader::new(File::open(path).ok()?)
+        .take(MAX_LINE)
+        .read_until(b'\n', &mut line)
+        .ok()?;
+    let value: Value = serde_json::from_slice(&line).ok()?;
+    let payload = &value["payload"];
+    let session = payload["session_id"]
+        .as_str()
+        .filter(|session| valid_native_id(session))?;
+    if value["type"] != "session_meta"
+        || payload["id"] != thread
+        || session == thread
+        || !payload["source"]["subagent"].is_object()
+    {
+        return None;
+    }
+    Some(session.to_owned())
+}
 
 const RECORD: &str = "token_usage_record";
 const MAX_LINE: u64 = 1024 * 1024;
@@ -125,13 +368,30 @@ impl TurnModel {
 
 /// Read a fixed prefix. An incomplete trailing append is distinguishable from
 /// a corrupt completed line, and neither is evidence that a request was absent.
-pub(crate) fn native_snapshot(
+pub fn native_snapshot(
     file: File,
     thread: &str,
     turn: &str,
     active: bool,
 ) -> Result<Vec<protocol::NativeTokenRecord>, protocol::TokenSourceGap> {
-    use protocol::{NativeTokenRecord, TokenSourceGap::*};
+    snapshot(file, thread, Scope::Turn(turn), active)
+}
+
+enum Scope<'a> {
+    Turn(&'a str),
+    Child {
+        session: &'a str,
+        root_turn: &'a str,
+    },
+}
+
+fn snapshot(
+    file: File,
+    thread: &str,
+    scope: Scope<'_>,
+    active: bool,
+) -> Result<Vec<protocol::NativeTokenRecord>, TokenSourceGap> {
+    use protocol::{NativeTokenRecord, NativeTurnKey, TokenSourceGap::*};
 
     let meta = file.metadata().map_err(|_| SourceUnreadable)?;
     if !meta.is_file() {
@@ -141,6 +401,10 @@ pub(crate) fn native_snapshot(
     let mut records = BTreeMap::<String, NativeTokenRecord>::new();
     let mut line = Vec::new();
     let mut model = TurnModel::default();
+    let mut model_turn = match scope {
+        Scope::Turn(turn) => turn.to_owned(),
+        Scope::Child { .. } => String::new(),
+    };
     loop {
         line.clear();
         let bytes = (&mut input)
@@ -190,7 +454,14 @@ pub(crate) fn native_snapshot(
         };
         let payload = &value["payload"];
         if kind != RECORD {
-            model.observe(kind, payload, turn);
+            if matches!(scope, Scope::Child { .. }) && kind == "turn_context" {
+                let next = payload["turn_id"].as_str().unwrap_or_default();
+                if next != model_turn {
+                    model = TurnModel::default();
+                    model_turn = next.to_owned();
+                }
+            }
+            model.observe(kind, payload, &model_turn);
             continue;
         }
         let (Some(record_thread), Some(record_turn)) =
@@ -198,32 +469,55 @@ pub(crate) fn native_snapshot(
         else {
             return Err(SourceCorrupt);
         };
+        // A fork can contain copied ancestor evidence. Only the exact
+        // original thread and turn can contribute to this binding.
         if record_thread != thread {
-            return Err(SourceCorrupt);
-        }
-        if record_turn != turn {
             continue;
         }
+        let child = match scope {
+            Scope::Turn(turn) if record_turn == turn => None,
+            Scope::Child { session, root_turn }
+                if payload["session_id"] == session
+                    && payload["root_turn_id"] == root_turn
+                    && valid_native_id(record_turn)
+                    && record_turn != root_turn =>
+            {
+                Some(NativeTurnKey {
+                    thread_id: thread.to_owned(),
+                    turn_id: record_turn.to_owned(),
+                })
+            }
+            _ => continue,
+        };
         let response = payload["response_id"]
             .as_str()
-            .filter(|id| !id.is_empty() && id.len() <= 256)
+            .filter(|id| valid_native_id(id))
             .ok_or(SourceCorrupt)?;
         let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone()).ok();
         let valid = serde_json::from_value::<NativeRecord>(payload.clone())
             .is_ok_and(|record| record.valid());
-        let record = records
-            .entry(response.to_owned())
-            .or_insert_with(|| NativeTokenRecord {
-                response_id: response.to_owned(),
-                counts,
-                invalid: false,
-                variant: None,
-                model: None,
-            });
+        let cursor = protocol::native_request_cursor(
+            child
+                .as_ref()
+                .map(|key| (key.thread_id.as_str(), key.turn_id.as_str())),
+            response,
+        );
+        let record = records.entry(cursor).or_insert_with(|| NativeTokenRecord {
+            response_id: response.to_owned(),
+            child,
+            counts,
+            invalid: false,
+            variant: None,
+            model: None,
+        });
         record.invalid |= !valid;
         record.model = TokenModel::merge(
             record.model.take(),
-            Some(model.for_response(&payload["response_model"])),
+            Some(if model_turn == record_turn {
+                model.for_response(&payload["response_model"])
+            } else {
+                TurnModel::default().for_response(&payload["response_model"])
+            }),
         );
         if let Some(counts) = counts
             && record.counts != Some(counts)
@@ -235,7 +529,7 @@ pub(crate) fn native_snapshot(
             }
         }
     }
-    if records.is_empty() {
+    if records.is_empty() && matches!(scope, Scope::Turn(_)) {
         return Err(NoNativeRecords);
     }
     // A file truncated after metadata has an unscanned tail even if its
@@ -440,6 +734,7 @@ impl Collector {
                         RequestMeter {
                             counts: last,
                             model: record.model.clone(),
+                            provider_counts: false,
                         },
                     ));
                     false

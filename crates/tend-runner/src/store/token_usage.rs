@@ -1,6 +1,9 @@
 use super::Store;
 use anyhow::Result;
-use protocol::{RUNNER_SYNC_BATCH, RequestMeter, RunTokenUsage, TokenCounts};
+use protocol::{
+    NativeTurnKey, RUNNER_SYNC_BATCH, RequestMeter, RunTokenUsage, TokenCounts,
+    native_request_cursor,
+};
 use rusqlite::{Connection, Params, params};
 
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
@@ -41,6 +44,25 @@ impl Store {
             params![protocol::new_id(), run, thread, turn, response_id, serde_json::to_string(&last)?],
         )?;
         Ok(())
+    }
+
+    pub fn persist_child_token_usage(
+        &self,
+        run: &str,
+        root: (&str, &str),
+        child: (&str, &str),
+        response: &str,
+        meter: RequestMeter,
+    ) -> Result<()> {
+        // Keep the existing local outbox and cursor. Only decoded original
+        // native identities are sent across the wire.
+        self.persist_token_usage(
+            run,
+            root.0,
+            root.1,
+            &native_request_cursor(Some(child), response),
+            meter,
+        )
     }
 
     pub fn token_usage(&self) -> Result<Vec<RunTokenUsage>> {
@@ -101,7 +123,9 @@ impl Store {
                         turn_id: row.get(6)?,
                         response_id: row.get(7)?,
                         observed_at: row.get(8)?,
+                        root: None,
                         last: TokenCounts::default(),
+                        provider_counts: false,
                         model: None,
                     },
                     row.get::<_, String>(9)?,
@@ -110,7 +134,23 @@ impl Store {
             .map(|row| {
                 let (seq, mut usage, last) = row?;
                 let meter: RequestMeter = serde_json::from_str(&last)?;
+                if let Some(child) = usage.response_id.strip_prefix('\x1f') {
+                    let mut parts = child.splitn(3, '\x1f');
+                    if let (Some(thread_id), Some(turn_id), Some(response_id)) =
+                        (parts.next(), parts.next(), parts.next())
+                    {
+                        usage.root = Some(NativeTurnKey {
+                            thread_id: std::mem::replace(
+                                &mut usage.thread_id,
+                                thread_id.to_owned(),
+                            ),
+                            turn_id: std::mem::replace(&mut usage.turn_id, turn_id.to_owned()),
+                        });
+                        usage.response_id = response_id.to_owned();
+                    }
+                }
                 usage.last = meter.counts;
+                usage.provider_counts = meter.provider_counts;
                 usage.model = meter.model;
                 Ok((seq, usage))
             })

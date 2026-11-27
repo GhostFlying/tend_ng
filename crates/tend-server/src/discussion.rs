@@ -178,6 +178,10 @@ impl Service {
         api::serve(self, db)
     }
 
+    pub(crate) fn codex_home(&self) -> Option<PathBuf> {
+        self.settings.as_ref().map(|s| s.codex_home.clone())
+    }
+
     fn app(&self, settings: &Settings, reply_only: bool) -> Result<Client> {
         let mut filesystem = vec![
             "\":minimal\"=\"read\"".to_owned(),
@@ -433,8 +437,21 @@ impl Service {
         }
         context.push(format!("Current attached references, scopes and live checkout paths. Earlier references do not grant access.\n{}",serde_json::to_string(&sources)?));
         let context = context.join("\n\n");
-        let attempt_id = store.start_attempt(input.seq, number, &thread, &process)?;
-        let turn = client.run_turn(
+        use crate::store::agent_metering::Source;
+        let source = if quick.is_some() || store.is_discussion_model_draft(&input.message_id)? {
+            Source::DiscussionSummary
+        } else {
+            Source::Discussion
+        };
+        let attempt_id = store.start_attempt(
+            input.seq,
+            number,
+            &thread,
+            &process,
+            source,
+            client.work_rollout(&thread),
+        )?;
+        let turn = client.run_metered_turn(
             TurnInput {
                 thread_id: &thread,
                 client_id: &attempt_id,
@@ -513,9 +530,15 @@ impl Service {
         };
         // This launcher may use a different provider from the ordinary
         // Router. Only this handoff and its provenance belong in its prompt.
-        let attempt =
-            store.start_attempt(input.seq, number, &thread, &client.process_identity()?)?;
-        let turn = client.run_turn(
+        let attempt = store.start_attempt(
+            input.seq,
+            number,
+            &thread,
+            &client.process_identity()?,
+            crate::store::agent_metering::Source::HandoffReceiver,
+            client.work_rollout(&thread),
+        )?;
+        let turn = client.run_metered_turn(
             TurnInput {
                 thread_id: &thread,
                 client_id: &attempt,
@@ -794,6 +817,27 @@ impl TurnHandler for DiscussionTools<'_> {
         self.store.save_turn_id(self.attempt_id, turn)
     }
 
+    fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
+        self.store
+            .record_agent_response(self.attempt_id, thread, turn, response);
+    }
+
+    fn child_request_usage(
+        &mut self,
+        root_thread: &str,
+        root_turn: &str,
+        thread: &str,
+        turn: &str,
+        response: codex_app::usage::Response,
+    ) {
+        self.store.record_agent_child_response(
+            self.attempt_id,
+            (root_thread, root_turn),
+            (thread, turn),
+            response,
+        );
+    }
+
     fn tool(&mut self, call: ToolCall) -> Result<ToolOutput> {
         let reject = |error| {
             Ok(ToolOutput {
@@ -891,6 +935,26 @@ struct HandoffReceiver<'a> {
 impl TurnHandler for HandoffReceiver<'_> {
     fn started(&mut self, turn: &str) -> Result<()> {
         self.store.save_turn_id(self.attempt, turn)
+    }
+    fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
+        self.store
+            .record_agent_response(self.attempt, thread, turn, response);
+    }
+
+    fn child_request_usage(
+        &mut self,
+        root_thread: &str,
+        root_turn: &str,
+        thread: &str,
+        turn: &str,
+        response: codex_app::usage::Response,
+    ) {
+        self.store.record_agent_child_response(
+            self.attempt,
+            (root_thread, root_turn),
+            (thread, turn),
+            response,
+        );
     }
     fn tool(&mut self, _: ToolCall) -> Result<ToolOutput> {
         Ok(ToolOutput {

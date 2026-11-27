@@ -471,6 +471,7 @@ mod tests {
         let meter = RequestMeter {
             counts: TokenCounts::from_fields(fields),
             model: Some(TokenModel::Response(id.to_owned())),
+            provider_counts: false,
         };
         totals.count(meter.counts, 1);
         models.count(&meter, 1);

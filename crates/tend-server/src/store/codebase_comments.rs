@@ -1404,6 +1404,7 @@ mod tests {
             drop_schema(&store.db)?;
             crate::store::discussion::remove_quick_handoff_and_title_schema(&store.db)?;
             crate::store::remove_token_usage_overview_schema(&store.db)?;
+            super::super::remove_agent_usage_schema(&store.db)?;
             store.db.pragma_update(None, "user_version", 38)?;
         }
         let mut store = Store::initialize(&dir.0)?;
@@ -1651,6 +1652,7 @@ mod tests {
             drop_schema(&store.db)?;
             crate::store::discussion::remove_quick_handoff_and_title_schema(&store.db)?;
             crate::store::remove_token_usage_overview_schema(&store.db)?;
+            super::super::remove_agent_usage_schema(&store.db)?;
             store.db.pragma_update(None, "user_version", 38)?;
         }
         let mut store = Store::initialize(&dir.0)?;

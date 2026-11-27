@@ -57,8 +57,10 @@ jobs:
       - name: Check historical token usage backfill and rebuild
         run: |
           cargo test --release --locked -p tend-server store::token_usage
-          cargo test --release --locked -p tend-runner usage::
+          cargo test --release --locked -p codex-app usage::
           python3 -B tests/e2e/token_usage_backfill.py target/release/tend-server target/release/tend target/release/tend-runner
+      - name: Check system Agent metering, replay and historical overlap
+        run: python3 -B tests/e2e/system_agent_token_usage.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check Issue backlog, stop evidence and ordered input
         run: |
           python3 -B tests/e2e/issue_input_order.py target/release/tend-server

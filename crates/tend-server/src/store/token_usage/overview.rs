@@ -62,6 +62,8 @@ pub(super) fn write_global(db: &Connection, summary: &Summary) -> Result<()> {
 pub struct TokenOverview {
     #[serde(skip_serializing_if = "Option::is_none")]
     total: Option<Breakdown>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sources: Option<Vec<super::system::SourceUsage>>,
     issues: Vec<OverviewIssue>,
     next_before: Option<String>,
 }
@@ -84,7 +86,7 @@ impl Store {
     ) -> Result<Option<TokenOverview>> {
         // A root page and its total must see the same sync/rebuild snapshot.
         let tx = self.db.unchecked_transaction()?;
-        let total = if let Some(parent) = parent {
+        let (total, sources) = if let Some(parent) = parent {
             if !tx.query_row(
                 "SELECT EXISTS(SELECT 1 FROM issues WHERE id = ?1)",
                 [parent],
@@ -92,9 +94,10 @@ impl Store {
             )? {
                 return Ok(None);
             }
-            None
+            (None, None)
         } else {
-            Some(read_global(&tx)?.into())
+            let (total, sources) = super::system::read_overview(&tx, read_global(&tx)?)?;
+            (Some(total), Some(sources))
         };
         let (source_seq, issue_id) = before
             .map(|key| (key.source_seq, key.issue_id.as_str()))
@@ -129,6 +132,7 @@ impl Store {
         tx.commit()?;
         Ok(Some(TokenOverview {
             total,
+            sources,
             issues,
             next_before,
         }))

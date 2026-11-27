@@ -7,9 +7,9 @@ use protocol::{
 use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
-    fs::{self, File},
+    fs::File,
     io,
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::{
         Arc,
         mpsc::{self, Receiver, SyncSender},
@@ -36,6 +36,7 @@ impl Worker {
                 runner: config.runner_id.clone(),
                 job: String::new(),
                 homes: HashMap::new(),
+                children: HashMap::new(),
                 cached: None,
             };
             for work in input {
@@ -89,8 +90,15 @@ impl Worker {
     }
 }
 
-type Rollouts = HashMap<String, Option<PathBuf>>;
-type Snapshot = (i64, String, Vec<NativeTokenRecord>, bool);
+use crate::usage::{ChildRollouts, Rollouts, rollout_index};
+type Snapshot = (
+    i64,
+    String,
+    Vec<NativeTokenRecord>,
+    bool,
+    Option<TokenSourceGap>,
+);
+type NativeScan = (Vec<NativeTokenRecord>, bool, Option<TokenSourceGap>);
 
 struct Scanner {
     store: Store,
@@ -98,6 +106,7 @@ struct Scanner {
     runner: String,
     job: String,
     homes: HashMap<PathBuf, Result<Rollouts, TokenSourceGap>>,
+    children: HashMap<PathBuf, ChildRollouts>,
     cached: Option<Snapshot>,
 }
 
@@ -106,28 +115,30 @@ impl Scanner {
         if self.job != work.job_id {
             self.job.clone_from(&work.job_id);
             self.homes.clear();
+            self.children.clear();
         }
         if !self
             .cached
             .as_ref()
-            .is_some_and(|(item, _, _, _)| *item == work.item)
+            .is_some_and(|(item, _, _, _, _)| *item == work.item)
         {
             self.cached = None;
             match self.snapshot(work) {
-                Ok((records, active)) => {
-                    let bytes = serde_json::to_vec(&(&records, active))
+                Ok((records, active, child_gap)) => {
+                    let bytes = serde_json::to_vec(&(&records, active, child_gap))
                         .expect("serializable Token evidence");
                     self.cached = Some((
                         work.item,
                         format!("{:x}", Sha256::digest(bytes)),
                         records,
                         active,
+                        child_gap,
                     ));
                 }
                 Err(reason) => return TokenBackfillContent::Gap { reason },
             }
         }
-        let (_, snapshot, records, active) = self.cached.as_ref().unwrap();
+        let (_, snapshot, records, active, child_gap) = self.cached.as_ref().unwrap();
         let Ok(offset) = usize::try_from(work.offset) else {
             return TokenBackfillContent::Gap {
                 reason: SourceChanged,
@@ -143,13 +154,11 @@ impl Scanner {
             records: rest[..rest.len().min(RUNNER_SYNC_BATCH)].to_vec(),
             done: rest.len() <= RUNNER_SYNC_BATCH,
             prefix: *active,
+            child_gap: *child_gap,
         }
     }
 
-    fn snapshot(
-        &mut self,
-        work: &TokenBackfillWork,
-    ) -> Result<(Vec<NativeTokenRecord>, bool), TokenSourceGap> {
+    fn snapshot(&mut self, work: &TokenBackfillWork) -> Result<NativeScan, TokenSourceGap> {
         let index = self.history.join(format!("{}.sqlite", work.runner_id));
         let indexed = match index.try_exists() {
             Ok(true) => indexed_launch(&index, &work.thread_id).map_err(|_| SourceUnreadable)?,
@@ -181,53 +190,34 @@ impl Scanner {
             .homes
             .entry(path.clone())
             .or_insert_with(|| rollout_index(&path));
-        let file = match index.as_ref().map_err(|error| *error)?.get(&work.thread_id) {
-            Some(Some(path)) => File::open(path).map_err(|error| match error.kind() {
-                io::ErrorKind::NotFound => SourceMissing,
-                _ => SourceUnreadable,
-            })?,
-            Some(None) => return Err(SourceAmbiguous),
-            None => return Err(SourceMissing),
+        let index = index.as_ref().map_err(|error| *error)?;
+        let root = match index.get(&work.thread_id) {
+            Some(Some(path)) => File::open(path)
+                .map_err(|error| match error.kind() {
+                    io::ErrorKind::NotFound => SourceMissing,
+                    _ => SourceUnreadable,
+                })
+                .and_then(|file| native_snapshot(file, &work.thread_id, &work.turn_id, active)),
+            Some(None) => Err(SourceAmbiguous),
+            None => Err(SourceMissing),
         };
-        native_snapshot(file, &work.thread_id, &work.turn_id, active)
-            .map(|records| (records, active))
-    }
-}
-
-/// Index only Codex's two session directories in the frozen home. Do not
-/// descend through symlinked entries or trust any pathname supplied by Server.
-fn rollout_index(home: &Path) -> Result<Rollouts, TokenSourceGap> {
-    let mut result = Rollouts::new();
-    let mut dirs = vec![home.join("sessions"), home.join("archived_sessions")];
-    while let Some(dir) = dirs.pop() {
-        let entries = match fs::read_dir(dir) {
-            Ok(entries) => entries,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
-            Err(_) => return Err(SourceUnreadable),
-        };
-        for entry in entries {
-            let entry = entry.map_err(|_| SourceUnreadable)?;
-            let kind = entry.file_type().map_err(|_| SourceUnreadable)?;
-            if kind.is_dir() {
-                dirs.push(entry.path());
-            } else if kind.is_file()
-                && let Some(name) = entry.file_name().to_str()
-                // Codex normally uses UUIDs, but its thread IDs are opaque
-                // here. Index by the suffix after its fixed ISO timestamp.
-                && let Some(thread) = rollout_thread(name)
-            {
-                result
-                    .entry(thread.to_owned())
-                    .and_modify(|slot| *slot = None)
-                    .or_insert_with(|| Some(entry.path()));
-            }
+        if !work.include_children {
+            return root.map(|rows| (rows, active, None));
         }
+        let children = self
+            .children
+            .entry(path)
+            .or_insert_with(|| ChildRollouts::from_rollouts(index));
+        let (mut rows, child_gap) = children.snapshot(&work.thread_id, &work.turn_id, active);
+        let gap = match root {
+            Ok(root) => {
+                rows.extend(root);
+                child_gap
+            }
+            Err(reason) if rows.is_empty() => return Err(reason),
+            Err(reason) => Some(reason),
+        };
+        rows.sort_by_cached_key(NativeTokenRecord::cursor);
+        Ok((rows, active, gap))
     }
-    Ok(result)
-}
-
-fn rollout_thread(name: &str) -> Option<&str> {
-    let stem = name.strip_prefix("rollout-")?.strip_suffix(".jsonl")?;
-    let (date, thread) = stem.split_at_checked(20)?;
-    (date.ends_with('-') && !thread.is_empty()).then_some(thread)
 }

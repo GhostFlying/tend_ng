@@ -1,5 +1,5 @@
 use super::*;
-use protocol::{RUNNER_SYNC_BATCH, RunOutcome};
+use protocol::{RUNNER_SYNC_BATCH, RunOutcome, TokenModel};
 use serde_json::{Value, json, to_value};
 use std::{fs, path::PathBuf, time::Instant};
 
@@ -73,6 +73,8 @@ pub(super) fn observation(run: &RunObservation, cursor: i64, total: Option<i64>)
         thread_id: run.thread_id.clone().unwrap(),
         turn_id: run.turn_id.clone().unwrap(),
         response_id: format!("resp-{cursor}"),
+        root: None,
+        provider_counts: false,
         last: TokenCounts {
             total_tokens: total,
             cached_input_tokens: Some(0),
@@ -589,10 +591,12 @@ fn page(item: i64, offset: i64, counts: &[(i64, i64)], done: bool) -> protocol::
             snapshot: "0".repeat(64),
             done,
             prefix: false,
+            child_gap: None,
             records: counts
                 .iter()
                 .map(|(key, count)| protocol::NativeTokenRecord {
                     response_id: format!("resp-{key}"),
+                    child: None,
                     counts: Some(TokenCounts {
                         total_tokens: Some(*count),
                         ..TokenCounts::default()

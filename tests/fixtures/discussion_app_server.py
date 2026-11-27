@@ -67,12 +67,46 @@ def mock_read(path, roots):
 
 
 loaded = {}
+metering = (home / "system-meter-fixture").exists()
+
+
+def meter_path(thread):
+    return home / "sessions" / f"rollout-2026-01-02T03-04-05-{thread}.jsonl"
+
+
+def meter(thread, turn, receiver, text):
+    path = meter_path(thread)
+    path.parent.mkdir(exist_ok=True)
+    counts = {"total_tokens": 920, "input_tokens": 840, "cached_input_tokens": 280,
+              "cache_write_input_tokens": 0, "output_tokens": 80, "reasoning_output_tokens": 0}
+    with path.open("a") as output:
+        if output.tell() == 0:
+            print(json.dumps({"type": "session_meta", "payload": {"id": thread}}), file=output)
+        print(json.dumps({"type": "token_usage_record", "payload": {
+            "thread_id": thread, "turn_id": turn, "response_id": "discussion-response",
+            "usage": counts, "thread_token_usage": {"total_tokens": 30000},
+            "response_model": "gpt-6.2-sol",
+        }}), file=output)
+    for _ in range(2):
+        event("rawResponse/completed", threadId=thread, turnId=turn,
+              responseId="discussion-response", responseModel="gpt-6.2-sol",
+              usageMetadata={"metadata": {
+                  "total_tokens": 920, "input_tokens": 840, "output_tokens": 80,
+                  "input_tokens_details": {"cached_tokens": 280},
+                  "output_tokens_details": {"reasoning_tokens": 0},
+              }} if text == "Compare two local export formats." else None,
+              usage=None if text == "Discussion with unavailable counts." else {
+                  "totalTokens": 920, "inputTokens": 840, "cachedInputTokens": 280,
+                  "cacheWriteInputTokens": 0, "outputTokens": 80, "reasoningOutputTokens": 0})
 
 
 def thread_result(thread, roots):
-    return {"thread": {"id": thread}, "approvalPolicy": "never",
+    result = {"thread": {"id": thread}, "approvalPolicy": "never",
             "sandbox": {"type": "readOnly", "networkAccess": False},
             "activePermissionProfile": {"id": profile}, "runtimeWorkspaceRoots": roots}
+    if metering:
+        result["thread"]["path"] = str(meter_path(thread))
+    return result
 
 
 def read(request, thread, turn, call_id, tool, arguments):
@@ -294,6 +328,8 @@ for line in sys.stdin:
             with ledger:
                 ledger.execute("INSERT INTO turns VALUES (?,?,?,?,?,?)",
                                (turn, thread, text, context, json.dumps(history), json.dumps(roots)))
+            if metering:
+                meter(thread, turn, receiver, text)
             if case == "Recover discussion" or (
                 text.startswith("Write the Main Chat handoff message")
                 and (home / "handoff-recover").exists()

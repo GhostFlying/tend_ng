@@ -27,12 +27,27 @@ mod short_numbers;
 mod tend_review;
 mod timing;
 mod token_usage;
+pub(crate) use token_usage::system as agent_metering;
 pub(crate) mod web_sessions;
 mod work;
 pub(crate) use work::DispatchRequest;
 
 #[cfg(test)]
+pub(crate) fn remove_agent_usage_schema(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "DROP TABLE IF EXISTS token_agent_backfill;
+         DROP TABLE IF EXISTS token_agent_requests;
+         DROP TABLE IF EXISTS token_agent_turns;
+         DROP TABLE IF EXISTS token_agent_attempts;
+         DROP TABLE IF EXISTS token_agent_rollups;
+         DROP INDEX IF EXISTS token_backfill_keys_run;",
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
 pub(crate) fn remove_token_usage_overview_schema(db: &Connection) -> Result<()> {
+    remove_agent_usage_schema(db)?;
     db.execute_batch("DROP TABLE token_global_rollup; DROP INDEX issues_token_usage_page;")?;
     Ok(())
 }
@@ -76,7 +91,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 47;
+pub(crate) const SCHEMA_VERSION: i64 = 48;
 
 pub struct Store {
     db: Connection,
@@ -334,6 +349,9 @@ impl Store {
         }
         if version < 47 {
             router_feedback::migrate(&tx)?;
+        }
+        if version < 48 {
+            agent_metering::migrate(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -746,13 +764,18 @@ impl Store {
         number: i64,
         thread_id: &str,
         process: &ProcessIdentity,
+        source: agent_metering::Source,
+        rollout: Option<&Path>,
     ) -> Result<String> {
         let id = protocol::new_id();
-        self.db.execute(
+        let tx = self.db.unchecked_transaction()?;
+        tx.execute(
             "INSERT INTO router_attempts (seq, number, id, thread_id, process_pid, process_start)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![seq, number, id, thread_id, process.pid, process.started_at],
         )?;
+        agent_metering::launch(&tx, &id, source, thread_id, rollout, process)?;
+        tx.commit()?;
         Ok(id)
     }
 
@@ -835,15 +858,17 @@ impl Store {
     }
 
     pub fn save_turn_id(&self, attempt: &str, turn: &str) -> Result<()> {
+        let tx = self.db.unchecked_transaction()?;
         ensure!(
-            self.db.execute(
+            tx.execute(
                 "UPDATE router_attempts SET turn_id = ?2
                  WHERE id = ?1 AND (turn_id IS NULL OR turn_id = ?2)",
                 [attempt, turn],
             )? == 1,
             "turn does not match the saved attempt"
         );
-        Ok(())
+        agent_metering::bind(&tx, attempt, turn)?;
+        Ok(tx.commit()?)
     }
 
     pub fn finish(&mut self, seq: i64, answers: &[Answer<'_>], error: Option<&str>) -> Result<()> {

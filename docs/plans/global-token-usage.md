@@ -1,5 +1,7 @@
 # 全局 Token 用量
 
+本文记录最初的 Issue 全局投影。现行根页总计和来源见 [全系统 Agent 请求用量](system-agent-token-usage.md)。
+
 ## 目标和边界
 
 - 在桌面资源、手机「更多」加入同级的「Token 用量」入口，保留可直接访问的 `/token-usage` 和现有 Issue 详情用量入口。

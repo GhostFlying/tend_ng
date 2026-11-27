@@ -477,8 +477,15 @@ fn consume_inputs(
             )
         });
         loaded_thread = Some(thread_id.clone());
-        let attempt_id = store.start_attempt(input.seq, number, &thread_id, &process)?;
-        let turn = client.run_turn(
+        let attempt_id = store.start_attempt(
+            input.seq,
+            number,
+            &thread_id,
+            &process,
+            crate::store::agent_metering::Source::Router,
+            client.work_rollout(&thread_id),
+        )?;
+        let turn = client.run_metered_turn(
             TurnInput {
                 thread_id: &thread_id,
                 client_id: &attempt_id,
@@ -559,6 +566,27 @@ struct DispatchHandler<'a> {
 impl TurnHandler for DispatchHandler<'_> {
     fn started(&mut self, turn_id: &str) -> Result<()> {
         self.store.save_turn_id(self.attempt_id, turn_id)
+    }
+
+    fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
+        self.store
+            .record_agent_response(self.attempt_id, thread, turn, response);
+    }
+
+    fn child_request_usage(
+        &mut self,
+        root_thread: &str,
+        root_turn: &str,
+        thread: &str,
+        turn: &str,
+        response: codex_app::usage::Response,
+    ) {
+        self.store.record_agent_child_response(
+            self.attempt_id,
+            (root_thread, root_turn),
+            (thread, turn),
+            response,
+        );
     }
 
     fn tool(&mut self, mut call: ToolCall) -> Result<ToolOutput> {

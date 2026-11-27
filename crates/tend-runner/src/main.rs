@@ -6,7 +6,7 @@ mod inspect;
 mod reconcile;
 mod store;
 mod tools;
-mod usage;
+use codex_app::usage;
 mod workspace;
 
 use anyhow::{Context, Result, bail, ensure};

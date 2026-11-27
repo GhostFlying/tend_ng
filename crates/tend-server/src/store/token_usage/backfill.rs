@@ -55,6 +55,8 @@ struct Evidence {
     server_conflict: Option<TokenCounts>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     server_model: Option<TokenModel>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    server_provider_counts: bool,
     policy: TokenConflictPolicy,
 }
 
@@ -73,7 +75,7 @@ fn same_usage(a: &NativeTokenRecord, b: &NativeTokenRecord) -> bool {
 impl Evidence {
     fn verified_server(&self) -> Option<TokenCounts> {
         self.server
-            .filter(|counts| counts.valid() && self.server_conflict.is_none())
+            .filter(|counts| (counts.valid() || counts.missing()) && self.server_conflict.is_none())
     }
 
     fn decision(&self) -> (&'static str, Option<TokenCounts>) {
@@ -85,6 +87,13 @@ impl Evidence {
         match (native, self.server, server, self.policy) {
             (Some(native), None, _, _) if self.prior_native.is_none() => {
                 ("native_only", Some(native))
+            }
+            (Some(native), _, Some(server), _)
+                if self.prior_native.is_none()
+                    && self.server_provider_counts
+                    && server.merge_known(native).is_some() =>
+            {
+                ("compatible", Some(server))
             }
             (Some(native), _, Some(server), _)
                 if self.prior_native.is_none() && compatible(server, native) =>
@@ -114,7 +123,13 @@ impl Evidence {
                 .and(self.server_model.clone());
             TokenModel::merge(self.native.model.clone(), live)
         };
-        RequestMeter { counts, model }
+        RequestMeter {
+            counts,
+            model,
+            provider_counts: decision != "chose_native"
+                && self.server_provider_counts
+                && self.server == Some(counts),
+        }
     }
 
     fn audit(&self, decision: &str) -> Value {
@@ -122,6 +137,7 @@ impl Evidence {
             "native":self.native.counts,"native_variant":self.native.variant,
             "native_invalid":self.native.invalid,"prior_native":self.prior_native,
             "native_model":self.native.model,"server_model":self.server_model,
+            "server_provider_counts":self.server_provider_counts,
             "policy":self.policy,"decision":decision})
     }
 }
@@ -232,7 +248,10 @@ pub(super) fn live(
     // Revoked historical bindings are evidence, not realtime ownership.
     // The canonical request was restored (or removed) when ambiguity was
     // recorded, so just use the ordinary first verified realtime copy.
-    if ambiguous(db, key.0, key.1)? {
+    let root = usage.root.as_ref().map_or((key.0, key.1), |root| {
+        (root.thread_id.as_str(), root.turn_id.as_str())
+    });
+    if ambiguous(db, root.0, root.1)? {
         return Ok(false);
     }
     if run != usage.run_id {
@@ -252,17 +271,24 @@ pub(super) fn live(
         evidence.server,
         evidence.server_conflict,
         evidence.server_model.clone(),
+        evidence.server_provider_counts,
     );
     match evidence.server {
         None => {
             evidence.server = Some(usage.last);
             evidence.server_model = usage.model.clone();
+            evidence.server_provider_counts = usage.provider_counts;
         }
         Some(first) => {
             if evidence.server_conflict.is_none()
-                && let Some(merged) = first.merge_known(usage.last)
+                && let Some(merged) = first.merge_reported(
+                    evidence.server_provider_counts,
+                    usage.last,
+                    usage.provider_counts,
+                )
             {
                 evidence.server = Some(merged);
+                evidence.server_provider_counts |= usage.provider_counts;
                 evidence.server_model =
                     TokenModel::merge(evidence.server_model, usage.model.clone());
             } else {
@@ -275,6 +301,7 @@ pub(super) fn live(
             evidence.server,
             evidence.server_conflict,
             evidence.server_model.clone(),
+            evidence.server_provider_counts,
         )
     {
         return Ok(true);
@@ -300,7 +327,28 @@ fn historical(
     native: &NativeTokenRecord,
     tally: &mut Tally,
 ) -> Result<&'static str> {
-    let key = (&*run.thread, &*run.turn, &*native.response_id);
+    let key = native.child.as_ref().map_or(
+        (
+            run.thread.as_str(),
+            run.turn.as_str(),
+            native.response_id.as_str(),
+        ),
+        |child| {
+            (
+                child.thread_id.as_str(),
+                child.turn_id.as_str(),
+                native.response_id.as_str(),
+            )
+        },
+    );
+    if native
+        .child
+        .as_ref()
+        .is_some_and(|child| child.thread_id == run.thread || child.turn_id == run.turn)
+    {
+        return Ok("invalid_child_identity");
+    }
+    let cursor = native.cursor();
     let original = request(db, key)?;
     let binding = binding(db, key)?;
     if let Some(owner) = binding
@@ -313,7 +361,7 @@ fn historical(
             db,
             &job.job_id,
             run_id,
-            key.2,
+            &cursor,
             "rollout",
             json!({
                 "decision":"wrong_run","owner_run_id":owner,"reader_id":reader,"native":native
@@ -333,6 +381,7 @@ fn historical(
             server: old.server,
             server_conflict: old.server_conflict,
             server_model: old.server_model.clone(),
+            server_provider_counts: old.server_provider_counts,
             policy: if job.policy == TokenConflictPolicy::Quarantine
                 && same_usage(&old.native, native)
             {
@@ -346,6 +395,7 @@ fn historical(
             prior_native: None,
             server: original.as_ref().map(|row| row.1.counts),
             server_model: original.as_ref().and_then(|row| row.1.model.clone()),
+            server_provider_counts: original.as_ref().is_some_and(|row| row.1.provider_counts),
             server_conflict: original
                 .as_ref()
                 .and_then(|row| row.2.as_ref())
@@ -367,11 +417,14 @@ fn historical(
         detail["reader_id"] = json!(reader);
         detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
         detail["previous_native"] = json!(old.map(|old| &old.native));
-        audit(db, &job.job_id, run_id, key.2, "rollout", detail)?;
+        audit(db, &job.job_id, run_id, &cursor, "rollout", detail)?;
     }
     let chosen = chosen.map(|counts| evidence.meter(decision, counts));
     project(db, key, run_id, original, chosen, &evidence, tally)?;
     save_binding(db, key, run_id, &job.job_id, &evidence)?;
+    if native.child.is_some() {
+        super::system::sync_overlap(db, key.0, key.1)?;
+    }
     Ok(decision)
 }
 
@@ -401,6 +454,7 @@ fn restore_server_copy(
         let server = RequestMeter {
             counts,
             model: evidence.server_model.clone(),
+            provider_counts: evidence.server_provider_counts,
         };
         // Keep even a conflicted realtime owner and its exact old evidence.
         // Do not leave a rollout-origin conflict marker on an ordinary copy.
@@ -445,8 +499,9 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
             params![thread, turn],
         )?;
         let mut keys = db.prepare_cached(
-            "SELECT run_id, job_id, response_id, evidence FROM token_backfill_keys
-             WHERE thread_id = ?1 AND turn_id = ?2",
+            "SELECT k.run_id, k.job_id, k.response_id, k.evidence, k.thread_id, k.turn_id
+             FROM token_runs r JOIN token_backfill_keys k ON k.run_id=r.run_id
+             WHERE r.thread_id = ?1 AND r.turn_id = ?2",
         )?;
         let grouped = keys
             .query_map(params![thread, turn], |row| {
@@ -455,11 +510,13 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         let mut affected = std::collections::BTreeMap::new();
-        for (run_id, job, response, text) in grouped {
+        for (run_id, job, response, text, native_thread, native_turn) in grouped {
             let (_, tally) = match affected.entry(run_id.clone()) {
                 std::collections::btree_map::Entry::Occupied(entry) => entry.into_mut(),
                 std::collections::btree_map::Entry::Vacant(entry) => {
@@ -469,12 +526,31 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
                 }
             };
             let evidence: Evidence = serde_json::from_str(&text)?;
-            let key = (thread, turn, response.as_str());
+            let key = (
+                native_thread.as_str(),
+                native_turn.as_str(),
+                response.as_str(),
+            );
             let original = request(db, key)?;
             let mut detail = evidence.audit("ambiguous_turn");
             detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
-            audit(db, &job, &run_id, &response, "assignment", detail)?;
+            audit(
+                db,
+                &job,
+                &run_id,
+                &evidence.native.cursor(),
+                "assignment",
+                detail,
+            )?;
             restore_server_copy(db, key, &run_id, original, &evidence, tally)?;
+            if db
+                .prepare_cached(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name='token_agent_requests')",
+                )?
+                .query_row([], |row| row.get::<_, bool>(0))?
+            {
+                super::system::sync_overlap(db, key.0, key.1)?;
+            }
         }
         for (id, (run, tally)) in affected {
             super::save_delta(db, &id, &run, tally)?;
@@ -509,6 +585,7 @@ pub(in crate::store) fn pending(
                 thread_id: row.get(4)?,
                 turn_id: row.get(5)?,
                 offset: row.get(6)?,
+                include_children: true,
             })
         })
         .optional()?)
@@ -547,6 +624,7 @@ pub(in crate::store) fn receive(
         records,
         done,
         prefix,
+        child_gap,
     } = &page.content
     else {
         unreachable!();
@@ -564,11 +642,9 @@ pub(in crate::store) fn receive(
         },
     )?;
     if previous.as_ref().is_some_and(|old| old != snapshot)
-        || last.as_ref().is_some_and(|old| {
-            records
-                .first()
-                .is_some_and(|first| *old >= first.response_id)
-        })
+        || last
+            .as_ref()
+            .is_some_and(|old| records.first().is_some_and(|first| *old >= first.cursor()))
     {
         db.execute(
             "UPDATE token_backfill_items SET state = 'gap', gap = 'source_changed' WHERE id = ?1",
@@ -583,7 +659,7 @@ pub(in crate::store) fn receive(
         db.prepare_cached(
             "INSERT INTO token_backfill_seen (item, response_id, result) VALUES (?1, ?2, ?3)",
         )?
-        .execute(params![work.item, native.response_id, decision])?;
+        .execute(params![work.item, native.cursor(), decision])?;
     }
     super::save_delta(db, &work.run_id, &run, tally)?;
     if *done {
@@ -591,18 +667,34 @@ pub(in crate::store) fn receive(
         // sealed scan does not certify absence (e.g. pre-record Codex versions).
         db.execute(
             "INSERT INTO token_backfill_audit (job_id, run_id, response_id, source, evidence)
-             SELECT ?2, q.run_id, q.response_id, 'server',
+             SELECT ?2, q.run_id, CASE WHEN q.thread_id=?4 AND q.turn_id=?5 THEN q.response_id
+                    ELSE char(31)||q.thread_id||char(31)||q.turn_id||char(31)||q.response_id END, 'server',
                     json_object('decision', 'not_seen_in_rollout', 'server', json(q.last), 'server_conflict', json(q.conflict))
              FROM token_requests q WHERE q.run_id = ?3
-             AND NOT EXISTS (SELECT 1 FROM token_backfill_seen s WHERE s.item = ?1 AND s.response_id = q.response_id)
+             AND NOT EXISTS (SELECT 1 FROM token_backfill_seen s WHERE s.item = ?1
+                 AND s.response_id=CASE WHEN q.thread_id=?4 AND q.turn_id=?5 THEN q.response_id
+                    ELSE char(31)||q.thread_id||char(31)||q.turn_id||char(31)||q.response_id END)
              ON CONFLICT DO NOTHING",
-            params![work.item, work.job_id, work.run_id],
+            params![work.item, work.job_id, work.run_id, run.thread, run.turn],
         )?;
     }
     db.execute(
         "UPDATE token_backfill_items SET snapshot = ?2, offset = offset + ?3, last_response = ?4,
-         state = CASE WHEN NOT ?5 THEN 'pending' WHEN ?6 THEN 'active_prefix' ELSE 'scanned' END WHERE id = ?1",
-        params![work.item, snapshot, records.len() as i64, records.last().map(|r| &r.response_id), done, prefix],
+         state = CASE WHEN NOT ?5 THEN 'pending' WHEN ?6 THEN 'active_prefix'
+                      WHEN ?7 IS NOT NULL THEN 'gap' ELSE 'scanned' END, gap=?7 WHERE id = ?1",
+        params![
+            work.item,
+            snapshot,
+            records.len() as i64,
+            records.last().map(NativeTokenRecord::cursor),
+            done,
+            prefix,
+            child_gap
+                .map(serde_json::to_value)
+                .transpose()?
+                .as_ref()
+                .and_then(Value::as_str)
+        ],
     )?;
     Ok(())
 }
@@ -637,6 +729,9 @@ impl Store {
             params![job.job_id, raw],
         )? == 1;
         if created {
+            if job.scope == TokenUsageScope::All {
+                super::system::enqueue(&tx, &job.job_id)?;
+            }
             let (filter, argument) = scope_filter(&job.scope);
             tx.execute(&format!(
                 "WITH RECURSIVE readers(origin, reader, host) AS (
@@ -749,16 +844,22 @@ impl Store {
             [job],
             |row| row.get::<_, bool>(0),
         )?;
-        let state = if waiting {
+        let server = super::system::backfill_status(&tx, job)?;
+        let server_rows = server.as_array().expect("grouped Server backfill status");
+        let state = if waiting || server_rows.iter().any(|row| row["state"] == "pending") {
             "waiting"
-        } else if counts.contains_key("gap") || counts.contains_key("active_prefix") || anomalies {
+        } else if counts.contains_key("gap")
+            || counts.contains_key("active_prefix")
+            || anomalies
+            || server_rows.iter().any(|row| row["state"] != "scanned")
+        {
             "finished_with_findings"
         } else {
             "finished"
         };
         Ok(Some(
             json!({"job": serde_json::from_str::<StartTokenBackfill>(&request)?,
-            "created_at":created_at,"state": state,"selected_runs":total,"counts":counts,"runs":runs,"next_after":next_after}),
+            "created_at":created_at,"state": state,"selected_runs":total,"counts":counts,"runs":runs,"next_after":next_after,"server":server}),
         ))
     }
 

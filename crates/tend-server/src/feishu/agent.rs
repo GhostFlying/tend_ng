@@ -85,7 +85,7 @@ pub fn spawn(db: &Path, owner: String, config: Config) -> Result<()> {
         loop {
             let job = store.feishu_assessment_job(&owner, now());
             if let Ok(Some(job)) = job {
-                let result = assess(&config, &job).ok();
+                let result = assess(&store, &config, &job).ok();
                 if store
                     .record_feishu_assessment(&owner, &job, result, now())
                     .is_ok()
@@ -103,7 +103,11 @@ pub const fn category() -> &'static str {
     CATEGORY
 }
 
-fn assess(config: &Config, job: &FeishuSuggestionEvidence) -> Result<FeishuAssessment> {
+fn assess(
+    store: &Store,
+    config: &Config,
+    job: &FeishuSuggestionEvidence,
+) -> Result<FeishuAssessment> {
     let mut command = Command::new(&config.program);
     command
         .args(["app-server", "--listen", "stdio://"])
@@ -132,16 +136,26 @@ fn assess(config: &Config, job: &FeishuSuggestionEvidence) -> Result<FeishuAsses
     )?;
     let thread = client.start_ephemeral_analysis(&config.cwd, INSTRUCTIONS, &config.model)?;
     let context = serde_json::to_string(job)?;
+    let attempt = protocol::new_id();
+    let metering = client
+        .process_identity()
+        .and_then(|process| store.start_feishu_metering(&attempt, &thread, &process));
+    if let Err(error) = &metering {
+        eprintln!("Register Feishu model attempt: {error:#}");
+    }
     let turn = client.run_turn(
         TurnInput {
             thread_id: &thread,
-            client_id: &protocol::new_id(),
+            client_id: &attempt,
             text: "研判这组材料。只返回约定的 JSON。",
             context: Some(&context),
             effort: Some(&config.reasoning_effort),
             discussion_scope: None,
         },
-        &mut AnalysisTurn,
+        &mut AnalysisTurn {
+            store,
+            attempt: metering.ok().map(|_| attempt.as_str()),
+        },
     )?;
     ensure!(
         turn.status == TurnStatus::Completed,
@@ -197,11 +211,26 @@ fn validate(job: &FeishuSuggestionEvidence, result: &FeishuAssessment) -> Result
     Ok(())
 }
 
-struct AnalysisTurn;
+struct AnalysisTurn<'a> {
+    store: &'a Store,
+    attempt: Option<&'a str>,
+}
 
-impl TurnHandler for AnalysisTurn {
-    fn started(&mut self, _: &str) -> Result<()> {
+impl TurnHandler for AnalysisTurn<'_> {
+    fn started(&mut self, turn: &str) -> Result<()> {
+        if let Some(attempt) = self.attempt
+            && let Err(error) = self.store.bind_feishu_metering(attempt, turn)
+        {
+            eprintln!("Bind Feishu model turn: {error:#}");
+        }
         Ok(())
+    }
+
+    fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
+        if let Some(attempt) = self.attempt {
+            self.store
+                .record_agent_response(attempt, thread, turn, response);
+        }
     }
     fn tool(&mut self, _: ToolCall) -> Result<ToolOutput> {
         Ok(ToolOutput {
