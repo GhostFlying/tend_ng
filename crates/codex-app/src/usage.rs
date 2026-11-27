@@ -56,6 +56,11 @@ impl Response {
             fields.map(|field| read(&params["usage"][field]))
         };
         let counts = TokenCounts::from_fields(values);
+        let counts = if provider_counts {
+            counts
+        } else {
+            counts.without_unproven_optional_zeros()
+        };
         let model = params["responseModel"]
             .as_str()
             .filter(|id| TokenModel::valid_id(id))
@@ -493,7 +498,9 @@ fn snapshot(
             .as_str()
             .filter(|id| valid_native_id(id))
             .ok_or(SourceCorrupt)?;
-        let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone()).ok();
+        let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone())
+            .ok()
+            .map(TokenCounts::without_unproven_optional_zeros);
         let valid = serde_json::from_value::<NativeRecord>(payload.clone())
             .is_ok_and(|record| record.valid());
         let cursor = protocol::native_request_cursor(
@@ -732,7 +739,7 @@ impl Collector {
                     accepted.push((
                         record.response_id.clone(),
                         RequestMeter {
-                            counts: last,
+                            counts: last.without_unproven_optional_zeros(),
                             model: record.model.clone(),
                             provider_counts: false,
                         },
@@ -905,7 +912,7 @@ mod tests {
         assert!(!live.has_unmatched());
         assert_eq!(
             accepted[0].1.counts.fields(),
-            [Some(3), None, Some(0), None, None, None]
+            [Some(3), None, None, None, None, None]
         );
         assert!(live.matched("thread", "turn")?.is_empty());
 

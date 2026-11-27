@@ -185,7 +185,7 @@ def test_tree(args):
             subtree = after_loss["subtree"]
             assert subtree["total_tokens"] == {"tokens": "127200", "reported_requests": 4}, subtree
             assert subtree["cache_write_input_tokens"] == {"tokens": "2000", "reported_requests": 2}
-            assert after_loss["direct"]["reasoning_output_tokens"] == {"tokens": "0", "reported_requests": 2}
+            assert after_loss["direct"]["reasoning_output_tokens"] == {"tokens": None, "reported_requests": 0}
             assert subtree["cached_input_tokens"] == {"tokens": "32288", "reported_requests": 3}
             assert (subtree["started_runs"], subtree["observed_runs"], subtree["unobserved_no_usage"]) == (3, 2, 1)
             models = {row["model"]: row for row in subtree["models"]}

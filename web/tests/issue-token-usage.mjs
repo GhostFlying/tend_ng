@@ -85,7 +85,11 @@ try {
     );
     await open.click();
     await total.getByText("41,200", { exact: true }).waitFor();
-    assert.equal(await pane.getByText("0", { exact: true }).count(), 1);
+    const reasoning = pane.locator(".token-metrics > div").filter({
+      has: page.getByText("推理输出", { exact: true }),
+    });
+    assert.equal(await reasoning.locator("bdi").textContent(), "—");
+    await reasoning.getByText("字段缺失", { exact: true }).waitFor();
     const models = pane.getByRole("region", { name: "模型明细与费用估算" });
     await models.getByText("gpt-6.2-sol", { exact: true }).waitFor();
     await models.getByText("gpt-6.2-astra", { exact: true }).waitFor();

@@ -195,7 +195,7 @@ fn tally(db: &Connection, run: &str) -> Result<Tally> {
     while let Some(row) = rows.next()? {
         let raw = row.get_ref(0)?.as_str()?;
         let meter: RequestMeter = serde_json::from_str(raw)?;
-        if meter.counts.valid() {
+        if meter.valid() {
             tally.count(&meter, 1);
         }
     }

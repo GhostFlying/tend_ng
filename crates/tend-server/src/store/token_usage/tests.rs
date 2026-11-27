@@ -592,6 +592,7 @@ fn page(item: i64, offset: i64, counts: &[(i64, i64)], done: bool) -> protocol::
             done,
             prefix: false,
             child_gap: None,
+            child_checked: true,
             records: counts
                 .iter()
                 .map(|(key, count)| protocol::NativeTokenRecord {
@@ -974,7 +975,10 @@ fn complementary_live_fields_merge_only_when_every_known_value_agrees() -> Resul
         let view_after = view(&store, "root")?;
         assert_eq!(view_after["direct"]["reported_requests"], 1);
         assert_eq!(view_after["direct"]["total_tokens"]["tokens"], "10");
-        assert_eq!(view_after["direct"]["cached_input_tokens"]["tokens"], "0");
+        assert_eq!(
+            view_after["direct"]["cached_input_tokens"]["tokens"],
+            Value::Null
+        );
         assert_eq!(view_after["direct"]["output_tokens"]["tokens"], "2");
         input.last.input_tokens = Some(9);
         sync(&mut store, "runner", &[], &[input])?;
@@ -1043,6 +1047,79 @@ fn revoked_rollout_only_keys_do_not_choose_the_first_verified_live_owner() -> Re
                 assert_eq!(view(&store, "left")?, expected);
             }
         }
+    }
+    Ok(())
+}
+
+#[test]
+fn legacy_root_page_is_partial_and_child_audit_uses_native_keys() -> Result<()> {
+    use protocol::{
+        NativeTurnKey, TokenBackfillContent::Records, TokenConflictPolicy::Quarantine,
+        TokenUsageScope::All,
+    };
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "issue", None)?;
+    assignment(&store.db, "task", "issue", "runner")?;
+    let run = native_run("run", "task");
+    let root = NativeTurnKey {
+        thread_id: run.thread_id.clone().unwrap(),
+        turn_id: run.turn_id.clone().unwrap(),
+    };
+    sync(&mut store, "runner", std::slice::from_ref(&run), &[])?;
+    backfill_job(&mut store, "old-reader", All, Quarantine)?;
+    let old = backfill::pending(&store.db, "runner")?.unwrap();
+    assert!(old.include_children);
+    let mut wire = to_value(page(old.item, 0, &[(0, 7)], true))?;
+    wire.as_object_mut().unwrap().remove("child_checked");
+    deliver(&mut store, "runner", &serde_json::from_value(wire)?)?;
+    let status = store.token_backfill_status("old-reader", 0)?.unwrap();
+    assert_eq!(status["state"], "finished_with_findings");
+    assert_eq!(status["runs"][0]["gap"], "child_reader_unsupported");
+    assert_eq!(status["runs"][0]["native_keys"], 1);
+    assert_eq!(
+        view(&store, "issue")?["direct"]["total_tokens"]["tokens"],
+        "7"
+    );
+
+    backfill_job(&mut store, "current-reader", All, Quarantine)?;
+    let current = backfill::pending(&store.db, "runner")?.unwrap();
+    let mut scan = page(current.item, 0, &[(1, 10), (2, 10)], true);
+    let Records { records, .. } = &mut scan.content else {
+        unreachable!()
+    };
+    for (id, row) in records.iter_mut().enumerate() {
+        row.response_id = "shared-response".into();
+        row.child = Some(NativeTurnKey {
+            thread_id: "child-thread".into(),
+            turn_id: format!("child-turn-{id}"),
+        });
+    }
+    deliver(&mut store, "runner", &scan)?;
+    for n in 0..2 {
+        let mut usage = observation(&run, n, Some(20));
+        usage.last.cached_input_tokens = None;
+        usage.root = Some(root.clone());
+        usage.thread_id = "child-thread".into();
+        usage.turn_id = format!("child-turn-{n}");
+        usage.response_id = "shared-response".into();
+        sync(&mut store, "runner", &[], &[usage])?;
+    }
+    let audit = store.token_backfill_audit("current-reader", 0)?.unwrap();
+    let live: Vec<_> = audit["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| row["source"] == "live")
+        .collect();
+    assert_eq!(live.len(), 2, "{audit}");
+    for (id, row) in live.into_iter().enumerate() {
+        assert_eq!(row["thread_id"], "child-thread");
+        assert_eq!(row["turn_id"], format!("child-turn-{id}"));
+        assert_eq!(row["response_id"], "shared-response");
+        assert_eq!(row["root_thread_id"], root.thread_id);
+        assert_eq!(row["root_turn_id"], root.turn_id);
     }
     Ok(())
 }

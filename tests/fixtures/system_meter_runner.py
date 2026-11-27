@@ -71,6 +71,8 @@ for line in sys.stdin:
                 if thread == child:
                     # Copied prefix in a child rollout is root evidence, not a new response.
                     record(thread, "token_usage_record", **{**data, "thread_id": root, "turn_id": root_turn})
+            # Completed upstream response with no usage/model metadata.
+            send("rawResponse/completed", threadId=root, turnId=root_turn, responseId="unknown-usage")
             send("thread/tokenUsage/updated", threadId=root, turnId=root_turn,
                  tokenUsage={"last": {"totalTokens": 800000}, "total": {"totalTokens": 800000}})
             send("turn/completed", threadId=root, turn={"id": root_turn, "status": "completed", "items": []})

@@ -63,6 +63,20 @@ impl TokenCounts {
         })
     }
 
+    /// Legacy Codex fills omitted optional provider details with zero.
+    pub fn without_unproven_optional_zeros(mut self) -> Self {
+        for detail in [
+            &mut self.cached_input_tokens,
+            &mut self.cache_write_input_tokens,
+            &mut self.reasoning_output_tokens,
+        ] {
+            if *detail == Some(0) {
+                *detail = None;
+            }
+        }
+        self
+    }
+
     pub fn missing(self) -> bool {
         self.fields().iter().all(Option::is_none)
     }
@@ -131,6 +145,15 @@ pub struct RequestMeter {
 }
 
 impl RequestMeter {
+    pub fn valid(&self) -> bool {
+        Self::valid_evidence(self.counts, self.model.as_ref())
+    }
+
+    fn valid_evidence(counts: TokenCounts, model: Option<&TokenModel>) -> bool {
+        (counts.valid() || (counts.missing() && model.is_some()))
+            && model.is_none_or(TokenModel::valid)
+    }
+
     pub fn merge(&self, other: &Self) -> Option<Self> {
         Some(Self {
             counts: self.counts.merge_reported(
@@ -207,8 +230,7 @@ impl RunTokenUsage {
             && self.root.as_ref().is_none_or(|root| {
                 root.valid() && root.thread_id != self.thread_id && root.turn_id != self.turn_id
             })
-            && (self.last.valid() || (self.last.missing() && self.model.is_some()))
-            && self.model.as_ref().is_none_or(TokenModel::valid)
+            && RequestMeter::valid_evidence(self.last, self.model.as_ref())
             && self.observed_at > 0
     }
 }
@@ -350,6 +372,10 @@ pub enum TokenBackfillContent {
         prefix: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         child_gap: Option<TokenSourceGap>,
+        /// Absent on older root-only readers. True attests that child
+        /// discovery was attempted for this snapshot, even if it has gaps.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        child_checked: bool,
     },
 }
 

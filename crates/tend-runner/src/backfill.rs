@@ -91,13 +91,14 @@ impl Worker {
 }
 
 use crate::usage::{ChildRollouts, Rollouts, rollout_index};
-type Snapshot = (
-    i64,
-    String,
-    Vec<NativeTokenRecord>,
-    bool,
-    Option<TokenSourceGap>,
-);
+struct Snapshot {
+    item: i64,
+    digest: String,
+    records: Vec<NativeTokenRecord>,
+    active: bool,
+    child_gap: Option<TokenSourceGap>,
+    child_checked: bool,
+}
 type NativeScan = (Vec<NativeTokenRecord>, bool, Option<TokenSourceGap>);
 
 struct Scanner {
@@ -116,45 +117,50 @@ impl Scanner {
             self.job.clone_from(&work.job_id);
             self.homes.clear();
             self.children.clear();
+            self.cached = None;
         }
-        if !self
-            .cached
-            .as_ref()
-            .is_some_and(|(item, _, _, _, _)| *item == work.item)
-        {
+        if !self.cached.as_ref().is_some_and(|scan| {
+            scan.item == work.item && scan.child_checked == work.include_children
+        }) {
             self.cached = None;
             match self.snapshot(work) {
                 Ok((records, active, child_gap)) => {
-                    let bytes = serde_json::to_vec(&(&records, active, child_gap))
-                        .expect("serializable Token evidence");
-                    self.cached = Some((
-                        work.item,
-                        format!("{:x}", Sha256::digest(bytes)),
+                    let bytes = if work.include_children {
+                        serde_json::to_vec(&(&records, active, child_gap))
+                    } else {
+                        serde_json::to_vec(&(&records, active))
+                    }
+                    .expect("serializable Token evidence");
+                    self.cached = Some(Snapshot {
+                        item: work.item,
+                        digest: format!("{:x}", Sha256::digest(bytes)),
                         records,
                         active,
                         child_gap,
-                    ));
+                        child_checked: work.include_children,
+                    });
                 }
                 Err(reason) => return TokenBackfillContent::Gap { reason },
             }
         }
-        let (_, snapshot, records, active, child_gap) = self.cached.as_ref().unwrap();
+        let scan = self.cached.as_ref().unwrap();
         let Ok(offset) = usize::try_from(work.offset) else {
             return TokenBackfillContent::Gap {
                 reason: SourceChanged,
             };
         };
-        let Some(rest) = records.get(offset..).filter(|rest| !rest.is_empty()) else {
+        let Some(rest) = scan.records.get(offset..).filter(|rest| !rest.is_empty()) else {
             return TokenBackfillContent::Gap {
                 reason: SourceChanged,
             };
         };
         TokenBackfillContent::Records {
-            snapshot: snapshot.clone(),
+            snapshot: scan.digest.clone(),
             records: rest[..rest.len().min(RUNNER_SYNC_BATCH)].to_vec(),
             done: rest.len() <= RUNNER_SYNC_BATCH,
-            prefix: *active,
-            child_gap: *child_gap,
+            prefix: scan.active,
+            child_gap: scan.child_gap,
+            child_checked: scan.child_checked,
         }
     }
 

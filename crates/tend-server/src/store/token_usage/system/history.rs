@@ -234,10 +234,9 @@ fn apply(
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
         for native in batch {
-            let Some(counts) = native
-                .counts
-                .filter(|n| n.valid() && !native.invalid && native.variant.is_none())
-            else {
+            let Some(counts) = native.counts.filter(|n| {
+                (n.valid() || n.missing()) && !native.invalid && native.variant.is_none()
+            }) else {
                 invalid = true;
                 continue;
             };

@@ -65,11 +65,26 @@ fn compatible(server: TokenCounts, native: TokenCounts) -> bool {
         .fields()
         .into_iter()
         .zip(native.fields())
-        .all(|(server, native)| server.is_none() || server == native)
+        .enumerate()
+        .all(|(i, (server, native))| {
+            server.is_none()
+                || server == native
+                || (matches!(i, 2 | 3 | 5) && server == Some(0) && native.is_none())
+        })
 }
 
 fn same_usage(a: &NativeTokenRecord, b: &NativeTokenRecord) -> bool {
-    a.counts == b.counts && a.invalid == b.invalid && a.variant == b.variant
+    let normalized = |record: &NativeTokenRecord| {
+        let counts = record
+            .counts
+            .map(TokenCounts::without_unproven_optional_zeros);
+        let variant = record
+            .variant
+            .map(TokenCounts::without_unproven_optional_zeros)
+            .filter(|variant| Some(*variant) != counts);
+        (counts, record.invalid, variant)
+    };
+    normalized(a) == normalized(b)
 }
 
 impl Evidence {
@@ -81,7 +96,9 @@ impl Evidence {
     fn decision(&self) -> (&'static str, Option<TokenCounts>) {
         use TokenConflictPolicy::*;
         let native = self.native.counts.filter(|counts| {
-            counts.valid() && !self.native.invalid && self.native.variant.is_none()
+            (counts.valid() || counts.missing())
+                && !self.native.invalid
+                && self.native.variant.is_none()
         });
         let server = self.verified_server();
         match (native, self.server, server, self.policy) {
@@ -99,7 +116,7 @@ impl Evidence {
                 if self.prior_native.is_none() && compatible(server, native) =>
             {
                 (
-                    if server == native {
+                    if server.without_unproven_optional_zeros() == native {
                         "compatible"
                     } else {
                         "enriched"
@@ -174,7 +191,8 @@ fn audit(
     db: &Connection,
     job: &str,
     run: &str,
-    response: &str,
+    key: Key<'_>,
+    root: (&str, &str),
     source: &str,
     evidence: Value,
 ) -> Result<()> {
@@ -185,7 +203,7 @@ fn audit(
     .execute(params![
         job,
         run,
-        response,
+        protocol::native_request_cursor(((key.0, key.1) != root).then_some((key.0, key.1)), key.2),
         source,
         serde_json::to_string(&evidence)?
     ])?;
@@ -259,7 +277,8 @@ pub(super) fn live(
             db,
             &job,
             &usage.run_id,
-            key.2,
+            key,
+            root,
             "live",
             json!({
                 "decision":"wrong_run","owner_run_id":run,"server":usage.last
@@ -310,7 +329,7 @@ pub(super) fn live(
     if decision != "compatible" {
         let mut detail = evidence.audit(decision);
         detail["incoming"] = json!(usage.last);
-        audit(db, &job, &run, key.2, "live", detail)?;
+        audit(db, &job, &run, key, root, "live", detail)?;
     }
     let chosen = chosen.map(|counts| evidence.meter(decision, counts));
     project(db, key, &run, request(db, key)?, chosen, &evidence, tally)?;
@@ -327,6 +346,20 @@ fn historical(
     native: &NativeTokenRecord,
     tally: &mut Tally,
 ) -> Result<&'static str> {
+    // Old Runner readers sent Codex's optional defaults directly. Keep the
+    // compatibility decision independent of which generation read the file.
+    let mut normalized = native.clone();
+    normalized.counts = native
+        .counts
+        .map(TokenCounts::without_unproven_optional_zeros);
+    normalized.variant = native
+        .variant
+        .map(TokenCounts::without_unproven_optional_zeros)
+        .filter(|variant| Some(*variant) != normalized.counts);
+    if normalized.counts.is_some_and(TokenCounts::missing) && normalized.model.is_none() {
+        normalized.model = Some(TokenModel::Unresolved);
+    }
+    let native = &normalized;
     let key = native.child.as_ref().map_or(
         (
             run.thread.as_str(),
@@ -348,7 +381,7 @@ fn historical(
     {
         return Ok("invalid_child_identity");
     }
-    let cursor = native.cursor();
+    let root = (run.thread.as_str(), run.turn.as_str());
     let original = request(db, key)?;
     let binding = binding(db, key)?;
     if let Some(owner) = binding
@@ -361,7 +394,8 @@ fn historical(
             db,
             &job.job_id,
             run_id,
-            &cursor,
+            key,
+            root,
             "rollout",
             json!({
                 "decision":"wrong_run","owner_run_id":owner,"reader_id":reader,"native":native
@@ -417,7 +451,7 @@ fn historical(
         detail["reader_id"] = json!(reader);
         detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
         detail["previous_native"] = json!(old.map(|old| &old.native));
-        audit(db, &job.job_id, run_id, &cursor, "rollout", detail)?;
+        audit(db, &job.job_id, run_id, key, root, "rollout", detail)?;
     }
     let chosen = chosen.map(|counts| evidence.meter(decision, counts));
     project(db, key, run_id, original, chosen, &evidence, tally)?;
@@ -534,14 +568,7 @@ pub(super) fn note_turn_ambiguity(db: &Connection, thread: &str, turn: &str) -> 
             let original = request(db, key)?;
             let mut detail = evidence.audit("ambiguous_turn");
             detail["previous_selected"] = json!(original.as_ref().map(|row| &row.1));
-            audit(
-                db,
-                &job,
-                &run_id,
-                &evidence.native.cursor(),
-                "assignment",
-                detail,
-            )?;
+            audit(db, &job, &run_id, key, (thread, turn), "assignment", detail)?;
             restore_server_copy(db, key, &run_id, original, &evidence, tally)?;
             if db
                 .prepare_cached(
@@ -625,6 +652,7 @@ pub(in crate::store) fn receive(
         done,
         prefix,
         child_gap,
+        child_checked,
     } = &page.content
     else {
         unreachable!();
@@ -671,13 +699,20 @@ pub(in crate::store) fn receive(
                     ELSE char(31)||q.thread_id||char(31)||q.turn_id||char(31)||q.response_id END, 'server',
                     json_object('decision', 'not_seen_in_rollout', 'server', json(q.last), 'server_conflict', json(q.conflict))
              FROM token_requests q WHERE q.run_id = ?3
+             AND (?6 OR (q.thread_id=?4 AND q.turn_id=?5))
              AND NOT EXISTS (SELECT 1 FROM token_backfill_seen s WHERE s.item = ?1
                  AND s.response_id=CASE WHEN q.thread_id=?4 AND q.turn_id=?5 THEN q.response_id
                     ELSE char(31)||q.thread_id||char(31)||q.turn_id||char(31)||q.response_id END)
              ON CONFLICT DO NOTHING",
-            params![work.item, work.job_id, work.run_id, run.thread, run.turn],
+            params![work.item, work.job_id, work.run_id, run.thread, run.turn, *child_checked && child_gap.is_none()],
         )?;
     }
+    let child_gap = child_gap.map(serde_json::to_value).transpose()?;
+    let gap = if !child_checked {
+        Some("child_reader_unsupported")
+    } else {
+        child_gap.as_ref().and_then(Value::as_str)
+    };
     db.execute(
         "UPDATE token_backfill_items SET snapshot = ?2, offset = offset + ?3, last_response = ?4,
          state = CASE WHEN NOT ?5 THEN 'pending' WHEN ?6 THEN 'active_prefix'
@@ -689,11 +724,7 @@ pub(in crate::store) fn receive(
             records.last().map(NativeTokenRecord::cursor),
             done,
             prefix,
-            child_gap
-                .map(serde_json::to_value)
-                .transpose()?
-                .as_ref()
-                .and_then(Value::as_str)
+            gap
         ],
     )?;
     Ok(())
@@ -887,9 +918,19 @@ impl Store {
                     .and_then(|value: &Value| value["cursor"].as_i64());
                 break;
             }
+            let root_thread: String = row.get(2)?;
+            let root_turn: String = row.get(3)?;
+            let stored: String = row.get(5)?;
+            let mut descendant = stored.strip_prefix('\x1f').unwrap_or("").splitn(3, '\x1f');
+            let (thread, turn, response) =
+                match (descendant.next(), descendant.next(), descendant.next()) {
+                    (Some(thread), Some(turn), Some(response)) => (thread, turn, response),
+                    _ => (root_thread.as_str(), root_turn.as_str(), stored.as_str()),
+                };
             entries.push(json!({"cursor":row.get::<_, i64>(0)?, "run_id":row.get::<_, String>(1)?,
-                "thread_id":row.get::<_, String>(2)?, "turn_id":row.get::<_, String>(3)?,
-                "runner_id":row.get::<_, String>(4)?, "response_id":row.get::<_, String>(5)?,
+                "thread_id":thread, "turn_id":turn, "response_id":response,
+                "root_thread_id":root_thread,"root_turn_id":root_turn,
+                "runner_id":row.get::<_, String>(4)?,
                 "source":row.get::<_, String>(6)?, "evidence":serde_json::from_str::<Value>(&row.get::<_, String>(7)?)?,
             }));
         }

@@ -127,8 +127,14 @@ elif title == "整理安装步骤与首次运行指南":
     first = {"totalTokens": 82_400, "inputTokens": 80_000, "cachedInputTokens": 20_000, "cacheWriteInputTokens": 0,
              "outputTokens": 2_400, "reasoningOutputTokens": 700}
     usage(82_400, first, thread_id="unrelated-thread", response="other-thread")
-    usage(82_400, first, response="worker-first", response_model="deepseek-v4.1-flash")
-    usage(82_400, first)
+    evidence(82_400, first, "worker-first", response_model="deepseek-v4.1-flash")
+    send({"method": "rawResponse/completed", "params": {
+        "threadId": thread, "turnId": turn, "responseId": "worker-first",
+        "responseModel": "deepseek-v4.1-flash", "usage": first,
+        "usageMetadata": {"metadata": {"total_tokens": 82400, "input_tokens": 80000,
+            "output_tokens": 2400, "input_tokens_details": {"cached_tokens": 20000, "cache_write_tokens": 0},
+            "output_tokens_details": {"reasoning_tokens": 700}}},
+    }})
     usage(86_000, {"totalTokens": 3_600, "inputTokens": 3_200, "outputTokens": 400}, response="worker-second")
     usage(90_000, {"totalTokens": 4_000}, turn_id="unrelated-turn")
 

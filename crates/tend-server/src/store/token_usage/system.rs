@@ -564,8 +564,12 @@ mod tests {
         let thread = run.thread_id.as_deref().unwrap();
         let turn = run.turn_id.as_deref().unwrap();
         let copy = observation(&run, 0, Some(11));
-
+        let mut unknown = observation(&run, 1, None);
+        unknown.last = TokenCounts::default();
+        unknown.model = Some(TokenModel::Unresolved);
         attempt(&store, "a", Source::Router, thread, turn)?;
+        store.record_agent_response("a", thread, turn, response(&unknown.response_id, None));
+
         attempt(&store, "duplicate", Source::Discussion, thread, turn)?;
         attempt(&store, "b", Source::Discussion, thread, "different-turn")?;
         store.record_agent_response("a", thread, turn, response(&copy.response_id, Some(11)));
@@ -595,7 +599,7 @@ mod tests {
             first["total"]["total_tokens"],
             json!({"tokens":"18","reported_requests":3})
         );
-        assert_eq!(first["total"]["reported_requests"], 4);
+        assert_eq!(first["total"]["reported_requests"], 5);
         assert_eq!(row(&first, "router")["usage"]["started_runs"], 2);
         assert_eq!(row(&first, "discussion")["shared_turn_attempts"], 1);
         assert_eq!(row(&first, "discussion")["responses_without_usage"], 1);
@@ -606,14 +610,16 @@ mod tests {
             &mut store,
             "runner",
             std::slice::from_ref(&run),
-            std::slice::from_ref(&copy),
+            &[copy.clone(), unknown.clone()],
         )?;
         let second = root_page(&store)?;
         assert_eq!(
             second["total"]["total_tokens"],
             first["total"]["total_tokens"]
         );
-        assert_eq!(row(&second, "router")["shared_issue_responses"], 1);
+        assert_eq!(row(&second, "router")["shared_issue_responses"], 2);
+        assert_eq!(second["total"]["reported_requests"], 5);
+        assert_eq!(second["issues"][0]["direct"]["reported_requests"], 2);
         assert_eq!(
             row(&second, "router")["usage"]["total_tokens"]["tokens"],
             "7"
@@ -626,7 +632,7 @@ mod tests {
             second["issues"][0]["direct"]["total_tokens"]["tokens"],
             "11"
         );
-        sync(&mut store, "runner", &[run], &[copy])?;
+        sync(&mut store, "runner", &[run], &[copy, unknown])?;
         drop(store);
         let mut reopened = Store::open(&file.file())?;
         assert_eq!(root_page(&reopened)?, second);

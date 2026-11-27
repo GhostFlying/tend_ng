@@ -41,3 +41,12 @@
 
 - 请求已发送但没有可核实响应 ID、断线尾部、无法提供逐请求证据的旧实现及没有留存的 ephemeral 会话不能从累计值补算。兼容旧 Server 时，它不会把新格式的子 turn 归到父 turn。Runner 本地原记录可供新版重新对账，留存的原件也可显式回填。
 - 运行时可能自己触发子 Agent 和压缩，只有原生事件或留存记录能核实的响应才入账。恢复的线程若不支持 raw 完成通知，缺失逐请求内容就保留未知。测试以隔离协议 fixture 和无真实账单的本地 Responses 模拟端点验证，不读取用户 Codex 会话。
+
+### 独立审阅后的增量验收
+
+- 统一实时、历史和显式重建对无用量响应的身份计数，验证同一已知重叠键只归 Issue，且重建前后总计不变。
+- 在 Runner 回填页上增加原生子 Agent 覆盖回执，旧读者可补根记录但明确呈现子 Agent 覆盖缺口。
+- 兼容及历史只存在标准化计数时，不把无法区分的可选默认零解释为供应商明确零。补用真实 Codex 和本地 Responses fixture 验证 Router 恢复及飞书 ephemeral 路径。
+- 审计保留子响应完整原生键，独立保留 Run 的根 thread/turn，同响应 ID 的不同子 turn 不会合并审计条目。
+
+原生验证可执行 `python3 -B tests/e2e/system_agent_token_usage_native.py <server> <cli> <codex> <scratch>`，只使用隔离 Codex home、合成飞书材料和回环 Responses 服务。上一版 Runner 对照可用 `system_agent_token_usage.py --legacy-runner <旧 Runner>`。

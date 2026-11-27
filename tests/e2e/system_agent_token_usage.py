@@ -18,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for binary in ("server", "cli", "runner"):
         parser.add_argument(binary, type=lambda path: Path(path).resolve())
+    parser.add_argument("--legacy-runner", type=lambda path: Path(path).resolve())
     parser.add_argument("--screenshots", type=lambda path: Path(path).resolve())
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tend-system-usage-") as temp:
@@ -107,11 +108,12 @@ def run(args, root):
             assert (same_thread, num_turns, num_keys) == (1, 2, 1)
 
             [issue] = speak("main", "Dispatch from Chat.")["issue_ids"]
-            wait_for(lambda: requests("runner"), lambda n: n == 3)
+            wait_for(lambda: requests("runner"), lambda n: n == 4)
             original = cli("issue", "token-usage", issue)
             assert original["direct"]["total_tokens"] == {"tokens": "10000", "reported_requests": 3}, original
+            assert original["direct"]["reported_requests"] == 4
             assert original["direct"]["cache_write_input_tokens"]["tokens"] is None
-            assert sql("SELECT count(DISTINCT thread_id), count(DISTINCT turn_id), count(DISTINCT response_id) FROM token_requests") == [(2, 3, 1)]
+            assert sql("SELECT count(DISTINCT thread_id), count(DISTINCT turn_id), count(DISTINCT response_id) FROM token_requests") == [(2, 3, 2)]
 
             discussion_id = cli("discussion", "create")["chat_id"]
             speak(discussion_id, "Compare two local export formats.")
@@ -154,7 +156,7 @@ def run(args, root):
             assert requests("router") == before_recovery + 1
             assert sources()["discussion"]["responses_without_usage"] == 0
             assert sources()["discussion"]["usage"]["cache_write_input_tokens"] == {
-                "tokens": "0", "reported_requests": 1,
+                "tokens": None, "reported_requests": 0,
             }, "a normalized zero must not override explicitly missing provider fields"
             assert cli("issue", "token-usage", issue) == original, "Runner native child overlap adds no extra usage"
             assert receipt["counts"].get("scanned") == 1, receipt
@@ -163,6 +165,8 @@ def run(args, root):
             assert merged["total"]["reported_requests"] == sum(row["usage"]["reported_requests"] for row in merged["sources"])
             assert int(merged["total"]["total_tokens"]["tokens"]) == sum(
                 int(row["usage"]["total_tokens"]["tokens"] or 0) for row in merged["sources"])
+            cli("token-usage", "rebuild", "--all")
+            assert overview() == merged
             for job_id in ("system-history-first", "system-history-repeat"):
                 job(job_id)
                 assert overview() == merged
@@ -171,6 +175,21 @@ def run(args, root):
                     ["node", "tests/system-agent-token-usage.mjs", str(merged["total"]["reported_requests"])],
                     cwd=WEB, env={**env, "TEND_SCREENSHOTS": str(args.screenshots)}, check=True, timeout=45)
                 assert targets.returncode == 0
+    if args.legacy_runner:
+        # Reuse only the local database and retained evidence of this isolated
+        # fixture, with the actual pre-feature Runner attached to the new Server.
+        with server(args.server, root, env, **options), runner_process(
+            [args.legacy_runner, *command[1:]], runner_env, root
+        ):
+            [(run,)] = sql("SELECT run_id FROM token_runs")
+            legacy = "history-with-baseline-reader"
+            cli("token-usage", "backfill", "--run", run, "--job", legacy)
+            result = wait_for(lambda: cli("token-usage", "status", legacy),
+                              lambda status: status["state"].startswith("finished"))
+            [row] = result["runs"]
+            assert row["state"] == "gap" and row["gap"] == "child_reader_unsupported", result
+            assert row["native_keys"] == 1 and overview() == merged
+        print("PASS actual pre-feature Runner contributes only the root and explicitly reports missing child coverage")
     print("PASS source attribution, upstream identity/replay, same-thread turns, native children, Feishu privacy, persisted restart and full historical overlap")
 
 
