@@ -35,7 +35,9 @@ try {
     await page.getByRole("heading", { name: "全系统 Agent 用量" }).waitFor();
     await page.getByRole("heading", { name: "Issue 树" }).waitFor();
     assert.equal(
-      await page.locator(".usage-request-count").textContent(),
+      await page
+        .locator(".usage-overview > .usage-request-counts")
+        .textContent(),
       "2 条已识别请求",
     );
     const summaries = sources.locator(".usage-source > summary");
@@ -51,27 +53,27 @@ try {
       await summaries.getByText(name, { exact: true }).waitFor();
     }
     const router = summaries.filter({ hasText: "主 Chat Router" });
-    await router.getByText("1,727 Token", { exact: true }).waitFor();
-    await router.getByText("$0.008202", { exact: true }).waitFor();
+    await router.getByText("<$0.1", { exact: true }).waitFor();
     await router.click();
+    await sources
+      .locator(".usage-source-detail .model-raw")
+      .getByText("1,727", { exact: true })
+      .waitFor();
     const models = sources.getByRole("region", {
       name: "主 Chat Router · 模型明细",
     });
     await models.waitFor();
     assert.equal(await models.locator(".model-row").count(), 2);
-    for (const [name, total, cost] of [
-      ["gpt-6.2-sol", "864 Token", "$0.001642"],
-      ["gpt-6.2-astra", "863 Token", "$0.00656"],
-    ]) {
+    for (const name of ["gpt-6.2-sol", "gpt-6.2-astra"]) {
       const model = models
         .locator(".model-row > summary")
         .filter({ hasText: name });
-      await model.getByText(total, { exact: true }).waitFor();
-      await model.getByText(cost, { exact: true }).waitFor();
+      await model.getByText("1 条请求", { exact: true }).waitFor();
+      await model.getByText("<$0.1", { exact: true }).waitFor();
       assert.equal(await model.getByText(/部分估算|请求未计价/).count(), 0);
     }
     const feishu = summaries.filter({ hasText: "飞书研判" });
-    await feishu.getByText("无数据", { exact: true }).waitFor();
+    await feishu.getByText("0 条请求", { exact: true }).waitFor();
     await feishu.click();
     await sources.getByText("该来源暂无已记录请求。").waitFor();
     assert.equal(await feishu.locator(".model-cost").count(), 0);

@@ -8,13 +8,14 @@ import type {
 } from "./api";
 import {
   coverageLabel,
-  fieldNote,
-  format,
-  RunCoverage,
-  tokens,
-  TokenTotal,
+  RawTokenFields,
+  RequestCount,
+  UsageHeadline,
+  UsageMethod,
+  UsageMetrics,
 } from "./TokenUsageSummary";
-import { EstimateValue, TokenModelUsage } from "./TokenModelUsage";
+import { format, tokens } from "./tokenDisplay";
+import { TokenModelUsage } from "./TokenModelUsage";
 import "./global-token-usage.css";
 
 function IssueValue({
@@ -24,29 +25,28 @@ function IssueValue({
   label: string;
   usage: TokenBreakdown;
 }) {
-  const field = usage.total_tokens;
   return (
     <div className="usage-tree-value">
-      <dt>{label}</dt>
+      <dt>
+        <strong>{label}</strong>
+        <span>
+          <bdi className="usage-tree-tokens">{tokens(usage.total_tokens)}</bdi>{" "}
+          Token
+        </span>
+      </dt>
       <dd>
-        <bdi className="usage-tree-tokens">{tokens(field)}</bdi>
+        <RequestCount usage={usage} />
       </dd>
-      <dd className="detail-muted">
+      {usage.reported_requests > 0 && (
+        <dd>
+          <UsageMetrics usage={usage} />
+        </dd>
+      )}
+      <dd className="detail-muted usage-tree-coverage">
         {coverageLabel(usage)}
         {usage.started_runs > 0 &&
           ` · ${format.format(usage.observed_runs)} / ${format.format(usage.started_runs)}`}
       </dd>
-      {usage.estimate && usage.reported_requests > 0 && (
-        <dd className="detail-muted">
-          <EstimateValue
-            estimate={usage.estimate}
-            requests={usage.reported_requests}
-          />
-        </dd>
-      )}
-      {usage.reported_requests > 0 && fieldNote(field, usage) && (
-        <dd className="detail-muted">{fieldNote(field, usage)}</dd>
-      )}
     </div>
   );
 }
@@ -180,49 +180,31 @@ function SourceRow({ row }: { row: TokenUsageSource }) {
         <summary>
           <span className="usage-source-name">
             <strong>{name}</strong>
-            <span className="detail-muted">
+            <RequestCount usage={usage} />
+          </span>
+          {hasRequests && <UsageMetrics usage={usage} compact />}
+        </summary>
+        {expanded && (
+          <div className="usage-source-detail">
+            <p className="detail-muted">
               已观测 {format.format(usage.observed_runs)} /{" "}
               {format.format(usage.started_runs)} 个{unit}
-            </span>
-            {notes.length > 0 && (
-              <span className="detail-muted">{notes.join(" · ")}</span>
-            )}
-          </span>
-          <span className="usage-source-amount">
+              {notes.length > 0 && ` · ${notes.join(" · ")}`}
+            </p>
             {hasRequests ? (
               <>
-                <span>
-                  <bdi>{tokens(usage.total_tokens)}</bdi> Token
-                </span>
-                <span className="detail-muted">
-                  {format.format(usage.reported_requests)} 条已识别请求
-                </span>
-                {usage.estimate && (
-                  <span>
-                    <EstimateValue
-                      estimate={usage.estimate}
-                      requests={usage.reported_requests}
-                    />
-                  </span>
-                )}
+                <RawTokenFields usage={usage} />
+                <TokenModelUsage
+                  usage={usage}
+                  label={`${name} · 模型明细`}
+                  compact
+                />
               </>
             ) : (
-              <span className="detail-muted">无数据</span>
+              <p className="detail-muted">该来源暂无已记录请求。</p>
             )}
-          </span>
-        </summary>
-        {expanded &&
-          (hasRequests ? (
-            <TokenModelUsage
-              usage={usage}
-              label={`${name} · 模型明细`}
-              compact
-            />
-          ) : (
-            <p className="detail-muted usage-source-empty">
-              该来源暂无已记录请求。
-            </p>
-          ))}
+          </div>
+        )}
       </details>
     </li>
   );
@@ -232,17 +214,11 @@ function SourceRows({ rows }: { rows: TokenUsageSource[] }) {
   return (
     <section className="usage-sources" aria-labelledby="usage-sources-heading">
       <h2 id="usage-sources-heading">按调用来源</h2>
-      <p className="detail-muted token-metric-note">
-        展开来源查看模型明细。费用按 OpenRouter 公示价估算，已观测不代表完整。
-      </p>
       <ul className="usage-source-list">
         {rows.map((row) => (
           <SourceRow key={row.source} row={row} />
         ))}
       </ul>
-      <p className="detail-muted token-metric-note">
-        未保留或无法验证的原始证据不估算，飞书研判不会为计量保存会话原文。
-      </p>
     </section>
   );
 }
@@ -308,18 +284,9 @@ function UsageLevel({
           <h2 id="usage-total-heading" className="token-state-heading">
             全系统 Agent 用量
           </h2>
-          <TokenTotal usage={page.total} />
-          {page.sources && (
-            <p className="usage-request-count">
-              {format.format(page.total.reported_requests)} 条已识别请求
-            </p>
-          )}
-          <RunCoverage usage={page.total} />
-          <p className="detail-muted token-metric-note">
-            按原生响应归并已知用量。Issue
-            用量只加直属一次，下方另列各调用来源。费用是公开费率估算，不是账单。
-          </p>
-          <TokenModelUsage usage={page.total} label="模型明细与费用估算" />
+          <UsageHeadline usage={page.total} />
+          <UsageMethod usage={page.total} global />
+          <TokenModelUsage usage={page.total} label="模型明细" />
         </section>
       )}
       {page?.sources && <SourceRows rows={page.sources} />}
@@ -389,7 +356,6 @@ export function GlobalTokenUsage({
     <main className="resource-page">
       <div className="usage-page-inner">
         <div className="usage-page-toolbar">
-          <p className="detail-muted">已采集的模型请求 · 缓存汇总</p>
           <button
             className="token-action"
             type="button"

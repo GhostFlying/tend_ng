@@ -1,11 +1,13 @@
 import { useState } from "react";
-import type {
-  TokenBreakdown,
-  TokenEstimate,
-  TokenModelRow,
-  TokenPriceComponent,
-} from "./api";
-import { fieldNote, format, tokens } from "./TokenUsageSummary";
+import type { TokenBreakdown, TokenModelRow, TokenPriceComponent } from "./api";
+import {
+  Amount,
+  fieldNote,
+  RawTokenFields,
+  RequestCount,
+  UsageMetrics,
+} from "./TokenUsageSummary";
+import { format, tokens } from "./tokenDisplay";
 import "./token-model-usage.css";
 
 const feeComponents = [
@@ -14,53 +16,6 @@ const feeComponents = [
   [2, "缓存写入"],
   [3, "输出"],
 ] as const;
-const lineFields = [
-  ["cached_input_tokens", "缓存读取"],
-  ["cache_write_input_tokens", "缓存写入"],
-  ["output_tokens", "输出"],
-] as const;
-const rawFields = [
-  ["input_tokens", "输入"],
-  ["cached_input_tokens", "缓存读取"],
-  ["cache_write_input_tokens", "缓存写入"],
-  ["output_tokens", "输出"],
-  ["reasoning_output_tokens", "推理输出"],
-] as const;
-
-function Amount({ usd }: { usd: string }) {
-  const [whole, fraction] = usd.split(".");
-  return (
-    <bdi className="model-cost">
-      ${format.format(BigInt(whole))}
-      {fraction ? `.${fraction}` : ""}
-    </bdi>
-  );
-}
-
-export function EstimateValue({
-  estimate,
-  requests,
-}: {
-  estimate: TokenEstimate;
-  requests: number;
-}) {
-  if (requests === 0) return null;
-  const unpriced = estimate.unpriced_requests ?? 0;
-  return (
-    <span className="model-estimate-values">
-      {estimate.usd !== null && <Amount usd={estimate.usd} />}
-      {unpriced > 0 && (
-        <small className="detail-muted model-unpriced-count">
-          {format.format(unpriced)} 条请求未计价
-        </small>
-      )}
-      {estimate.unpriced_requests === undefined && estimate.usd === null && (
-        <small className="detail-muted">费用未知</small>
-      )}
-    </span>
-  );
-}
-
 function ModelDetails({ row }: { row: TokenModelRow }) {
   const price = row.price;
   const explicit = row.request_level_selected_model_requests ?? 0;
@@ -76,19 +31,7 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
           {actual > 0 && ` · 逐响应确认 ${format.format(actual)} 条`}
         </p>
       )}
-      <dl className="model-raw">
-        {rawFields.map(([field, label]) => (
-          <div key={field}>
-            <dt>{label}</dt>
-            <dd>
-              <bdi>{tokens(row[field])}</bdi>
-            </dd>
-            {fieldNote(row[field], row) && (
-              <dd className="detail-muted">{fieldNote(row[field], row)}</dd>
-            )}
-          </div>
-        ))}
-      </dl>
+      <RawTokenFields usage={row} />
       {!price ? (
         <p className="detail-muted">
           {row.model !== null
@@ -272,39 +215,9 @@ function ModelRow({ row }: { row: TokenModelRow }) {
       <summary>
         <span className="model-name">
           <strong>{row.model ?? "模型未知"}</strong>
-          <span className="detail-muted model-evidence">
-            {format.format(row.reported_requests)} 条请求
-          </span>
+          <RequestCount usage={row} />
         </span>
-        <span className="model-row-tokens">
-          <bdi>{tokens(row.total_tokens)}</bdi> Token
-        </span>
-        <span className="model-row-estimate">
-          <EstimateValue
-            estimate={row.estimate}
-            requests={row.reported_requests}
-          />
-        </span>
-        <span className="model-line-fields">
-          {lineFields.map(([field, label]) => {
-            const value = row[field];
-            if (
-              field === "cache_write_input_tokens" &&
-              value.reported_requests === 0
-            )
-              return null;
-            const note = fieldNote(value, row);
-            return (
-              <span className="model-line-field" key={field} title={note}>
-                <span className="detail-muted">{label}</span>
-                <bdi>{value.tokens === null ? "未知" : tokens(value)}</bdi>
-                {value.tokens !== null && note && (
-                  <small className="detail-muted">部分</small>
-                )}
-              </span>
-            );
-          })}
-        </span>
+        <UsageMetrics usage={row} compact />
       </summary>
       {open && <ModelDetails row={row} />}
     </details>
@@ -326,33 +239,7 @@ export function TokenModelUsage({
       className={`model-usage${compact ? " model-usage-compact" : ""}`}
       aria-label={label}
     >
-      <h4>
-        <span>{label}</span>
-        {usage.reported_requests > 0 && (
-          <span className="model-usage-cost">
-            <EstimateValue
-              estimate={usage.estimate}
-              requests={usage.reported_requests}
-            />
-          </span>
-        )}
-      </h4>
-      {!compact && (
-        <p className="detail-muted model-method">
-          按{" "}
-          <a
-            href="https://openrouter.ai/docs/api/api-reference/models/list-all-models-and-their-properties"
-            target="_blank"
-            rel="noreferrer"
-          >
-            OpenRouter 公示标准价
-          </a>{" "}
-          对已上报请求的 Token
-          估算，不是实际账单。按执行时所选模型，能确认具体请求的实际型号时用该型号。
-          费用计入有适用单价的分项，缓存明细不足时可能包含普通输入价基准。
-          展开查看各项覆盖和未计原因。不含未采集用量、工具费和平台费用。
-        </p>
-      )}
+      <h4>{label}</h4>
       {(usage.models?.length ?? 0) === 0 ? (
         <p className="detail-muted model-method">没有可用于模型分组的请求。</p>
       ) : (

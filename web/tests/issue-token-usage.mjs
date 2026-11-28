@@ -85,12 +85,15 @@ try {
     );
     await open.click();
     await total.getByText("41,200", { exact: true }).waitFor();
-    const reasoning = pane.locator(".token-metrics > div").filter({
+    const method = pane.locator(".usage-method > summary");
+    await method.click();
+    const reasoning = pane.locator(".usage-method .model-raw > div").filter({
       has: page.getByText("推理输出", { exact: true }),
     });
     assert.equal(await reasoning.locator("bdi").textContent(), "—");
     await reasoning.getByText("字段缺失", { exact: true }).waitFor();
-    const models = pane.getByRole("region", { name: "模型明细与费用估算" });
+    await method.click();
+    const models = pane.getByRole("region", { name: "模型明细", exact: true });
     await models.getByText("gpt-6.2-sol", { exact: true }).waitFor();
     await models.getByText("gpt-6.2-astra", { exact: true }).waitFor();
     assert.equal(await models.getByText("deepseek-v4.1-flash").count(), 0);
@@ -99,14 +102,13 @@ try {
       .filter({ hasText: "gpt-6.2-astra" });
     const directAstraFields = directAstra.locator(".model-line-fields");
     for (const [label, value] of [
-      ["缓存读取", "4,096"],
-      ["缓存写入", "2,000"],
+      ["其中缓存读取", "4,096"],
       ["输出", "400"],
     ]) {
       const field = directAstraFields.locator(".model-line-field").filter({
         has: page.getByText(label, { exact: true }),
       });
-      assert.equal(await field.locator("bdi").textContent(), value);
+      assert.equal(await field.locator("bdi").last().textContent(), value);
     }
     assert.equal(
       await models.getByText("非缓存输入", { exact: true }).count(),
@@ -128,7 +130,8 @@ try {
     const childFlash = models
       .locator(".model-row > summary")
       .filter({ hasText: "deepseek-v4.1-flash" });
-    await childFlash.getByText("86,000", { exact: true }).waitFor();
+    await childFlash.getByText("2 条请求", { exact: true }).waitFor();
+    await method.click();
     await pane
       .getByText("已观测 2 / 3 个已开始 Run", { exact: true })
       .waitFor();
@@ -141,8 +144,7 @@ try {
       .waitFor();
     const rows = pane.getByRole("list", { name: "各 Issue 直属用量" });
     assert.equal(await rows.getByRole("listitem").count(), 3);
-    assert.equal(await rows.getByText("86,000", { exact: true }).count(), 1);
-    assert.equal(await rows.getByText("41,200", { exact: true }).count(), 1);
+    assert.equal(await rows.getByText("2 条请求", { exact: true }).count(), 2);
     assert.equal(
       interceptedUsage,
       1,
@@ -204,17 +206,24 @@ try {
       return route.fulfill({ response: original, json: usage });
     });
     await pane.getByRole("button", { name: "更新用量" }).click();
-    await total.getByText("9,007,199,254,740,993", { exact: true }).waitFor();
+    await total.getByText("9,007.2T", { exact: true }).waitFor();
+    await method.click();
+    await pane
+      .locator(".usage-method")
+      .getByText("9,007,199,254,740,993", { exact: true })
+      .waitFor();
     await noOverflow(page, width);
     await page.unroute(read);
 
     await go(page, missing);
     await open.click();
+    await method.click();
     await pane.getByText("完全未观测", { exact: true }).waitFor();
     assert.equal(await total.textContent(), "—");
     await noOverflow(page, width);
     await go(page, empty);
     await open.click();
+    await method.click();
     await pane.getByText("没有已开始的 Run。", { exact: true }).waitFor();
     assert.equal(await total.textContent(), "—");
     await noOverflow(page, width);

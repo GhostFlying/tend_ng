@@ -68,7 +68,7 @@ try {
     const bySource = page.locator(".usage-source-list");
     await bySource.locator("summary").first().click();
     const summary = bySource.locator(".model-usage");
-    const all = await expand(summary, "deepseek-v4.1-flash", "$4.501813372");
+    const all = await expand(summary, "deepseek-v4.1-flash", "$4.5");
     await all.getByText("已计 420 / 420 条", { exact: true }).first().waitFor();
     assert.equal(
       queries.length,
@@ -90,7 +90,7 @@ try {
     assert.equal(page.url(), `${url}/issues/${issue}`);
     await page.locator(".token-section > summary").click();
     const pane = page.locator(".token-pane");
-    const detail = await expand(pane, "deepseek-v4.1-flash", "$0.1038973152");
+    const detail = await expand(pane, "deepseek-v4.1-flash", "$0.1");
     await detail.getByText("未命中输入（miss）", { exact: true }).waitFor();
     await detail
       .getByText("已计 180 / 180 条", { exact: true })
@@ -103,7 +103,7 @@ try {
     });
 
     await detail.locator("summary").click();
-    const gpt = await expand(pane, "gpt-6.2-sol", "$0.340654");
+    const gpt = await expand(pane, "gpt-6.2-sol", "$0.3");
     await gpt.getByText(/缓存读折扣未观测/).waitFor();
     await gpt.getByText(/可能有未计入的写入溢价/).waitFor();
     await gpt.getByText("未细分输入（基准）").waitFor();

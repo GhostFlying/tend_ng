@@ -7,12 +7,11 @@
 .usage-page-toolbar {
   display: flex;
   flex-wrap: wrap;
-  justify-content: space-between;
+  justify-content: flex-end;
   align-items: center;
   gap: 8px;
 }
 
-.usage-page-toolbar p,
 .usage-tree-heading p {
   margin: 0;
 }
@@ -20,12 +19,6 @@
 .usage-page-toolbar button,
 .usage-tree-more {
   min-height: 36px;
-}
-
-.usage-overview .token-total bdi,
-.usage-tree-value {
-  min-width: 0;
-  overflow-wrap: anywhere;
 }
 
 .usage-tree-heading {
@@ -45,7 +38,7 @@
 
 .usage-tree-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 2.8fr);
   align-items: center;
   gap: 4px 16px;
   padding-block: 8px;
@@ -99,18 +92,29 @@
   font-variant-numeric: tabular-nums;
 }
 
-.usage-tree-value dt,
-.usage-tree-value .detail-muted {
-  font-size: 12px;
-  line-height: 1.45;
+.usage-tree-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.usage-tree-value dt {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 8px;
+  font-size: 13px;
 }
 
 .usage-tree-value dd {
   margin: 0;
 }
 
-.usage-tree-value bdi {
-  font-weight: 650;
+.usage-tree-value .model-line-fields {
+  margin-block: 4px;
+}
+
+.usage-tree-coverage {
+  font-size: 12px;
 }
 
 .usage-tree-children[data-indent="true"] {
@@ -133,7 +137,8 @@
   }
 
   .usage-tree-values {
-    margin-inline-start: 44px;
+    grid-template-columns: minmax(0, 1fr);
+    padding-inline: 8px;
   }
 
   .usage-tree-children[data-indent="true"] {
@@ -167,11 +172,9 @@
 
 .usage-source > summary {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
-  align-items: baseline;
-  gap: 8px;
+  gap: 5px;
   min-height: 44px;
-  padding: 9px 6px;
+  padding: 8px 10px;
   cursor: pointer;
   overflow-wrap: anywhere;
 }
@@ -182,43 +185,23 @@
 }
 
 .usage-source-name {
-  display: grid;
-  gap: 2px;
-  padding-inline-start: 14px;
-  font-size: 12px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 12px;
 }
 
 .usage-source-name strong {
-  position: relative;
   font-size: 14px;
   font-weight: 650;
 }
 
-.usage-source-name strong::before {
-  content: "›";
-  position: absolute;
-  inset-inline-start: -14px;
-  color: var(--muted);
+.usage-source-detail {
+  padding: 0 10px 10px;
 }
 
-.usage-source[open] .usage-source-name strong::before {
-  content: "⌄";
-}
-
-.usage-source-amount {
-  display: grid;
-  gap: 2px;
-  text-align: end;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-}
-
-.usage-source-amount bdi {
-  font-weight: 650;
-}
-
-.usage-source-empty {
-  margin: 8px 6px 12px 20px;
+.usage-source-detail p {
+  margin: 6px 0 8px;
   font-size: 12px;
 }
 
@@ -226,10 +209,4 @@
   .usage-source-list {
     grid-template-columns: minmax(0, 1fr);
   }
-}
-
-.usage-request-count {
-  margin: 6px 0 0;
-  font-size: 14px;
-  font-weight: 650;
 }

@@ -113,10 +113,13 @@ try {
     await ready(page);
     assert.deepEqual(queries, ["", "", ""]);
     const coverage = page.locator(".usage-overview .token-coverage");
+    const method = page.locator(".usage-overview .usage-method > summary");
+    await method.click();
     await coverage.getByText("部分覆盖", { exact: true }).waitFor();
     await coverage
-      .getByText("已观测 2 / 3 个已开始 Run", { exact: true })
+      .getByText("已观测 2 / 3 个已开始 Issue Run", { exact: true })
       .waitFor();
+    await method.click();
     const tree = page.getByRole("list", { name: "顶层 Issue", exact: true });
     assert.equal(await tree.locator(":scope > li").count(), 30);
     const emptyRow = tree.locator(":scope > li").filter({
@@ -169,20 +172,22 @@ try {
     );
     assert((await meteredRow.textContent()).includes("已观测全部 Run"));
     const overview = page.locator(".usage-overview .model-usage");
-    await overview.getByText("$0.1669656", { exact: true }).waitFor();
+    await page
+      .locator(".usage-headline-amount")
+      .getByText("$0.2", { exact: true })
+      .waitFor();
     const astra = overview
       .locator(".model-row > summary")
       .filter({ hasText: "gpt-6.2-astra" });
     const astraFields = astra.locator(".model-line-fields");
     for (const [label, value] of [
-      ["缓存读取", "4,096"],
-      ["缓存写入", "2,000"],
+      ["其中缓存读取", "4,096"],
       ["输出", "400"],
     ]) {
       const field = astraFields.locator(".model-line-field").filter({
         has: page.getByText(label, { exact: true }),
       });
-      assert.equal(await field.locator("bdi").textContent(), value);
+      assert.equal(await field.locator("bdi").last().textContent(), value);
     }
     assert.equal(
       await astraFields.getByText("非缓存输入", { exact: true }).count(),
@@ -194,13 +199,13 @@ try {
     assert.equal(await sol.getByText("缓存写入").count(), 0);
     const solFields = sol.locator(".model-line-fields");
     for (const [label, value] of [
-      ["缓存读取", "8,192"],
+      ["其中缓存读取", "8,192"],
       ["输出", "800"],
     ]) {
       const field = solFields.locator(".model-line-field").filter({
         has: page.getByText(label, { exact: true }),
       });
-      assert.equal(await field.locator("bdi").textContent(), value);
+      assert.equal(await field.locator("bdi").last().textContent(), value);
     }
     assert.equal(
       await solFields.getByText("非缓存输入", { exact: true }).count(),
@@ -209,12 +214,17 @@ try {
     const flash = overview
       .locator(".model-row > summary")
       .filter({ hasText: "deepseek-v4.1-flash" });
-    const flashWrite = flash
-      .locator(".model-line-field")
-      .filter({ hasText: "缓存写入" });
-    assert.equal(await flashWrite.locator("bdi").textContent(), "0");
+    assert.equal(await flash.getByText("缓存写入").count(), 0);
     await flash.click();
     await overview.getByText("原生回合所选 1 条", { exact: false }).waitFor();
+    const flashRaw = flash.locator("..").locator(".model-raw");
+    await flashRaw
+      .locator("div")
+      .filter({
+        has: page.getByText("缓存写入", { exact: true }),
+      })
+      .getByText("0", { exact: true })
+      .waitFor();
     await flash.click();
     await astra.click();
     const priceLink = overview.getByRole("link", {
@@ -225,8 +235,12 @@ try {
       await priceLink.getAttribute("href"),
       "https://openrouter.ai/openai/gpt-6.2-astra",
     );
-    await overview.getByText("$0.02", { exact: true }).waitFor();
+    assert.equal(await astra.locator(".model-cost").textContent(), "$0.1");
     const feeItems = overview.locator(".model-fee-items");
+    const writeFee = feeItems.locator("div").filter({
+      has: page.getByText("缓存写入", { exact: true }),
+    });
+    assert.equal(await writeFee.locator(".model-cost").textContent(), "<$0.1");
     for (const label of ["缓存读取", "缓存写入", "输出"]) {
       await feeItems.getByText(label, { exact: true }).first().waitFor();
     }

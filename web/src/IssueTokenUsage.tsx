@@ -2,22 +2,15 @@ import { useEffect, useRef, useState } from "react";
 import { issueLink, issueTitle, readIssueTokenUsage } from "./api";
 import type { IssueTokenUsageData } from "./api";
 import {
-  fieldNote,
-  format,
-  RunCoverage,
-  tokens,
-  TokenTotal,
+  coverageLabel,
+  RequestCount,
+  UsageHeadline,
+  UsageMethod,
+  UsageMetrics,
 } from "./TokenUsageSummary";
+import { format } from "./tokenDisplay";
+import { TokenModelUsage } from "./TokenModelUsage";
 
-import { EstimateValue, TokenModelUsage } from "./TokenModelUsage";
-
-const metrics = [
-  ["input_tokens", "输入"],
-  ["cached_input_tokens", "缓存读取"],
-  ["cache_write_input_tokens", "缓存写入"],
-  ["output_tokens", "输出"],
-  ["reasoning_output_tokens", "推理输出"],
-] as const;
 const pageSize = 30;
 
 type State =
@@ -50,28 +43,14 @@ function IssueRows({
                   {issueTitle(title, number)}
                 </a>
               )}
+              <RequestCount usage={direct} />
               <small className="detail-muted">
-                {direct.started_runs === 0
-                  ? "没有已开始的 Run"
-                  : direct.observed_runs === 0
-                    ? "完全未观测"
-                    : `已观测 ${format.format(direct.observed_runs)} / ${format.format(direct.started_runs)} 个 Run`}
+                {coverageLabel(direct)}
+                {direct.started_runs > 0 &&
+                  ` · ${format.format(direct.observed_runs)} / ${format.format(direct.started_runs)}`}
               </small>
             </div>
-            <div className="token-issue-value">
-              <bdi>{tokens(direct.total_tokens)}</bdi>
-              {direct.estimate && direct.reported_requests > 0 && (
-                <small className="detail-muted">
-                  <EstimateValue
-                    estimate={direct.estimate}
-                    requests={direct.reported_requests}
-                  />
-                </small>
-              )}
-              <small className="detail-muted">
-                {fieldNote(direct.total_tokens, direct) ?? "已上报 Token"}
-              </small>
-            </div>
+            <UsageMetrics usage={direct} />
           </li>
         ))}
       </ul>
@@ -169,27 +148,12 @@ function UsagePane({ issue }: { issue: string }) {
       )}
       {active && (
         <>
-          <TokenTotal usage={active} />
-          <RunCoverage usage={active} />
-          <dl className="token-metrics">
-            {metrics.map(([key, label]) => (
-              <div key={key}>
-                <dt>{label}</dt>
-                <dd>
-                  <bdi>{tokens(active[key])}</bdi>
-                </dd>
-                {fieldNote(active[key], active) && (
-                  <dd className="detail-muted">
-                    {fieldNote(active[key], active)}
-                  </dd>
-                )}
-              </div>
-            ))}
-          </dl>
-          <p className="detail-muted token-metric-note">
-            各分项按原生字段汇总，不相加补齐总量。
-          </p>
-          <TokenModelUsage usage={active} label="模型明细与费用估算" />
+          <UsageHeadline usage={active} />
+          <div className="usage-issue-fields">
+            <UsageMetrics usage={active} compact showEstimate={false} />
+          </div>
+          <UsageMethod usage={active} />
+          <TokenModelUsage key={scope} usage={active} label="模型明细" />
         </>
       )}
       {state.status === "ready" && scope === "subtree" && (

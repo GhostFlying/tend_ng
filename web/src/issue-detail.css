@@ -818,8 +818,7 @@ p.issue-objective {
 }
 
 .token-controls,
-.token-scope,
-.token-coverage > p {
+.token-scope {
   display: flex;
   flex-wrap: wrap;
   gap: 6px 10px;
@@ -865,63 +864,6 @@ p.issue-objective {
   font-size: 14px;
 }
 
-.token-total {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 2px 10px;
-  font-variant-numeric: tabular-nums;
-}
-
-.token-total > bdi {
-  font-size: clamp(25px, 5.8vw, 40px);
-  font-weight: 700;
-  line-height: 1.2;
-}
-
-.token-total > span {
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.token-source,
-.token-coverage p,
-.token-metric-note,
-.token-issue-rows p {
-  margin: 4px 0;
-}
-
-.token-coverage {
-  margin-block: 12px;
-  padding: 8px 10px;
-  border-inline-start: 2px solid var(--border);
-  font-size: 13px;
-}
-
-.token-metrics {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100px, 100%), 1fr));
-  gap: 8px;
-  margin: 0;
-}
-
-.token-metrics > div {
-  min-width: 0;
-  padding: 7px 9px;
-  border: 1px solid var(--border);
-  border-radius: 7px;
-}
-
-.token-metrics dt {
-  color: var(--muted);
-  font-size: 12px;
-}
-
-.token-metrics dd {
-  margin: 0;
-  font-variant-numeric: tabular-nums;
-}
-
 .token-issue-rows {
   border-top: 1px solid var(--border);
   margin-top: 15px;
@@ -936,7 +878,7 @@ p.issue-objective {
 
 .token-issue-rows li {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(74px, auto);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr);
   gap: 4px 10px;
   border-top: 1px solid var(--border);
   padding-block: 8px;
@@ -948,10 +890,10 @@ p.issue-objective {
   font-size: 12px;
 }
 
-.token-issue-value {
-  text-align: end;
-  max-width: 14ch;
-  font-variant-numeric: tabular-nums;
+@media (max-width: 760px) {
+  .token-issue-rows li {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 .issue-title-history {
