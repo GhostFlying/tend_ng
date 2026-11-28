@@ -41,7 +41,8 @@ impl Store {
              CREATE INDEX IF NOT EXISTS local_assignments_by_task ON received_assignments(task_id);
              CREATE TABLE IF NOT EXISTS local_execution_limit (
                  singleton INTEGER PRIMARY KEY CHECK(singleton = 1), slots INTEGER NOT NULL
-             );",
+             );
+             CREATE TABLE IF NOT EXISTS local_server_features (name TEXT PRIMARY KEY);",
         )?;
         run::create_tables(&tx)?;
         token_usage::create_tables(&tx)?;
@@ -96,7 +97,17 @@ impl Store {
             .collect()
     }
 
-    pub fn apply_sync(&mut self, config: &Config, reply: RunnerSyncReply) -> Result<()> {
+    pub fn issue_rename_supported(&self) -> Result<bool> {
+        issue_rename_supported(&self.0)
+    }
+
+    pub fn apply_sync(
+        &mut self,
+        config: &Config,
+        reply: RunnerSyncReply,
+        ordered: bool,
+    ) -> Result<()> {
+        let issue_rename_changed = ordered && self.issue_rename_supported()? != reply.issue_rename;
         let execution_limit = if let Some(slots) = reply.execution_slot_limit {
             let saved: Option<u32> = self
                 .0
@@ -120,6 +131,7 @@ impl Store {
             && reply.workspace_reclaims.is_empty()
             && reply.confirmed_reclaims.is_empty()
             && execution_limit.is_none()
+            && !issue_rename_changed
         {
             return Ok(());
         }
@@ -127,6 +139,19 @@ impl Store {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if issue_rename_changed {
+            if reply.issue_rename {
+                tx.execute(
+                    "INSERT OR IGNORE INTO local_server_features VALUES ('issue_rename')",
+                    [],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM local_server_features WHERE name = 'issue_rename'",
+                    [],
+                )?;
+            }
+        }
         if let Some(target) = &reply.drain_to {
             handoff::accept_drain(&tx, target)?;
         }
@@ -250,4 +275,12 @@ impl Store {
         tx.commit()?;
         Ok(())
     }
+}
+
+fn issue_rename_supported(db: &Connection) -> Result<bool> {
+    Ok(db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM local_server_features WHERE name = 'issue_rename')",
+        [],
+        |row| row.get(0),
+    )?)
 }

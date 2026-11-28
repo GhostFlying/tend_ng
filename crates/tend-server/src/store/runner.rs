@@ -584,6 +584,7 @@ impl Store {
                 drain_acknowledged: None,
                 proposal_approval: true,
                 stage_attention: true,
+                issue_rename: true,
                 workspace_reclaims: if task.is_none() {
                     super::reclaim::pending(&snapshot, &profile.runner_id)?
                 } else {
@@ -846,6 +847,7 @@ impl Store {
             drain_acknowledged,
             proposal_approval: true,
             stage_attention: true,
+            issue_rename: true,
             workspace_reclaims,
             confirmed_reclaims,
             assignments,

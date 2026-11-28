@@ -380,6 +380,32 @@ impl Store {
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let WorkAction::RenameIssue { issue_id, .. } = &operation.action {
+            ensure!(
+                super::issue_rename_supported(&tx)?,
+                "The Server has not advertised Issue renaming"
+            );
+            ensure!(
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM local_runs r
+                 JOIN received_assignments a ON a.id = r.assignment_id
+                 WHERE r.id = ?1 AND a.id = ?2 AND a.task_id = ?3 AND r.state = 'running'
+                   AND r.thread_id = ?4 AND r.turn_id = ?5
+                   AND json_extract(a.decision, '$.status') = 'accepted'
+                   AND json_extract(a.contract, '$.issue_id') = ?6)",
+                    params![
+                        run.id,
+                        assignment_id,
+                        run.assignment.task_id,
+                        call.thread_id,
+                        call.turn_id,
+                        issue_id
+                    ],
+                    |row| row.get::<_, bool>(0),
+                )?,
+                "Only the current Run of a claimed Issue can rename it"
+            );
+        }
         tx.execute(
             "INSERT INTO local_work_operations VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![

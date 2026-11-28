@@ -107,7 +107,7 @@ pub fn migrate_backlog(db: &Connection) -> Result<()> {
 }
 
 const RECORD_QUERY: &str =
-    "SELECT i.id, d.operation_id, m.id, m.chat_id, i.state, d.request, n.number
+    "SELECT i.id, d.operation_id, m.id, m.chat_id, i.state, d.request, n.number, i.title
        FROM router_dispatches d JOIN issues i ON i.id = d.issue_id
        JOIN issue_short_numbers n ON n.issue_id = i.id
        JOIN chat_messages m ON m.seq = i.source_seq";
@@ -249,7 +249,11 @@ impl Store {
             .query_row(
                 &format!("{RECORD_QUERY} WHERE i.id = ?1 AND d.task_id IS NULL"),
                 [id],
-                read_record,
+                |row| {
+                    let mut record = read_record(row)?;
+                    record.work.title = row.get(7)?;
+                    Ok(record)
+                },
             )
             .optional()?
             .map(IssueDetail::Recorded))
@@ -369,12 +373,35 @@ fn start_first_task(
     super::runner::assign(db, issue)
 }
 
+pub(super) fn accepted_owner(
+    db: &Connection,
+    issue: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    Ok(db
+        .query_row(
+            "SELECT a.id, json_extract(a.contract, '$.placement.agent.id')
+         FROM tasks t JOIN runner_assignments a ON a.task_id = t.id
+         WHERE t.issue_id = ?1 AND a.state = 'accepted'
+         ORDER BY t.rowid DESC, a.rowid DESC LIMIT 1",
+            [issue],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?)
+}
+
 fn receipt(db: &Connection, operation: &str) -> Result<IssueDetail> {
     let issue = db
         .query_row(
             &format!("{DISPATCH_QUERY} WHERE t.id = d.task_id AND d.operation_id = ?1"),
             [operation],
-            read_dispatch,
+            |row| {
+                let mut issue = read_dispatch(row)?;
+                // This is a projection of the original dispatch receipt.
+                // The live Issue read and newly issued assignments use i.title instead.
+                let raw: String = row.get(11)?;
+                issue.work.title = original_dispatch(11, &raw)?.work.title;
+                Ok(issue)
+            },
         )
         .optional()?;
     if let Some(issue) = issue {
@@ -387,16 +414,20 @@ fn receipt(db: &Connection, operation: &str) -> Result<IssueDetail> {
     )?))
 }
 
-fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedIssue> {
-    let dispatch = serde_json::from_str(row.get_ref(5)?.as_str()?)
+fn original_dispatch(column: usize, raw: &str) -> rusqlite::Result<DispatchRequest> {
+    serde_json::from_str(raw)
         .and_then(DispatchRequest::parse)
         .map_err(|error| {
             rusqlite::Error::FromSqlConversionFailure(
-                5,
+                column,
                 rusqlite::types::Type::Text,
                 Box::new(error),
             )
-        })?;
+        })
+}
+
+fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RecordedIssue> {
+    let dispatch = original_dispatch(5, row.get_ref(5)?.as_str()?)?;
     Ok(RecordedIssue {
         issue_id: row.get(0)?,
         short_number: row.get(6)?,

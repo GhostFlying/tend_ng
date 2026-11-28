@@ -227,6 +227,8 @@ pub struct RunnerSyncReply {
     pub proposal_approval: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stage_attention: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub issue_rename: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub workspace_reclaims: Vec<crate::WorkspaceReclaim>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -307,6 +309,10 @@ pub enum WorkAction {
     SetIssueState {
         state: String,
         reason: String,
+    },
+    RenameIssue {
+        issue_id: String,
+        title: String,
     },
     CloseIssue {
         summary: String,

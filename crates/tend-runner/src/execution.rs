@@ -306,6 +306,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         &run.assignment,
         runtime.proposal_approval.load(Ordering::Relaxed),
         runtime.stage_attention.load(Ordering::Relaxed),
+        store.issue_rename_supported()?,
     );
     let native_context =
         native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;

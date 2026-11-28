@@ -110,17 +110,9 @@ impl Store {
         };
         // A new reservation can belong to a continuation or handoff. Only an
         // accepted assignment establishes or changes this Issue's named Owner.
-        let owner_agent_id = tx
-            .query_row(
-                "SELECT json_extract(a.contract, '$.placement.agent.id')
-                 FROM tasks t JOIN runner_assignments a ON a.task_id = t.id
-                 WHERE t.issue_id = ?1 AND a.state = 'accepted'
-                 ORDER BY t.rowid DESC, a.rowid DESC LIMIT 1",
-                [id],
-                |row| row.get::<_, Option<String>>(0),
-            )
-            .optional()?
-            .flatten();
+        let owner_agent_id = super::work::accepted_owner(&tx, id)?.and_then(|(_, agent)| agent);
+        let title_history = super::issue_title::history(&tx, id, i64::MAX)?;
+        let title_history = (!title_history.changes.is_empty()).then_some(title_history);
         let roots = serde_json::to_string(&[id])?;
         enrich_cards(
             &tx,
@@ -221,6 +213,7 @@ impl Store {
             title: card.title,
             stage: card.stage,
             owner_agent_id,
+            title_history,
             objective,
             repo_ids: card.repo_ids,
             chat_id,

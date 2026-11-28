@@ -48,16 +48,13 @@ pub fn task(config: &Config, store: &mut Store, server: &Server, id: &str) -> Re
     let mut after = 0;
     while after < records_end {
         let page = store.reconcile_records(id, after, records_end)?;
-        let Some(&(last, _)) = page.last() else { break };
-        server.exchange(
-            config,
-            store,
-            scope,
-            Vec::new(),
-            page.into_iter().map(|(_, record)| record).collect(),
-            Vec::new(),
-        )?;
-        after = last;
+        if page.is_empty() {
+            break;
+        }
+        let (positions, records): (Vec<_>, Vec<_>) = page.into_iter().unzip();
+        let reply = server.exchange(config, store, scope, Vec::new(), records, Vec::new())?;
+        // The transport can send a shorter prefix than the count page.
+        after = positions[reply.sent_records - 1];
     }
     let mut after = 0;
     while after < usage_end {

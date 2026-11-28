@@ -953,3 +953,53 @@ p.issue-objective {
   max-width: 14ch;
   font-variant-numeric: tabular-nums;
 }
+
+.issue-title-history {
+  margin-block: 12px 0;
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+
+.issue-title-history > summary {
+  width: fit-content;
+  color: var(--muted);
+  cursor: pointer;
+}
+
+.issue-title-history > ol {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0 0 0 12px;
+  border-inline-start: 2px solid var(--border);
+}
+
+.issue-title-history li {
+  padding-block: 8px;
+}
+
+.issue-title-history li + li {
+  border-block-start: 1px solid var(--border);
+}
+
+.issue-title-history-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0 0 4px;
+  color: var(--muted);
+}
+
+.issue-title-history dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 8px;
+  margin: 0;
+}
+
+.issue-title-history dt {
+  color: var(--muted);
+}
+
+.issue-title-history dd {
+  margin: 0;
+}

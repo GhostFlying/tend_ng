@@ -59,6 +59,8 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 `tend_propose_approval` 由支持该能力的 Server 开启。顶层 Issue Owner 可以引用具体的正式报告操作和 Markdown 原件登记待批准版本。修订以原 Attention ID 和下一个版本提交，不登记第二个等待义务。回执仍是 Runner 本地受理。 [结构化方案批准](plans/inline-proposal-approval.md#implemented-contract)
 
+`tend_rename_issue` 只接受新标题。原生回调关联到正在执行的已领取 Run 后，Runner 将当前 Issue 和原操作一起持久受理。已保存的同原生调用返回原回执，其他角色不能传入目标或操作者。回执不是 Server 已改名的证明。 [Issue 标题契约](task-lifecycle.md#issue-标题与改名历史)
+
 ## Session 接续
 
 所有角色的原生会话都在所属服务或 launch profile 显式配置的独立 Codex home 落盘，包括受限研判与交接。启动或恢复均不使用个人默认 home。 [排障与原件归属](codex-rollouts.md)

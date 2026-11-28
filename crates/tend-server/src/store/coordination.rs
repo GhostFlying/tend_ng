@@ -94,9 +94,10 @@ pub fn apply(
 
     let source = db
         .query_row(
-            "SELECT i.id, i.source_seq, i.parent_issue_id, t.category, t.id, a.contract
+            "SELECT i.id, i.source_seq, i.parent_issue_id, t.category, t.id, a.contract,
+                json_extract(r.observation, '$.turn_id') IS NOT NULL
          FROM task_runs r JOIN runner_assignments a ON a.id = r.assignment_id
-         JOIN tasks t ON t.id = r.task_id
+         JOIN tasks t ON t.id = r.task_id AND t.id = a.task_id
          JOIN issues i ON i.id = t.issue_id
          WHERE r.id = ?1 AND a.id = ?2 AND a.runner_id = ?3 AND a.state = 'accepted'",
             params![operation.run_id, operation.assignment_id, runner_id],
@@ -108,12 +109,20 @@ pub fn apply(
                     row.get::<_, String>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
+                    row.get::<_, bool>(6)?,
                 ))
             },
         )
         .optional()?;
-    let Some((source_issue, source_message, parent_issue, category, source_task, contract)) =
-        source
+    let Some((
+        source_issue,
+        source_message,
+        parent_issue,
+        category,
+        source_task,
+        contract,
+        has_turn,
+    )) = source
     else {
         return Ok(false);
     };
@@ -218,6 +227,28 @@ pub fn apply(
     {
         return Ok(false);
     }
+    let rename_agent = if let WorkAction::RenameIssue { issue_id, title } = &operation.action {
+        if issue_id != &source_issue
+            || !has_turn
+            || protocol::normalize_issue_title(title) != Some(title.as_str())
+            || !protocol::valid_id(&operation.operation_id)
+        {
+            return Ok(false);
+        }
+        let claimed: TaskAssignment = serde_json::from_str(&contract)?;
+        if claimed.issue_id != source_issue
+            || claimed.task_id != source_task
+            || claimed.placement.assignment_id != operation.assignment_id
+            || claimed.placement.runner_id != runner_id
+            || claimed.placement.agent.category != category
+            || !protocol::valid_id(&claimed.placement.agent.id)
+        {
+            return Ok(false);
+        }
+        Some(claimed.placement.agent.id)
+    } else {
+        None
+    };
     db.execute(
         "INSERT INTO runner_operations (id, runner_id, operation) VALUES (?1, ?2, ?3)",
         params![operation.operation_id, runner_id, serialized],
@@ -316,6 +347,18 @@ pub fn apply(
                 Some(&operation.run_id),
                 Some(result),
                 &result.conclusion,
+            )?;
+        }
+        WorkAction::RenameIssue { title, .. } => {
+            super::issue_title::apply_owner(
+                db,
+                &source_issue,
+                &operation.assignment_id,
+                &operation.operation_id,
+                rename_agent
+                    .as_deref()
+                    .expect("rename source was validated"),
+                title,
             )?;
         }
         WorkAction::CloseIssue { summary } => {

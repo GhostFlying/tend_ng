@@ -163,6 +163,10 @@ See the [Web session contract](docs/web-session.md) for API and verification det
 
 `tend report backfill <old-report-id> <new-report-id> [operation-id] [--old-message <message-id>] [--new-message <message-id>]` explicitly links two ordinary reports already published in the same Issue's original Chat. Supply a publication message ID for each report without a saved mapping. Keep the operation ID for a retry. Check the result with `tend issue read '#123'` without changing Chat or the Issue's execution state. See the [API, idempotency and read-only verification commands](docs/plans/report-version-backfill.md#implemented-contract).
 
+## Issue titles
+
+An Issue Owner can explicitly rename the claimed Issue from its own Run. For a manual change, use `tend issue rename '#123' 'Make Issue title changes auditable' [operation-id]`. Use `tend issue title-history '#123' [before]` or open the read-only title history on the Issue page. The Bearer API accepts `POST /api/v1/issues/123/title` with `operation_id` and `title`. The browser session cannot write titles. Renaming preserves the Issue number, link, objective, messages, and execution state. [Issue title contract](docs/task-lifecycle.md#issue-标题与改名历史)
+
 ## Token usage
 
 Open `/token-usage` from Resources on desktop or More on mobile. The page shows the system-wide usage observed for Issue Runs (including their native child Agents), the Main Chat Router, Discussion and handoff turns, and Feishu assessments. The source rows show what was observed, not what the provider billed. Browse top-level Issues or expand immediate children to compare direct and subtree values. The Token usage section on Issue detail remains available.

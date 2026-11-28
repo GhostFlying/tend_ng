@@ -616,6 +616,59 @@ fn handle(
     }
     if let Some(issue) = path
         .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/title-history"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let Some(before) = page_cursor(query) else {
+            return Ok(api_error(400, "invalid Issue title history cursor"));
+        };
+        return Ok(match store.issue_title_history(issue, before)? {
+            Some(history) => (200, serde_json::to_value(history)?),
+            None => api_error(404, "Issue not found"),
+        });
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
+        .and_then(|path| path.strip_suffix("/title"))
+        .filter(|id| protocol::valid_id(id))
+    {
+        if request.method() != &Method::Post {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        let issue = issue.to_owned();
+        let Some(bytes) = request_bytes(request)? else {
+            return Ok(api_error(413, "request too large"));
+        };
+        let Ok(mut input) = serde_json::from_slice::<protocol::RenameIssue>(&bytes) else {
+            return Ok(api_error(400, "expected operation_id and title"));
+        };
+        let Some(title) = protocol::normalize_issue_title(&input.title) else {
+            return Ok(api_error(
+                400,
+                &format!(
+                    "a nonempty single-line Issue title of at most {} UTF-8 bytes is required",
+                    protocol::MAX_ISSUE_TITLE_BYTES,
+                ),
+            ));
+        };
+        if !protocol::valid_id(&input.operation_id) {
+            return Ok(api_error(400, "invalid operation ID"));
+        }
+        input.title = title.to_owned();
+        use store::control::ResultState;
+        return Ok(match store.rename_issue(&issue, &input)? {
+            ResultState::Found(receipt) => (200, serde_json::to_value(receipt)?),
+            ResultState::Missing => api_error(404, "Issue not found"),
+            ResultState::Conflict => {
+                api_error(409, "operation ID already used for another Issue rename")
+            }
+        });
+    }
+    if let Some(issue) = path
+        .strip_prefix("/api/v1/issues/")
         .and_then(|path| path.strip_suffix("/state"))
         .filter(|id| protocol::valid_id(id))
     {

@@ -278,6 +278,8 @@ pub struct IssueOverview {
     pub stage: BoardStage,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner_agent_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title_history: Option<crate::IssueTitleHistory>,
     pub objective: String,
     pub repo_ids: Vec<String>,
     pub chat_id: String,

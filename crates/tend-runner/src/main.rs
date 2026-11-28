@@ -177,14 +177,16 @@ fn main() -> Result<()> {
     if let Some(task) = task {
         reconcile::task(&config, &mut store, &server, &task)?;
         loop {
-            let (files, _) = server.exchange(
-                &config,
-                &mut store,
-                SyncScope::Task(&task),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )?;
+            let files = server
+                .exchange(
+                    &config,
+                    &mut store,
+                    SyncScope::Task(&task),
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                )?
+                .uploads;
             if files.is_empty() {
                 return Ok(());
             }
@@ -277,7 +279,7 @@ fn sync(
     backfill: Option<&mut backfill::Worker>,
 ) -> Result<(Vec<String>, bool)> {
     store.prepare_handoffs()?;
-    server.exchange_inner(
+    let exchanged = server.exchange_inner(
         config,
         store,
         SyncScope::Runner,
@@ -285,7 +287,8 @@ fn sync(
         store.records()?,
         store.token_usage()?,
         backfill,
-    )
+    )?;
+    Ok((exchanged.uploads, exchanged.drain_acknowledged))
 }
 
 struct Server {
@@ -303,6 +306,12 @@ enum SyncScope<'a> {
     Task(&'a str),
 }
 
+struct SyncExchange {
+    uploads: Vec<String>,
+    drain_acknowledged: bool,
+    sent_records: usize,
+}
+
 impl Server {
     fn exchange(
         &self,
@@ -312,7 +321,7 @@ impl Server {
         receipts: Vec<ClaimReceipt>,
         records: Vec<RunnerRecord>,
         token_usage: Vec<protocol::RunTokenUsage>,
-    ) -> Result<(Vec<String>, bool)> {
+    ) -> Result<SyncExchange> {
         self.exchange_inner(config, store, scope, receipts, records, token_usage, None)
     }
 
@@ -326,7 +335,7 @@ impl Server {
         records: Vec<RunnerRecord>,
         token_usage: Vec<protocol::RunTokenUsage>,
         backfill: Option<&mut backfill::Worker>,
-    ) -> Result<(Vec<String>, bool)> {
+    ) -> Result<SyncExchange> {
         let running = store.running_slots()?;
         let mut profile = config.profile(store.unfinished()?);
         profile.running_slots = running;
@@ -351,13 +360,7 @@ impl Server {
                 page: worker.page.clone(),
             }),
         };
-        let mut bytes = serde_json::to_vec(&request)?;
-        if bytes.len() > protocol::MAX_REQUEST_BYTES
-            && let Some(feature) = &mut request.token_backfill
-            && feature.page.take().is_some()
-        {
-            bytes = serde_json::to_vec(&request)?;
-        }
+        let bytes = encode_sync(&mut request)?;
         let path = match scope {
             SyncScope::Runner => protocol::runner_sync_path(&config.runner_id),
             SyncScope::Task(id) => protocol::reconcile_path(&config.runner_id, id),
@@ -385,7 +388,7 @@ impl Server {
         let legacy = !reply.token_usage_supported;
         let supports_stage_attention = reply.stage_attention;
         let work = reply.token_backfill.take();
-        store.apply_sync(config, reply)?;
+        store.apply_sync(config, reply, matches!(scope, SyncScope::Runner))?;
         if let Some(worker) = backfill {
             worker.accept(work);
         }
@@ -394,6 +397,38 @@ impl Server {
                 .store(supports_stage_attention, Ordering::Relaxed);
             self.legacy_token_server.store(legacy, Ordering::Relaxed);
         }
-        Ok((uploads, drain_acknowledged))
+        Ok(SyncExchange {
+            uploads,
+            drain_acknowledged,
+            sent_records: request.records.len(),
+        })
     }
+}
+
+fn encode_sync(request: &mut RunnerSync) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(request)?;
+    if bytes.len() > protocol::MAX_REQUEST_BYTES
+        && let Some(feature) = &mut request.token_backfill
+        && feature.page.take().is_some()
+    {
+        bytes = serde_json::to_vec(request)?;
+    }
+    if bytes.len() <= protocol::MAX_REQUEST_BYTES || request.records.is_empty() {
+        return Ok(bytes);
+    }
+
+    // The existing count page may still exceed the transport byte limit.
+    // Remove only a suffix. Keep at least the first record so a single
+    // unsendable record is never silently skipped by full reconciliation.
+    let mut size = bytes.len();
+    while size > protocol::MAX_REQUEST_BYTES && request.records.len() > 1 {
+        let tail = request.records.pop().expect("nonempty records");
+        size -= serde_json::to_vec(&tail)?.len() + 1; // record and comma
+    }
+    if size > protocol::MAX_REQUEST_BYTES {
+        // Ordinary usage has its own ACK and cannot starve the first record.
+        // Full record pages already send without usage.
+        request.token_usage.clear();
+    }
+    Ok(serde_json::to_vec(request)?)
 }

@@ -159,12 +159,26 @@ type IssueApprovalEvent = {
   before_message_id: string | null;
 };
 
+type IssueTitleChange = {
+  operation_id: string;
+  old_title: string;
+  new_title: string;
+  actor: { kind: "user" } | { kind: "owner"; agent_id: string };
+  changed_at: number;
+};
+
+export type IssueTitleHistory = {
+  changes: IssueTitleChange[];
+  next_before?: number;
+};
+
 export type IssueOverviewData = {
   id: string;
   short_number?: number;
   title: string;
   stage: BoardStage;
   owner_agent_id?: string;
+  title_history?: IssueTitleHistory;
   objective: string;
   repo_ids: string[];
   chat_id: string;
@@ -417,6 +431,15 @@ export async function readIssueBoard(
       ? path
       : `${path}?before=${encodeURIComponent(before)}`;
   return (await request(url, { signal })).json() as Promise<BoardPage>;
+}
+
+export async function readIssueTitleHistory(
+  issue: string,
+  before: number,
+  signal: AbortSignal,
+) {
+  const path = `/api/v1/issues/${encodeURIComponent(issue)}/title-history?before=${before}`;
+  return (await request(path, { signal })).json() as Promise<IssueTitleHistory>;
 }
 
 export async function readIssueOverview(issue: string, signal: AbortSignal) {

@@ -14,7 +14,7 @@ use std::{
 };
 
 pub(crate) const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 21;
+const TOOL_REVISION: i64 = 22;
 const HANDOFF_WRITES: &[&str] = &[
     "tend_dispatch_issue",
     "tend_record_issue",
@@ -43,6 +43,7 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "Keep the same delivery endpoint through every handoff. When the user asks to merge, apply the repository's existing merge gates, do focused verification, and report the verified remote main SHA. ",
     "Extend tracking beyond merge to CI success, a package, or deployment only when the user explicitly asks for that endpoint. ",
     "When observation is needed, let one responsible Agent observe and share the exact SHA and result along the ownership chain. Do not duplicate checks or hold this turn open for an existing child event. ",
+    "For a new Issue, write a recognizable title naming the actual work and expected result. Avoid generic titles like Investigate an issue or Handle the request. Existing Issue titles are not yours to edit. ",
     "Preserve the user's original goal, named targets, explicit limits, and stopping point in the dispatch objective. Add only the context needed to carry out that work. ",
     "Do not add operational restrictions the user did not specify. State an implicit stopping point as the requested outcome, not as new prohibitions on out-of-scope actions. ",
     "Leave repository-specific steps needed to preserve dependencies (such as rebase, stack, or dependency updates) to the Work Agent's judgment and execution within scope. ",
@@ -107,7 +108,7 @@ fn dispatch_tool(name: &str, description: &str) -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "title": { "type": "string" },
+                "title": { "type": "string", "description": "Concrete work and expected result for the new Issue." },
                 "objective": { "type": "string" },
                 "category": { "type": "string", "enum": TOP_LEVEL_CATEGORIES },
                 "repo_ids": { "type": "array", "items": { "type": "string" } },
@@ -701,7 +702,8 @@ impl TurnHandler for DispatchHandler<'_> {
                     return Ok(tool_error("Provide a concise, nonempty progress message"));
                 };
                 tool_receipt(
-                    self.store.publish_router_progress(self.attempt_id, &call, text)?,
+                    self.store
+                        .publish_router_progress(self.attempt_id, &call, text)?,
                     "Progress belongs to a current direct Main Chat user request",
                 )
             }
@@ -976,7 +978,9 @@ pub(crate) fn finish(store: &mut Store, input: &Input, turn: Turn) -> Result<()>
         TurnStatus::Completed => {
             let mut answers = turn.answers()?;
             if input.external_batch.is_some()
-                || (answers.iter().any(|answer| answer.text.trim() == "TEND_NO_UPDATE")
+                || (answers
+                    .iter()
+                    .any(|answer| answer.text.trim() == "TEND_NO_UPDATE")
                     && store.has_work_acceptance(input.seq)?)
             {
                 answers.retain(|answer| answer.text.trim() != "TEND_NO_UPDATE");

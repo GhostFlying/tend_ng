@@ -65,6 +65,10 @@ Server 的 Runner 同步由独立的有界队列处理，文件传输和 rollout
 
 迁移 27 新增 `report_revisions` 和 `report_revision_receipts`。在同一个短 `IMMEDIATE` 事务中，以 Issue 的 `source_seq` 和原消息校验两份普通 `issue_reports`、可选 Router 输入（若存在须同源且已成功结算）及两个原发布消息，按需补齐 `issue_report_publications`，再保存旧→新边、锁定的发布消息身份及操作回执。已有发布映射不覆盖，已有边不重写，旧报告只允许一个后继、新报告只允许一个前驱，拒绝环和已知的结构化提案候选。重传原操作返回已结算回执。普通报告链只用于 Issue 查询，不产生任何待投递记录。 [操作与查询契约](plans/report-version-backfill.md#implemented-contract)
 
+## Issue 改名
+
+Server 迁移 55 新增 Issue 标题日志和按 Issue 分页索引。当前标题、改名和原操作回执在同一短事务内提交。Agent 名字从原领取合同冻结，原 Run/Assignment 可沿 Runner 操作关联核对。用户重复请求包括无变更的请求沿原收件读取，未实际改名的收件不进入展示历史。现有 Issue 不回填虚构事件。 [标题契约](task-lifecycle.md#issue-标题与改名历史)
+
 ## 独立讨论
 
 Server 迁移 32 保存独立 discussion Chat 身份、标题与来源、按稳定身份去重的引用、草稿回合及转交回链。原消息、输入、原生尝试和回复沿原 Chat 表保存。草稿使用同一个持久收件与回合队列，和可见消息分页分开。显式转交的操作身份、已确认请求、主 Chat 消息、Router 待处理输入和双向回链在一个短事务内提交，响应丢失沿同一操作重读。GitHub 读取和 Runner inspection 在事务外执行。工作目录本身不进入引用或转交 SQLite 记录，当前可用性按操作重新确认。

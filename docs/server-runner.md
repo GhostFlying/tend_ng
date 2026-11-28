@@ -26,6 +26,8 @@ Server 和 Runner 是两个独立运行的实例，各自持久化、启动、�
 
 **已确认。** Server 当前协议代为 `N` 时，接受 `N` 和 `N−1` 两代 Runner 通信协议。首次发布只有 `v1`。当前为 `v2`，仍接受 `v1` 的既有同步。绑定审阅分配和回传仅走 `v2`。 新 Runner 只有收到 Server 同步回执的可选 `stage_attention` 声明，才公开并受理普通 Attention 的 `after_report_id` 参数。旧 Server 未声明时不发送该操作，不将其改写为独立提问。阶段操作另有协议类型，使旧 Server 不会在解析过程中丢掉依赖。接替只转交原等待义务，Server 保留已接受的报告绑定。共享目录分配和复审输入还要求 Runner 上报可选的 `shared_reviews` 支持，不向旧 Runner 派发新绑定审阅。既有操作和已发放的原绑定继续沿原身份对账。组内超过旧 Runner 单页上限时须使用 `v2` 才能完整同批收件。Runner 在普通同步请求中声明使用的协议，Server 按同一窗口校验新登记和重连。
 
+改名使用可选 `issue_rename` 同步能力，协议代不变。新 Server 同时接受旧 Runner 的既有操作。新 Runner 从有序增量回执保存该能力，与领取在本地事务内提交，离线重启保留最后确认事实。旧 Server 省略时不提供或受理改名。全量回执不覆盖有序能力快照。独立的 `rename_issue` 操作在两条同步路径沿同一原身份结算，升级后才能重放已经受理的改名，不降级成留言或覆盖分配合同。旧 Server 不支持迁移后的新库。
+
 以目标 Server 的协议代确定升代窗口。在停止当前 Server 前，预检读取本机数据库中各未退役 Runner 的协议登记，包括暂时离线及仍在收尾的实例。若仍有 Runner 使用 `N−2` 或更早的协议，拒绝本次 Server 升级，报告 Host、Runner、已登记协议和目标兼容范围。窗口内的 Runner 可以带着已领取的工作跨过 Server 重启。
 
 `tend server upgrade-check <target-protocol>` 返回 `target_protocol`、`compatible_range`（含 `min` 和 `max`，两端均包含）、`allowed` 及 `blockers`。每个阻塞项包含 `host_id`、`runner_id` 和已登记的 `protocol`。例如目标 3 的兼容范围为 2–3。
@@ -164,6 +166,8 @@ Server 与 Runner 一期通过普通请求完成全量对账与批量增量同�
 Chat 同步以已持久保存的完整对话消息为单位。单次请求可携带多条完整消息以及其他持久事实，任务进行中即可同步。App Server 的 `item/completed` 可以携带完整的原生 `AgentMessage`，`item/agentMessage/delta` 则提供生成中的文本片段。Issue Chat 正文沿显式留言的记录同步，原生过程按需读取。 [Codex 通知名称](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/common.rs#L1991-L1996) · [完成与增量通知结构](https://github.com/openai/codex/blob/cc7ba33601286a751477832b01de7b6f8de0dd9c/codex-rs/app-server-protocol/src/protocol/v2/item.rs#L1418-L1448) · [Issue Chat 的留言与执行过程](chat-routing.md#issue-chat-的留言与执行过程)
 
 **已确认。** Server 可以先持久接收 Agent 的完整留言、Task 结算、停妥证据及交付文件引用。原件独立上传，文件引用按实际状态显示为同步中或可下载。需要读取文件的后续工作等该文件可用，同一 Task 的其他独立操作和同一 Runner 的其他 Task 继续同步。 [数据归属](storage.md#建议保存范围)
+
+Runner 请求超过 256 KiB 且含业务记录时，在既有条数上限内缩短记录页，保留原顺序与身份。增量从原 ACK 接续，全量只推进成功请求实际发送的记录前缀。此处不跳过不能单独同步的原记录。
 
 建议每次全量对账先确定一个稳定的记录截止位置。Runner 可继续工作，截止位置以内的记录按原身份比对，缺失内容分批补传。新事实由后续对账纳入，启用增量时也可以从已确认位置接续。Server 对已核实的覆盖范围给出持久回执。遇到原件缺失或同一身份下的事实冲突时，保留证据并报告实际缺口。
 

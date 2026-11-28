@@ -19,6 +19,7 @@ import type {
 } from "./api";
 import { Chat } from "./Chat";
 import { IssueAttention } from "./IssueAttention";
+import { IssueTitleTimeline } from "./IssueTitleTimeline";
 import { IssueTokenUsage } from "./IssueTokenUsage";
 import { Markdown } from "./Markdown";
 import { DecisionTime, ProposalApproval } from "./ProposalApproval";
@@ -375,6 +376,13 @@ function IssueSummary({
           )}
         </nav>
         {data.objective.trim() && <Objective text={data.objective} />}
+        {data.title_history && (
+          <IssueTitleTimeline
+            key={data.id}
+            issue={data.id}
+            recent={data.title_history}
+          />
+        )}
       </header>
       {data.proposal_requires_chat ? (
         <div className="proposal-approval proposal-choices">

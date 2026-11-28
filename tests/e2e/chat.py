@@ -65,7 +65,7 @@ def server(binary, root, env, listen="127.0.0.1:0", web_dir=None, github_cli=Non
 
 @contextmanager
 def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_headers=False,
-                        block_upload=lambda: False):
+                        block_upload=lambda: False, block_requests=lambda _path: False):
     posted = []
     dropped = []
 
@@ -88,6 +88,9 @@ def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_header
 
         def forward(self, drop):
             request = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if block_requests(self.path):
+                self.close_connection = True
+                return
             with_connection = http.client.HTTPConnection(upstream, timeout=5)
             try:
                 with_connection.request(self.command, self.path, request, {

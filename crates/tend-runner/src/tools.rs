@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 const DELEGATE: &str = "tend_delegate_work";
 const REQUEST_REVIEW: &str = "tend_request_review";
 const DELIVER_REVIEW: &str = "tend_deliver_review";
+const RENAME: &str = "tend_rename_issue";
 const CLOSE: &str = "tend_close_issue";
 const SUBMIT: &str = "tend_submit_artifact";
 const REPORT: &str = "tend_report_result";
@@ -25,6 +26,7 @@ pub fn catalogue(
     assignment: &protocol::TaskAssignment,
     proposal_approval: bool,
     stage_attention: bool,
+    issue_rename: bool,
 ) -> (&'static str, Vec<Value>) {
     let category = assignment.placement.agent.category.as_str();
     let post = json!({
@@ -160,6 +162,17 @@ pub fn catalogue(
         record_review,
         review_handoff,
     ];
+    if issue_rename {
+        catalogue.push(json!({
+            "type": "function", "name": RENAME,
+            "description": format!(
+                "Rename only the Issue you currently own. Give its concrete work and expected outcome in at most {} UTF-8 bytes. This receipt is Runner-local acceptance, not a Server-applied title or a scope change.",
+                protocol::MAX_ISSUE_TITLE_BYTES,
+            ),
+            "inputSchema": {"type":"object","properties":{"title":{"type":"string"}},
+                            "required":["title"],"additionalProperties":false}
+        }));
+    }
     if category != "issue-router" {
         catalogue.push(json!({
             "type": "function", "name": SUBMIT,
@@ -558,6 +571,24 @@ pub fn action(
                         runner_id: None,
                     }),
                 },
+            })
+        }
+        RENAME if call.namespace.is_none() => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Rename {
+                title: String,
+            }
+            let args: Rename = serde_json::from_value(call.arguments.clone())?;
+            let title = protocol::normalize_issue_title(&args.title).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Provide a nonempty single-line Issue title of at most {} UTF-8 bytes",
+                    protocol::MAX_ISSUE_TITLE_BYTES,
+                )
+            })?;
+            Ok(WorkAction::RenameIssue {
+                issue_id: run.assignment.issue_id.clone(),
+                title: title.to_owned(),
             })
         }
         CLOSE => {

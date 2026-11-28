@@ -13,6 +13,7 @@ pub(crate) mod external_routing;
 pub mod feishu;
 mod handoff;
 mod issue_chat;
+mod issue_title;
 pub(crate) mod maintenance;
 mod notification;
 pub(crate) mod proposals;
@@ -94,7 +95,7 @@ use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
 const REQUEST_PRICING_COVERAGE_SCHEMA: i64 = 54;
-pub(crate) const SCHEMA_VERSION: i64 = REQUEST_PRICING_COVERAGE_SCHEMA;
+pub(crate) const SCHEMA_VERSION: i64 = 55;
 
 pub struct Store {
     db: Connection,
@@ -377,6 +378,9 @@ impl Store {
             pricing
                 .map_or_else(|| token_usage::pricing_migration::capture(&tx), Ok)?
                 .publish(&tx)?;
+        }
+        if version < 55 {
+            issue_title::migrate(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

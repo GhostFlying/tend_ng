@@ -6,6 +6,16 @@
 
 Issue 详情的「负责 Agent」展示该 Issue 最近确认领取的具名 Owner。首次领取前显示「未领取」。等待、没有活跃 Run 或接续分配尚未确认时保留已生效的归属，子 Issue 不继承父级的 Owner。
 
+## Issue 标题与改名历史
+
+Router 创建或登记 Issue 时，标题写清具体工作和预期结果，不用「调查问题」「处理请求」这类无法辨认的题目。Issue 的标题是当前显示名，不是目标、授权或阶段。Owner 可在初步调查后修正不准确的题目，也可在用户追加使工作实质变化时重估。通常不随阶段或日常进度反复修改。没有次数配额，不通过改标题改变实际工作范围。
+
+已在本地持久领取并实际执行的具名 Owner 可调用 `tend_rename_issue`，只传新标题。Runner 从原 Run 确定 Issue，没有跨 Issue 参数。协调、直接、工作和审阅 Owner 都只能改自己实际领取的 Issue。Router 不持有该工具，不能替 Owner 改现有标题。单用户可通过共享 Bearer 的 `POST /api/v1/issues/<id-or-number>/title` 提交 `operation_id` 和 `title`，不依赖 Issue 是否已领取。Web 仅通过读接口展示，不接受浏览器会话改名。标题去除首尾空白并拒绝空值或内嵌控制字符。规范化后最多 1024 UTF-8 字节，避免单个标题阻塞同步，仍不限制改名次数。
+
+Server 按原 Runner/Assignment/Task/Run、Issue 和最新已接受的 Assignment 应用 Owner 操作。仅预留或发出后继分配不改变 Owner。后继已领取时，前驱晚到的有效原操作只确认收件，不覆盖后继标题。Server 以提交顺序记录旧题、新题、具名 Agent 或用户以及提交时间。原操作重传和同值请求不追加可见事件。改名只更新 `issues.title` 和相应账本，不产生上级输入、Router 唤醒、用户通知或工作阶段变化。
+
+看板、Issue 详情、短号链接和历史引用上的当前 Issue 标签读取当前标题。原派发请求和回执、已发放的 Assignment 合同、历史正文及原生执行记录是原时点快照，不因改名重写。新建 Assignment 读取当时当前标题。详情的独立「改名历史」以同 Issue 的有界分页显示前后值，不占用讨论台消息游标。
+
 ## 工作委派与 Issue 结案
 
 顶层 Owner 保留用户原目标、授权和停点。单人交付由 Work Agent 在原顶层 Task 执行，不创建占位子 Issue。协调工作由 Issue Agent 委派，直接 Owner 也可以按需委派真正独立的目标。Server 按 category 分配具名配置，Runner 持久领取后生效。同一份明确交付默认由一个作者 Task 连续调查、设计或实施、验证、吸收反馈和局部修订，阶段交付不拆新 Task。是否拆分由责任 Agent 按工作能否独立推进和仓库约定决定。
