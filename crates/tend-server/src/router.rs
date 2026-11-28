@@ -190,6 +190,7 @@ fn attention_tools() -> [Value; 3] {
 pub struct Config {
     pub db: PathBuf,
     pub cwd: PathBuf,
+    pub codex_home: PathBuf,
     pub program: OsString,
     pub args: Vec<OsString>,
     pub effort: Option<String>,
@@ -514,6 +515,7 @@ fn open_router_app(config: &Config, routing_only: bool) -> Result<Client> {
     command
         .args(&config.args)
         .current_dir(&config.cwd)
+        .env("CODEX_HOME", &config.codex_home)
         .env_remove(protocol::TOKEN_ENV)
         .env_remove("GH_TOKEN")
         .env_remove("GITHUB_TOKEN");

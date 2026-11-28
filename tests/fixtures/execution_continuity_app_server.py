@@ -75,6 +75,7 @@ if start["method"] == "thread/resume":
         respond(start, {"thread": {"id": thread, "status": {"type": "idle"}}, "cwd": cwd, "model": model})
 if not reused:
     assert start["method"] == "thread/start", start
+    assert start["params"]["ephemeral"] is False and start["params"]["historyMode"] == "legacy"
     model = start["params"]["model"]
     cwd = start["params"]["cwd"]
     thread = f"{model}-{uuid.uuid4().hex}"

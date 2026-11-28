@@ -35,10 +35,10 @@ def main():
     parser.add_argument("cli", type=lambda value: Path(value).resolve())
     parser.add_argument("runner", type=lambda value: Path(value).resolve())
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "tend-issue-run-e2e"}
 
     with tempfile.TemporaryDirectory(prefix="tend-issue-run-") as temporary:
         root = Path(temporary)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "tend-issue-run-e2e"}
         subprocess.run(["git", "init", "--quiet", root / "example"], check=True)
         (root / "runner.json").write_text(json.dumps({
             "host_id": "issue-host", "runner_id": "issue-runner", "slot_limit": 1,

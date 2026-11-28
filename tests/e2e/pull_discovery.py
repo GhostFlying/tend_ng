@@ -36,7 +36,7 @@ def main():
         (root / "delegate-now").touch()
         mode = root / "branch-mode"
         mode.write_text("unique" if args.already_linked else "ambiguous")
-        env = {**os.environ, "TEND_TOKEN": "discovery-fixture", "TEND_URL": f"http://{address}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "discovery-fixture", "TEND_URL": f"http://{address}"}
         server_env = {**env, "GH_TOKEN": "fixture-read-token", "TEND_GITHUB_FIXTURE_DIR": str(root)}
 
         def cli(*words):

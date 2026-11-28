@@ -99,11 +99,11 @@ def main():
     route.add_argument("--web", action="store_true")
     route.add_argument("--stage-delivery", action="store_true", help="deliver a report with an artifact and await review")
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "attention-fixture"}
     scenario = "stage-delivery" if args.stage_delivery else "attention-local" if args.owner else "attention"
 
     with tempfile.TemporaryDirectory(prefix="tend-attention-") as temporary:
         root = Path(temporary)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "attention-fixture"}
         source = root / "source"
         subprocess.run(["git", "init", "--quiet", "-b", "main", source], check=True)
         (source / "README.md").write_text("A fixed repository.\n")

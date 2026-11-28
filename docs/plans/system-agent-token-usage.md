@@ -11,8 +11,8 @@
 ### 入口盘点
 
 - Runner 统一通过 execution 驱动 Issue Owner、Work、Review 与接续，原生协作子 Agent 另有独立 thread，不应复用父 turn 身份。
-- Server 通过 Router 驱动主 Chat（包括正常转交），Discussion 分别驱动普通/草稿回复、快速转交总结和旧转交的隔离接收。飞书扫描与飞书研判分离，只有后者启用隐私隔离的 ephemeral turn。
-- App Server 的 `rawResponse/completed` 是 response 键控的请求证据，即使用量缺失也能证明已完成响应。已有 rollout 只用于逐请求兼容采集和历史明确回填，绝不使用 `thread/tokenUsage/updated` 单独推算。飞书继续使用 ephemeral，不以计量为由保留材料。
+- Server 通过 Router 驱动主 Chat（包括正常转交），Discussion 分别驱动普通/草稿回复、快速转交总结和旧转交的隔离接收。飞书扫描与飞书研判分离，只有后者使用独立受限 profile 发出持久化模型 turn。
+- App Server 的 `rawResponse/completed` 是 response 键控的请求证据，即使用量缺失也能证明已完成响应。已有 rollout 只用于逐请求兼容采集和历史明确回填，绝不使用 `thread/tokenUsage/updated` 单独推算。飞书原生 rollout 留在其私有 home，采集只读取请求级计量证据，不复制研判上下文。
 
 ## 已实现的读写口径
 
@@ -23,7 +23,7 @@
 | 讨论回复 | 普通讨论回合 | Discussion |
 | 讨论转交总结 | 自动草稿或一键转交的总结回合 | Discussion summary |
 | 隔离转交接收 | 旧一键转交的隔离接收回合 | Handoff receiver |
-| 飞书研判 | 隔离、ephemeral 的模型回合 | Feishu assessor |
+| 飞书研判 | 隔离、持久化的模型回合 | Feishu assessor |
 
 - 每个请求使用原 thread、turn 和上游 response ID。保持原始回合，业务重试若真正发出新请求则新增记录。复制的旧历史、重复帧、恢复读取和二次同步不产生新请求。只有 native turn 生命周期明确给出同一根 turn 的子回合，或原件记录给出同 session 和根 turn，才允许纳入子 Agent。原生子 Agent 的用量归原 Run、原 Issue，只在全局 Runner 行汇总一次。反序校验时用原 assignment 和根 turn，不用目前的 Owner 或路由。
 - 开启原生 `experimentalRawEvents` 并屏蔽原始消息通知。计量只消费响应完成事实，不保存 raw payload、提问、回复或账户元数据。旧 App Server 或已恢复的线程未发逐请求完成事件时，沿已返回的原 rollout 路径，以追加的原生 response 键佐证同 turn 的 token 通知。未匹配的累计量、压缩重估或窗口事件不计量。
@@ -33,9 +33,9 @@
 
 ## 历史与覆盖
 
-`tend token-usage backfill --all --job <id>` 同时登记既有 Runner 页式作业以及 Server 侧按尝试扫描的队列。Server 只在收到显式全量受理或恢复其已持久的未完项时读原件，使用已绑定路径或者当前配置的本机 Codex home，按已核实原 thread、turn 获取有效逐请求记录。子 Agent 仍保留自己的 native 键，只取原 session 和根 turn 能对应的记录。历史副本补齐相容字段，且不把历史中没有出现的实时键扣掉。Server 请求写入按批推进。普通 GET 不查询作业状态或历史表。
+`tend token-usage backfill --all --job <id>` 同时登记既有 Runner 页式作业以及 Server 侧按尝试扫描的队列。Server 只在收到显式全量受理或恢复其已持久的未完项时读原件，使用已绑定路径或所属的本机 Codex home。飞书只使用 attempt 登记的原 home，按已核实原 thread、turn 获取有效逐请求记录。子 Agent 仍保留自己的 native 键，只取原 session 和根 turn 能对应的记录。历史副本补齐相容字段，且不把历史中没有出现的实时键扣掉。Server 请求写入按批推进。普通 GET 不查询作业状态或历史表。
 
-`tend token-usage status <id>` 保留原有 Runner 分页，在 `server` 字段返回按来源归组的已扫描、进行中前缀和缺口（例如原件缺失、未核实 turn、内容不相容和 ephemeral）。飞书此前的临时会话没有可识别的请求历史，启用采集前的覆盖不可反推。保留同一 job ID 用于重试已受理作业，用新 ID 可重扫更新后的证据。缩小范围的回填和现有显式重建仍只作用于 Runner 和 Issue 投影，后者不读原件。
+`tend token-usage status <id>` 保留原有 Runner 分页，在 `server` 字段返回按来源归组的已扫描、进行中前缀和缺口（例如原件缺失、未核实 turn、内容不相容和 ephemeral）。新飞书会话按原 home 查找。旧 ephemeral 会话没有 rollout，保留已保存的逐请求证据，但不借新配置推断型号或重造原件。启用采集前的覆盖不可反推。保留同一 job ID 用于重试已受理作业，用新 ID 可重扫更新后的证据。缩小范围的回填和现有显式重建仍只作用于 Runner 和 Issue 投影，后者不读原件。
 
 ## 边界
 
@@ -46,7 +46,7 @@
 
 - 统一实时、历史和显式重建对无用量响应的身份计数，验证同一已知重叠键只归 Issue，且重建前后总计不变。
 - 在 Runner 回填页上增加原生子 Agent 覆盖回执，旧读者可补根记录但明确呈现子 Agent 覆盖缺口。
-- 兼容及历史只存在标准化计数时，不把无法区分的可选默认零解释为供应商明确零。补用真实 Codex 和本地 Responses fixture 验证 Router 恢复及飞书 ephemeral 路径。
+- 兼容及历史只存在标准化计数时，不把无法区分的可选默认零解释为供应商明确零。补用真实 Codex 和本地 Responses fixture 验证 Router 恢复及飞书独立 home 的持久化、查证和回填路径。
 - 审计保留子响应完整原生键，独立保留 Run 的根 thread/turn，同响应 ID 的不同子 turn 不会合并审计条目。
 
 原生验证可执行 `python3 -B tests/e2e/system_agent_token_usage_native.py <server> <cli> <codex> <scratch>`，只使用隔离 Codex home、合成飞书材料和回环 Responses 服务。上一版 Runner 对照可用 `system_agent_token_usage.py --legacy-runner <旧 Runner>`。

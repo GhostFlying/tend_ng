@@ -41,7 +41,7 @@ def main():
             (work / "runner.json").write_text(json.dumps(config))
         address = f"http://{free_port()}"
         token = "storage-load-fixture"
-        env = {**os.environ, "TEND_TOKEN": token, "TEND_URL": address}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": token, "TEND_URL": address}
 
         def request(path, body=None):
             data = json.dumps(body).encode() if body is not None else None

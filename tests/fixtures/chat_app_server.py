@@ -262,6 +262,7 @@ for line in sys.stdin:
                             for k, v in routing_config.items() if k.startswith("features.") and v == "false"}}
             respond(request, {"config": config})
         case "thread/start":
+            assert params["ephemeral"] is False and params["historyMode"] == "legacy"
             instructions = params["developerInstructions"]
             assert "Preserve the user's original goal, named targets, explicit limits, and stopping point" in instructions
             assert "Do not add operational restrictions the user did not specify." in instructions

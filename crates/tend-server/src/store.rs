@@ -35,7 +35,8 @@ pub(crate) use work::DispatchRequest;
 #[cfg(test)]
 pub(crate) fn remove_agent_usage_schema(db: &Connection) -> Result<()> {
     db.execute_batch(
-        "DROP TABLE IF EXISTS token_agent_backfill;
+        "DROP TABLE IF EXISTS token_feishu_attempt_launch;
+         DROP TABLE IF EXISTS token_agent_backfill;
          DROP TABLE IF EXISTS token_agent_requests;
          DROP TABLE IF EXISTS token_agent_turns;
          DROP TABLE IF EXISTS token_agent_attempts;
@@ -91,7 +92,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 50;
+pub(crate) const SCHEMA_VERSION: i64 = 51;
 
 pub struct Store {
     db: Connection,
@@ -368,6 +369,9 @@ impl Store {
         }
         if version < 50 {
             discussion::progress::migrate(&tx)?;
+        }
+        if version < 51 {
+            agent_metering::migrate_feishu_history(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

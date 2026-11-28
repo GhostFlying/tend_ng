@@ -29,7 +29,7 @@ const CONTEXT_MAX_IDS: usize = 512;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct Config {
+pub(crate) struct Config {
     owner_open_id: String,
     #[serde(default)]
     profile: Option<String>,
@@ -43,28 +43,40 @@ fn default_cli() -> PathBuf {
     "lark-cli".into()
 }
 
-pub fn serve(path: Option<&Path>, db: &Path) -> Result<SyncSender<Request>> {
-    let mut config = path
-        .map(|path| -> Result<Config> {
-            let path = path
-                .canonicalize()
-                .context("resolve Feishu suggestions config")?;
-            let root = path.parent().context("invalid Feishu config path")?;
-            let mut config: Config = serde_json::from_reader(File::open(&path)?)
-                .context("parse Feishu suggestions config")?;
-            ensure!(
-                provider_id(&config.owner_open_id, "ou_"),
-                "Feishu config must pin the user's open ID"
-            );
-            if config.cli.components().count() > 1 {
-                config.cli = root.join(&config.cli).canonicalize()?;
-            }
-            if let Some(agent) = &mut config.agent {
-                agent.resolve(root)?;
-            }
-            Ok(config)
-        })
-        .transpose()?;
+pub fn load(
+    path: Option<&Path>,
+    router_home: &Path,
+    discussion_home: Option<&Path>,
+) -> Result<Option<Config>> {
+    path.map(|path| -> Result<Config> {
+        let path = path
+            .canonicalize()
+            .context("resolve Feishu suggestions config")?;
+        let root = path.parent().context("invalid Feishu config path")?;
+        let mut config: Config = serde_json::from_reader(File::open(&path)?)
+            .context("parse Feishu suggestions config")?;
+        ensure!(
+            provider_id(&config.owner_open_id, "ou_"),
+            "Feishu config must pin the user's open ID"
+        );
+        if config.cli.components().count() > 1 {
+            config.cli = root.join(&config.cli).canonicalize()?;
+        }
+        if let Some(agent) = &mut config.agent {
+            agent.resolve(root, router_home, discussion_home)?;
+        }
+        Ok(config)
+    })
+    .transpose()
+}
+
+impl Config {
+    pub fn private_home(&self) -> Option<&Path> {
+        self.agent.as_ref().map(agent::Config::private_home)
+    }
+}
+
+pub fn serve(mut config: Option<Config>, db: &Path) -> Result<SyncSender<Request>> {
     spawn_retention(db)?;
     let (owner, assessor) = if let Some(config) = &mut config {
         if let Some(assessment) = config.agent.take() {

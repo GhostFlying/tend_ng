@@ -27,10 +27,10 @@ def main():
     args = parser.parse_args()
     late = args.scenario == "late-close"
     child_closes = args.scenario not in {"task-only", "no-candidate"}
-    env = {**os.environ, "TEND_TOKEN": "tend-coordination-fixture"}
 
     with tempfile.TemporaryDirectory(prefix="tend-coordination-") as temporary:
         root = Path(temporary)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "tend-coordination-fixture"}
         source = root / "source"
         subprocess.run(["git", "init", "--quiet", "-b", "main", source], check=True)
         (source / "README.md").write_text("A fixed repository.\n")

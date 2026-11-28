@@ -9,6 +9,8 @@ import time
 import uuid
 
 root = Path(os.environ["HOME"])
+home = Path(os.environ["CODEX_HOME"])
+assert home == root / ".codex-ark"
 assert not os.environ.get("TEND_TOKEN")
 assert sys.argv[1:4] == ["app-server", "--listen", "stdio://"]
 flags = dict(a.split("=", 1) for a in sys.argv[4:] if "=" in a)
@@ -26,7 +28,7 @@ for line in sys.stdin:
     params = request.get("params", {})
     match request["method"]:
         case "initialize":
-            result(request, {})
+            result(request, {"codexHome": str(home)})
         case "initialized":
             pass
         case "config/read":
@@ -36,12 +38,14 @@ for line in sys.stdin:
                                            if k.startswith("features.") and v == "false"
                                        }}})
         case "thread/start":
-            assert params["ephemeral"] and params["dynamicTools"] == []
+            assert params["ephemeral"] is False and params["historyMode"] == "legacy"
+            assert params["dynamicTools"] == []
             if (root / "system-meter-fixture").exists():
                 assert params["experimentalRawEvents"]
             assert params["model"] == "deepseek-v4.1-flash"
             thread = str(uuid.uuid4())
-            result(request, {"thread": {"id": thread}, "approvalPolicy": "never", "runtimeWorkspaceRoots": [],
+            result(request, {"thread": {"id": thread, "ephemeral": False},
+                             "model": "fixture-confirmed-model", "approvalPolicy": "never", "runtimeWorkspaceRoots": [],
                              "activePermissionProfile": {"id": "tend-router-routing"},
                              "sandbox": {"type": "readOnly", "networkAccess": False}})
             stall = root / "stall-next"
@@ -87,7 +91,7 @@ for line in sys.stdin:
                 assert params["threadId"] == thread
                 for _ in range(2):
                     print(json.dumps({"method": "rawResponse/completed", "params": {
-                        "threadId": thread, "turnId": turn, "responseId": "ephemeral-response",
+                        "threadId": thread, "turnId": turn, "responseId": "fixture-feishu-response",
                         "usage": {"totalTokens": 1220, "inputTokens": 1000, "outputTokens": 220},
                     }}), flush=True)
             item = {"type": "agentMessage", "id": turn + "-answer", "phase": "final_answer",

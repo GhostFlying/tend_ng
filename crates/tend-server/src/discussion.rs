@@ -92,6 +92,11 @@ impl Service {
             for path in [".codex", ".ssh", ".git-credentials", ".config", ".netrc"] {
                 protected.push(home.join(path));
             }
+            // A checked-out reference must not expose the personal Codex home
+            // by its real path when ~/.codex is an alias.
+            if let Ok(path) = home.join(".codex").canonicalize() {
+                protected.push(path);
+            }
         }
         let settings = if let Some(path) = path {
             ensure!(
@@ -106,7 +111,7 @@ impl Service {
                 "invalid Discussion Server Host ID"
             );
             data.program = parent.join(data.program).canonicalize()?;
-            data.codex_home = parent.join(data.codex_home).canonicalize()?;
+            data.codex_home = codex_app::validate_home(&parent.join(data.codex_home))?;
             data.cwd = parent.join(data.cwd).canonicalize()?;
             ensure!(
                 data.program.is_file() && data.codex_home.is_dir() && data.cwd.is_dir(),
@@ -180,6 +185,17 @@ impl Service {
 
     pub(crate) fn codex_home(&self) -> Option<PathBuf> {
         self.settings.as_ref().map(|s| s.codex_home.clone())
+    }
+
+    pub(crate) fn protect_feishu_home(&mut self, home: PathBuf) -> Result<()> {
+        ensure!(
+            self.settings
+                .as_ref()
+                .is_none_or(|s| disjoint(&s.cwd, &home)),
+            "Discussion cwd must be separate from the Feishu assessment home"
+        );
+        self.protected.push(home);
+        Ok(())
     }
 
     fn app(&self, settings: &Settings, reply_only: bool) -> Result<Client> {

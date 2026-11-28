@@ -133,9 +133,9 @@ def main():
     parser.add_argument("server", type=lambda value: Path(value).resolve())
     args = parser.parse_args()
     token = "tend-issue-detail-fixture"
-    env = {**os.environ, "TEND_TOKEN": token}
     with tempfile.TemporaryDirectory(prefix="tend-issue-detail-") as directory:
         root = Path(directory)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": token}
         with server(args.server, root, env, web_dir=WEB / "dist") as address:
             seed(root)
 

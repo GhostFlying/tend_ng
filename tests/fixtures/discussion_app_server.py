@@ -144,6 +144,7 @@ for line in sys.stdin:
         case "config/read":
             respond(request, {"config": {"mcp_servers": {}}})
         case "thread/start":
+            assert params["ephemeral"] is False and params["historyMode"] == "legacy"
             roots = scope(params)
             if "Main Chat assistant receiving" in params["developerInstructions"]:
                 assert params["dynamicTools"] == [] and roots == [], params
@@ -183,6 +184,7 @@ for line in sys.stdin:
                 ledger.execute("INSERT INTO resumes VALUES (?,?,1)", (thread, json.dumps(roots)))
             respond(request, thread_result(thread, roots))
         case "thread/fork":
+            assert params["ephemeral"] is False
             parent, through = params["threadId"], params["lastTurnId"]
             roots = scope(params)
             fork = str(uuid.uuid4())

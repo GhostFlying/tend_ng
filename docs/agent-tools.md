@@ -61,6 +61,8 @@ App Server 以 `item/tool/call` 交给执行端，回调携带 `threadId`、`tur
 
 ## Session 接续
 
+所有角色的原生会话都在所属服务或 launch profile 显式配置的独立 Codex home 落盘，包括受限研判与交接。启动或恢复均不使用个人默认 home。 [排障与原件归属](codex-rollouts.md)
+
 **已确认。** 新 session 收到本轮输入和接续所需的工作摘要。摘要从持久的 Chat、Issue、Task 和操作记录读取。Agent 通过工具把会影响后续行动的事实写入 Issue。同一 Task 的兼容且已停妥的原生 thread 优先续用，默认只补本轮输入和相关变化。缺失或已知不兼容时，新 session 带原工作契约、当前输入与近期已持久化原输入和受理回执。线程是执行上下文，不能代替 Issue、Task 或业务回执。
 
 - Router 从原 Chat 输入和相关工作摘要接续，可以查询该输入已提交的派发和回复。

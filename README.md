@@ -20,6 +20,7 @@ Use a local state directory for the Server database and Router working directory
 
 ```sh
 mkdir -p .local/server .local/runner
+export CODEX_HOME="$PWD/.local/server/codex"
 target/release/tend-server --db .local/server/tend.sqlite \
   --router-cwd .local/server --web-dir web/dist
 ```
@@ -49,7 +50,7 @@ Each Agent may set `model`, `reasoning_effort`, `description`, and verified capa
 
 To name the main-session Router, add `--router-name <name>` to the Tend Server startup arguments before `--app-server`. The agreed name for Tend is `--router-name Tend`. The Server records that name on new main-session dispatches after it starts with the flag. If unset, the UI shows only main-session provenance. The setting does not change Router execution, the `router` profile ID, other Chats or earlier dispatches.
 
-Set `CODEX_HOME` in the service environment to use a dedicated default Codex home. To run selected Agents with a different home, name a local launcher in `app_servers` and set `app_server` on those Agents. This Runner configuration fragment selects an Ark home for the coordinator.
+Set an absolute, dedicated `CODEX_HOME` in the Server and default Runner launch environments. Tend does not fall back to the personal `~/.codex`. To run selected Agents with a different home, name a local launcher in `app_servers` and set `app_server` on those Agents. This Runner configuration fragment selects an Ark home for the coordinator.
 
 ```json
 {
@@ -72,10 +73,11 @@ Set `CODEX_HOME` in the service environment to use a dedicated default Codex hom
 }
 ```
 
-The Runner stores the selected launcher with each accepted assignment and uses it to start work, reconcile native turns, and read rollout history. Update the Agent revision when changing its launcher. `args` can override the launcher's default `app-server --listen stdio://` arguments. Keep each home available for as long as its history is needed.
+The Runner stores the selected launcher with each accepted assignment and uses it to start work, reconcile native turns, and read rollout history. Update the Agent revision when changing its launcher. `args` can override the launcher's default `app-server --listen stdio://` arguments. Keep each home available for as long as its history is needed. All Tend-managed roles retain native rollout in their configured homes, including restricted Feishu and handoff turns. See the [native session and troubleshooting contract](docs/codex-rollouts.md).
 
 ```sh
 export TEND_URL=http://127.0.0.1:8832
+export CODEX_HOME="$PWD/.local/runner/codex"
 target/release/tend-runner --config .local/runner/config.json --db .local/runner/tend.sqlite
 ```
 
@@ -176,7 +178,7 @@ Use `next_before` with the same parent when paging through children. These reads
 
 ### Historical maintenance
 
-With the existing `TEND_URL` and `TEND_TOKEN`, start with a narrow backfill and inspect its coverage and audit. Use `--all` explicitly to scan every verified Started Run and Server attempt with retained native evidence. The receipt's `server` section reports status by source and gap. Feishu assessments stay ephemeral and have no rollout to backfill.
+With the existing `TEND_URL` and `TEND_TOKEN`, start with a narrow backfill and inspect its coverage and audit. Use `--all` explicitly to scan every verified Started Run and Server attempt with retained native evidence. The receipt's `server` section reports status by source and gap. New Feishu assessments are read from the original dedicated home recorded on each attempt. Older ephemeral assessments have no native rollout to backfill. Their recorded request evidence is preserved, with missing model attribution left unknown.
 
 ```sh
 tend token-usage backfill --issue '#123' --job usage-123

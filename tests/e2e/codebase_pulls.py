@@ -56,7 +56,7 @@ def exercise(args, root, automatic):
                        "CreatedAt": "2026-11-26T03:00:00Z", "Content": "Predates branch discovery"}]}],
             "Events": [],
         }))
-    env = {**os.environ, "TEND_TOKEN": "codebase-fixture-token", "TEND_URL": f"http://{address}"}
+    env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "codebase-fixture-token", "TEND_URL": f"http://{address}"}
     server_env = {
         **env, "TEND_CODEBASE_FIXTURE_DIR": str(root), "TEND_GITHUB_FIXTURE_DIR": str(root),
         "GH_TOKEN": "fixture-read-token",

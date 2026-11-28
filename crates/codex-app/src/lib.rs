@@ -1,7 +1,9 @@
+mod home;
 mod process;
 pub mod usage;
 
 use anyhow::{Context, Result, ensure};
+pub use home::{prepare_home, rollout_home, validate_home};
 pub use process::ProcessIdentity;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -19,7 +21,16 @@ use std::{
 const DISCUSSION_PROFILE: &str = "tend-discussion";
 const ROUTING_PROFILE: &str = "tend-router-routing";
 const RESPONSE_COMPLETED: &str = "rawResponse/completed";
+
 const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+
+fn verify_persistent_thread(response: &Value) -> Result<()> {
+    ensure!(
+        response["thread"]["ephemeral"] != true,
+        "App Server returned an ephemeral thread"
+    );
+    Ok(())
+}
 const ROUTING_DISABLED_FEATURES: &[&str] = &[
     "shell_tool",
     "unified_exec",
@@ -227,6 +238,16 @@ impl Client {
     }
 
     fn connect_inner(command: &mut Command, limit: Option<Duration>) -> Result<Self> {
+        let home = command
+            .get_envs()
+            .find(|(key, _)| *key == "CODEX_HOME")
+            .and_then(|(_, value)| value)
+            .map(PathBuf::from)
+            .context("App Server requires an explicit CODEX_HOME")?;
+        ensure!(
+            validate_home(&home)? == home,
+            "App Server requires the canonical CODEX_HOME"
+        );
         #[cfg(unix)]
         if limit.is_some() {
             use std::os::unix::process::CommandExt;
@@ -267,7 +288,7 @@ impl Client {
             rollout_fresh: false,
             routing_cwd: None,
         };
-        client.call(
+        let initialized = client.call(
             "initialize",
             json!({
                 "clientInfo": { "name": "tend-ng", "version": env!("CARGO_PKG_VERSION") },
@@ -275,6 +296,12 @@ impl Client {
                     "optOutNotificationMethods": ["rawResponseItem/completed"] }
             }),
         )?;
+        if let Some(reported) = initialized["codexHome"].as_str() {
+            ensure!(
+                Path::new(reported).canonicalize().ok().as_ref() == Some(&home),
+                "App Server did not use its configured CODEX_HOME"
+            );
+        }
         client.write(&json!({"method": "initialized"}))?;
         Ok(client)
     }
@@ -286,21 +313,26 @@ impl Client {
         tools: &[Value],
         model: Option<&str>,
     ) -> Result<String> {
-        self.start_thread_inner(cwd, instructions, tools, model, false)
+        self.start_thread_inner(cwd, instructions, tools, model)
+            .map(|(id, _)| id)
     }
 
-    /// Assess isolated material without saving a second copy in a Codex rollout.
-    pub fn start_ephemeral_analysis(
+    /// Start a new, persisted, tool-free thread in the restricted service.
+    pub fn start_analysis(
         &mut self,
         cwd: &Path,
         instructions: &str,
         model: &str,
-    ) -> Result<String> {
+    ) -> Result<(String, String)> {
         ensure!(
             self.routing_cwd.is_some(),
             "analysis requires a verified restricted App Server"
         );
-        self.start_thread_inner(cwd, instructions, &[], Some(model), true)
+        let (id, selected) = self.start_thread_inner(cwd, instructions, &[], Some(model))?;
+        Ok((
+            id,
+            selected.context("App Server did not confirm the analysis model")?,
+        ))
     }
 
     fn start_thread_inner(
@@ -309,10 +341,9 @@ impl Client {
         instructions: &str,
         tools: &[Value],
         model: Option<&str>,
-        ephemeral: bool,
-    ) -> Result<String> {
+    ) -> Result<(String, Option<String>)> {
         let mut params = json!({
-                "cwd": cwd, "ephemeral": ephemeral, "historyMode": "legacy",
+                "cwd": cwd,
                 "experimentalRawEvents": true,
                 "sandbox": "danger-full-access", "approvalPolicy": "never",
                 "developerInstructions": instructions, "dynamicTools": tools, "model": model
@@ -324,7 +355,7 @@ impl Client {
             );
             routing_thread_scope(&mut params, verified);
         }
-        let response = self.call("thread/start", params)?;
+        let response = self.start_persistent_thread(params)?;
         if self.routing_cwd.is_some() {
             verify_routing_scope(&response)?;
         }
@@ -334,7 +365,19 @@ impl Client {
             .to_owned();
         self.remember_work_rollout(&response["thread"], &id);
         self.rollout_fresh = true;
-        Ok(id)
+        let selected = response["model"]
+            .as_str()
+            .filter(|model| protocol::TokenModel::valid_id(model))
+            .map(str::to_owned);
+        Ok((id, selected))
+    }
+
+    fn start_persistent_thread(&mut self, mut params: Value) -> Result<Value> {
+        params["ephemeral"] = json!(false);
+        params["historyMode"] = json!("legacy");
+        let response = self.call("thread/start", params)?;
+        verify_persistent_thread(&response)?;
+        Ok(response)
     }
 
     fn remember_work_rollout(&mut self, thread: &Value, id: &str) {
@@ -375,11 +418,11 @@ impl Client {
         model: Option<&str>,
     ) -> Result<String> {
         let mut params = json!({
-            "ephemeral": false, "historyMode": "legacy", "experimentalRawEvents": true,
+            "experimentalRawEvents": true,
             "developerInstructions": instructions, "dynamicTools": tools, "model": model,
         });
         scope.apply(&mut params)?;
-        let response = self.call("thread/start", params)?;
+        let response = self.start_persistent_thread(params)?;
         verify_discussion_permissions(&response, scope.roots)?;
         let id = response["thread"]["id"]
             .as_str()
@@ -400,6 +443,7 @@ impl Client {
         scope.apply(&mut params)?;
         match self.call("thread/resume", params) {
             Ok(response) => {
+                verify_persistent_thread(&response)?;
                 verify_discussion_permissions(&response, scope.roots)?;
                 ensure!(
                     response["thread"]["id"] == thread_id,
@@ -448,6 +492,7 @@ impl Client {
             Err(error) if error.downcast_ref::<RpcError>().is_some() => return Ok(None),
             Err(error) => return Err(error),
         };
+        verify_persistent_thread(&response)?;
         verify_discussion_permissions(&response, scope.roots)?;
         let fork = response["thread"]["id"]
             .as_str()
@@ -494,12 +539,13 @@ impl Client {
         }
         match response {
             Ok(response) => {
+                verify_persistent_thread(&response)?;
+                ensure!(
+                    response["thread"]["id"] == thread_id,
+                    "resumed an unexpected Router thread"
+                );
                 if self.routing_cwd.is_some() {
                     verify_routing_scope(&response)?;
-                    ensure!(
-                        response["thread"]["id"] == thread_id,
-                        "resumed an unexpected Router thread"
-                    );
                 }
                 self.remember_work_rollout(&response["thread"], thread_id);
                 Ok(true)
@@ -594,6 +640,7 @@ impl Client {
             }
             Err(error) => return Err(error),
         };
+        verify_persistent_thread(&response)?;
         let status = response["thread"]["status"]["type"].as_str();
         if status == Some("active") {
             return Ok(WorkThreadResume::Active);

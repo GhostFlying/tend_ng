@@ -124,7 +124,7 @@ enabled = true
             "codex_home": str(home), "cwd": str(cwd), "model": MODEL,
             "model_api_keys": {"FIXTURE_API_KEY": "codex/model-key"},
         }))
-        env = {**os.environ, "TEND_TOKEN": "synthetic-native-receiver"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "synthetic-native-receiver"}
         with server(args.server, root, env, discussion_config=config, router_fixture=FIXTURE) as address:
             # Emulate deliveries already persisted by v42, without migrating
             # them into the newly authorized routing path.
@@ -259,8 +259,20 @@ enabled = true
             assert "tend_read_discussion_history" in captured["summary"], captured
             assert captured["receiver"] == [], captured
             assert captured["overlap_receiver"] == [], captured
+            native = query("server.sqlite", """SELECT source,thread,turn FROM token_agent_attempts
+                WHERE source IN ('discussion','discussion_summary','handoff_receiver')""")
+            assert sorted(source for source, _, _ in native) == sorted(
+                ["discussion", "discussion_summary", "handoff_receiver"] * 2), native
+            assert len({thread for source, thread, _ in native if source == "handoff_receiver"}) == 2
+            for source, native_thread, native_turn in native:
+                [rollout] = (home / "sessions").rglob(f"rollout-*-{native_thread}.jsonl")
+                records = [json.loads(line) for line in rollout.read_text().splitlines()]
+                assert records[0]["payload"]["id"] == native_thread
+                assert any(row["type"] == "turn_context" and row["payload"]["turn_id"] == native_turn
+                           for row in records), source
+                assert not list((root / "fixture-codex").rglob(f"*-{native_thread}.jsonl"))
             print(json.dumps(captured, ensure_ascii=False))
-            print("PASS native receiving model has no shell, write, browser, integration, or Tend tools even with enabled features in its home")
+            print("PASS Discussion, summary, and tool-free isolated receiver retain their original native turn IDs in the Discussion home")
 
 
 if __name__ == "__main__":

@@ -3,15 +3,16 @@
 use super::{Source, Store, bind_child, persist};
 use anyhow::Result;
 use codex_app::{
-    ProcessIdentity,
+    ProcessIdentity, rollout_home,
     usage::{ChildRollouts, Rollouts, native_snapshot, rollout_index},
+    validate_home,
 };
 use protocol::{NativeTokenRecord, RequestMeter, StartTokenBackfill, TokenSourceGap};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::{Value, json};
 use std::{
     collections::HashMap,
-    fs::File,
+    fs::{self, File},
     io,
     path::{Path, PathBuf},
     sync::mpsc::{SyncSender, sync_channel},
@@ -47,18 +48,14 @@ pub(in crate::store) fn backfill_status(db: &Connection, job: &str) -> Result<Va
 
 pub(crate) fn spawn_history(
     db: &Path,
-    router_home: Option<PathBuf>,
+    router_home: PathBuf,
     discussion_home: Option<PathBuf>,
 ) -> Result<SyncSender<()>> {
     let mut store = Store::open(db)?;
     let (wake, pending) = sync_channel(1);
     thread::spawn(move || {
         for () in pending {
-            if let Err(error) = drain(
-                &mut store,
-                router_home.as_deref(),
-                discussion_home.as_deref(),
-            ) {
+            if let Err(error) = drain(&mut store, &router_home, discussion_home.as_deref()) {
                 eprintln!("Server model usage history: {error:#}");
             }
         }
@@ -75,6 +72,7 @@ struct Item {
     thread: String,
     turn: Option<String>,
     rollout: Option<PathBuf>,
+    codex_home: Option<PathBuf>,
     process: Option<ProcessIdentity>,
     settled: bool,
 }
@@ -82,9 +80,10 @@ struct Item {
 fn next(db: &Connection) -> Result<Option<Item>> {
     let mut query = db.prepare_cached(
         "SELECT j.request, a.id, a.source, a.thread, a.turn, a.rollout,
-                a.process_pid, a.process_start, i.outcome IS NOT NULL
+                a.process_pid, a.process_start, i.outcome IS NOT NULL, f.codex_home
          FROM token_agent_backfill b JOIN token_backfill_jobs j ON b.job=j.id
          JOIN token_agent_attempts a ON a.id=b.attempt
+         LEFT JOIN token_feishu_attempt_launch f ON f.attempt=a.id
          LEFT JOIN router_attempts ra ON ra.id=a.id LEFT JOIN router_inputs i ON ra.seq=i.seq
          WHERE b.state='pending' ORDER BY b.job,b.attempt LIMIT 1",
     )?;
@@ -100,11 +99,12 @@ fn next(db: &Connection) -> Result<Option<Item>> {
                 r.get::<_, Option<u32>>(6)?,
                 r.get::<_, Option<String>>(7)?,
                 r.get(8)?,
+                r.get::<_, Option<String>>(9)?,
             ))
         })
         .optional()?;
     row.map(
-        |(job, attempt, source, thread, turn, rollout, pid, started, settled)| {
+        |(job, attempt, source, thread, turn, rollout, pid, started, settled, codex_home)| {
             Ok(Item {
                 job: serde_json::from_str(&job)?,
                 attempt,
@@ -112,6 +112,7 @@ fn next(db: &Connection) -> Result<Option<Item>> {
                 thread,
                 turn,
                 rollout: rollout.map(PathBuf::from),
+                codex_home: codex_home.map(PathBuf::from),
                 process: pid
                     .zip(started)
                     .map(|(pid, started_at)| ProcessIdentity { pid, started_at }),
@@ -124,20 +125,41 @@ fn next(db: &Connection) -> Result<Option<Item>> {
 
 type Indexes = HashMap<PathBuf, Result<Rollouts, TokenSourceGap>>;
 
-fn open_rollout(
-    item: &Item,
-    home: Option<&Path>,
-    indexes: &mut Indexes,
-) -> Result<File, TokenSourceGap> {
+fn io_gap(error: io::Error) -> TokenSourceGap {
+    if error.kind() == io::ErrorKind::NotFound {
+        TokenSourceGap::SourceMissing
+    } else {
+        TokenSourceGap::SourceUnreadable
+    }
+}
+
+fn original_home<'a>(
+    item: &'a Item,
+    configured: Option<&'a Path>,
+) -> Result<&'a Path, TokenSourceGap> {
+    use TokenSourceGap::*;
+    // The saved path names the original home, even after a service changes
+    // its config or Codex archives the file. Never rescan a different home.
+    let home = match &item.rollout {
+        Some(path) => rollout_home(path).ok_or(BindingMissing)?,
+        None => configured.ok_or(BindingMissing)?,
+    };
+    let info = fs::symlink_metadata(home).map_err(io_gap)?;
+    if !info.is_dir() || validate_home(home).ok().as_deref() != Some(home) {
+        return Err(SourceUnreadable);
+    }
+    Ok(home)
+}
+
+fn open_rollout(item: &Item, home: &Path, indexes: &mut Indexes) -> Result<File, TokenSourceGap> {
     use TokenSourceGap::*;
     let open = |path: &Path| {
-        File::open(path).map_err(|error| {
-            if error.kind() == io::ErrorKind::NotFound {
-                SourceMissing
-            } else {
-                SourceUnreadable
-            }
-        })
+        if !fs::symlink_metadata(path).map_err(io_gap)?.is_file()
+            || path.canonicalize().map_err(io_gap)? != path
+        {
+            return Err(SourceUnreadable);
+        }
+        File::open(path).map_err(io_gap)
     };
     if let Some(path) = &item.rollout {
         match open(path) {
@@ -145,7 +167,6 @@ fn open_rollout(
             result => return result,
         }
     }
-    let home = home.ok_or(BindingMissing)?;
     let index = indexes
         .entry(home.to_owned())
         .or_insert_with(|| rollout_index(home))
@@ -158,7 +179,7 @@ fn open_rollout(
     }
 }
 
-fn drain(store: &mut Store, router: Option<&Path>, discussion: Option<&Path>) -> Result<()> {
+pub(super) fn drain(store: &mut Store, router: &Path, discussion: Option<&Path>) -> Result<()> {
     let mut indexes = Indexes::new();
     let mut children = HashMap::<PathBuf, ChildRollouts>::new();
     let mut previous = String::new();
@@ -172,14 +193,22 @@ fn drain(store: &mut Store, router: Option<&Path>, discussion: Option<&Path>) ->
             finish(&store.db, &item, "gap", Some("turn_identity_missing"), 0)?;
             continue;
         };
-        if item.source == Source::Feishu.key() {
+        if item.source == Source::Feishu.key() && item.codex_home.is_none() {
             finish(&store.db, &item, "gap", Some("ephemeral_no_history"), 0)?;
             continue;
         }
-        let home = if item.source == Source::Router.key() {
-            router
-        } else {
-            discussion
+        let configured_home = match item.source.as_str() {
+            source if source == Source::Feishu.key() => item.codex_home.as_deref(),
+            source if source == Source::Router.key() => Some(router),
+            _ => discussion,
+        };
+        let home = match original_home(&item, configured_home) {
+            Ok(home) => home,
+            Err(gap) => {
+                let reason = serde_json::to_value(gap)?;
+                finish(&store.db, &item, "gap", reason.as_str(), 0)?;
+                continue;
+            }
         };
         let active = !item.settled
             && item
@@ -188,19 +217,15 @@ fn drain(store: &mut Store, router: Option<&Path>, discussion: Option<&Path>) ->
                 .is_none_or(|process| !process.is_stopped().unwrap_or(false));
         let root = open_rollout(&item, home, &mut indexes)
             .and_then(|file| native_snapshot(file, &item.thread, turn, active));
-        let (mut records, child_gap) = if let Some(home) = home {
-            match indexes
+        let (mut records, child_gap) = match indexes
+            .entry(home.to_owned())
+            .or_insert_with(|| rollout_index(home))
+        {
+            Ok(rollouts) => children
                 .entry(home.to_owned())
-                .or_insert_with(|| rollout_index(home))
-            {
-                Ok(rollouts) => children
-                    .entry(home.to_owned())
-                    .or_insert_with(|| ChildRollouts::from_rollouts(rollouts))
-                    .snapshot(&item.thread, turn, active),
-                Err(reason) => (Vec::new(), Some(*reason)),
-            }
-        } else {
-            (Vec::new(), Some(TokenSourceGap::BindingMissing))
+                .or_insert_with(|| ChildRollouts::from_rollouts(rollouts))
+                .snapshot(&item.thread, turn, active),
+            Err(reason) => (Vec::new(), Some(*reason)),
         };
         let gap = match root {
             Ok(root) => {

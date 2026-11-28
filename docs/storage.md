@@ -1,6 +1,6 @@
 # 数据库存储与访问边界
 
-**已确认。** Server 数据库直接保存 Chat 与 Issue 讨论的完整消息，包括 Agent 留言，以及 Issue 当前状态。交付文件的完整原件同步到 Server 的文件存储。Codex rollout 等原生执行原件留在执行实例，Router 原件从 Server 本机读取，工作 Run 原件由实际执行的 Runner 或同 Host 已接替的后继从原 Codex home 读取。Issue 及其关联记录是工作事实来源。一次业务变化与可查的原操作结果和必需待投递记录在所属实例的同一短事务提交。
+**已确认。** Server 数据库直接保存 Chat 与 Issue 讨论的完整消息，包括 Agent 留言，以及 Issue 当前状态。交付文件的完整原件同步到 Server 的文件存储。Codex rollout 等原生执行原件留在各自配置的独立 Codex home。Router、讨论、转交和飞书研判原件留在 Server 本机对应 home，工作 Run 原件由实际执行的 Runner 或同 Host 已接替的后继从原 Codex home 读取。Issue 及其关联记录是工作事实来源。一次业务变化与可查的原操作结果和必需待投递记录在所属实例的同一短事务提交。
 
 数据归属遵循任务、工作区和回执契约。具体表结构随各模块实现确定。
 
@@ -82,6 +82,8 @@ Server 迁移 34 扩展 Issue 时间线。原 `seq`、消息 ID、引用、索�
 ## Issue 树 Token 用量
 
 Server 迁移 38 为已接受的原生 Run Start 初始化覆盖分母，不回填历史 Token。Runner 将原生逐请求观察和独立同步确认持久保留。Server 校验原 Runner、assignment、Task、Run 和原生回合后，以 SQLite 短事务接收原始键及冲突证据，按受影响的 Run、直属 Issue 与祖先更新持久小计。未核验归属的用量不进入小计。用户读取只访问所选 Issue 的闭包和已保存的直属/子树小计，不读原生原件或逐请求表。具体语义、性能证据及混代边界见 [Issue 树 Token 用量](plans/issue-token-usage.md)。迁移 41 加入按需回溯作业、来源冲突审计和影子投影，不遍历请求或原件；历史回传与显式重建见 [历史 Token 用量回溯与重建](plans/token-usage-backfill.md)。 迁移 49 只在升级时从已保存的请求补齐所选型号的小计，不重扫原件或改计量账本。全局与 Issue API 延用持久汇总和离线价格快照。
+
+迁移 51 只为模型 attempt 增加新研判的原 Codex home 与本次所选模型，不迁移原件或推断旧型号。
 
 ## 飞书建议
 

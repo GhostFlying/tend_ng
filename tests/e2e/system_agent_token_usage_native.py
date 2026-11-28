@@ -1,4 +1,4 @@
-"""Exercise real Codex App Server through Tend's resumed Router and ephemeral Feishu entry points."""
+"""Verify durable Router and Feishu identities against real Codex and a loopback model."""
 import argparse
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -13,9 +13,11 @@ import threading
 import time
 
 from chat import server, wait_for
+from discussion_sandbox import AppServer
 from issue_chat import TESTS, free_port
 
 MODEL = "gpt-5.4"
+FEISHU_MODEL = "gpt-5.3-codex"
 ASSESSED = "isolated assessment result"
 PROMPTS = ("Save a synthetic note.", "Repeat the synthetic note.")
 PROVIDER_USAGE = {"input_tokens": 31, "output_tokens": 9, "total_tokens": 40}
@@ -37,6 +39,7 @@ def responses():
                 evidence = next(json.loads(part) for part in prompts if part.startswith('{"id":'))
                 anchor = evidence["anchor"]["id"]
                 assert not request.get("tools"), "assessment exposed runtime tools"
+                assert request["model"] == FEISHU_MODEL, "settings did not select the intended Feishu model"
                 text = json.dumps({"headline": ASSESSED, "overview": "synthetic local provider response",
                                    "open_questions": [], "evidence_ids": [anchor], "disposition": "unclear"})
                 source = "feishu"
@@ -50,7 +53,7 @@ def responses():
             calls.append((source, key))
             item = {"id": f"msg-{key}", "type": "message", "role": "assistant", "status": "completed",
                     "phase": "final_answer", "content": [{"type": "output_text", "text": text, "annotations": []}]}
-            response = {"id": key, "model": MODEL, "output": [item], "usage": PROVIDER_USAGE}
+            response = {"id": key, "model": request["model"], "output": [item], "usage": PROVIDER_USAGE}
             events = [
                 {"type": "response.created", "response": {"id": key}},
                 {"type": "response.output_item.added", "output_index": 0, "item": item},
@@ -101,14 +104,15 @@ env_key = "ARK_API_KEY"
     feishu = root / "feishu.json"
     feishu.write_text(json.dumps({
         "owner_open_id": "ou_fixture_owner", "profile": "fixture-user", "cli": str(lark),
-        "agent": {"id": "LocalRealAppServer", "program": str(args.codex), "model": MODEL,
+        "agent": {"id": "LocalRealAppServer", "program": str(args.codex), "model": FEISHU_MODEL,
                   "home": str(assessor_home), "cwd": str(assessor_cwd), "timeout_seconds": 15},
     }))
     now = int(time.time())
     scenario = root / "feishu-scenario.json"
     scenario.write_text(json.dumps({"mode": "empty", "at": now}))
     addr = free_port()
-    env = {**os.environ, "CODEX_HOME": str(router_home), "ARK_API_KEY": "local-fixture-key",
+    env = {"PATH": os.environ["PATH"], "HOME": str(root / "os-home"),
+           "CODEX_HOME": str(router_home), "ARK_API_KEY": "local-fixture-key",
            "TEND_TOKEN": "local-native-metering", "TEND_URL": f"http://{addr}",
            "NO_PROXY": "127.0.0.1,localhost"}
 
@@ -135,7 +139,33 @@ env_key = "ARK_API_KEY"
         assert usage["total_tokens"] == {"tokens": str(requests * 40), "reported_requests": requests}
         for field in ("cached_input_tokens", "cache_write_input_tokens", "reasoning_output_tokens"):
             assert usage[field] == {"tokens": None, "reported_requests": 0}, usage[field]
-        assert usage["models"][0]["model"] is None and usage["estimate"]["usd"] is None
+        if source == "feishu":
+            assert len(usage["models"]) == 1 and usage["models"][0]["model"] == FEISHU_MODEL, usage
+
+    def confirm_rollout(home, thread, turn):
+        [path] = home.joinpath("sessions").rglob(f"rollout-*-{thread}.jsonl")
+        records = [json.loads(line) for line in path.read_text().splitlines()]
+        assert records[0]["type"] == "session_meta" and records[0]["payload"]["id"] == thread
+        assert any(r["type"] == "turn_context" and r["payload"]["turn_id"] == turn for r in records)
+        return records
+
+    def confirm_reopened(home, attempts):
+        with subprocess.Popen([args.codex, "app-server", "--listen", "stdio://"], cwd=assessor_cwd,
+                              env={**env, "HOME": str(home), "CODEX_HOME": str(home)}, text=True,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as process:
+            app = AppServer(process)
+            try:
+                result = app.call("initialize", {"clientInfo": {"name": "rollout-check", "version": "1"},
+                                                "capabilities": {"experimentalApi": True}})
+                assert Path(result["codexHome"]) == home
+                app.call("initialized", {}, notify=True)
+                for thread, turn in attempts:
+                    page = app.call("thread/turns/list", {"threadId": thread, "limit": 16, "itemsView": "full"})
+                    assert any(row["id"] == turn and row["status"] == "completed" for row in page["data"])
+            finally:
+                process.stdin.close()
+                process.wait(timeout=10)
+                app.worker.join(timeout=10)
 
     options = dict(listen=addr, feishu_config=feishu, router_launcher=args.codex, router_model=MODEL)
     with server(args.server, root, env, **options):
@@ -148,16 +178,30 @@ env_key = "ARK_API_KEY"
         scenario.write_text(json.dumps({"mode": "recover", "at": now}))
         cli("feishu-suggestions", "sync")
         wait_for(lambda: cli("feishu-suggestions", "list")["suggestions"],
-                 lambda rows: len(rows) == 4 and all(r["evidence"].get("assessment") for r in rows))
+                 lambda rows: len(rows) == 4 and all(r["evidence"].get("assessment") for r in rows), timeout=45)
         assert_usage("feishu", 4)
-        assert not list(assessor_home.rglob("rollout-*.jsonl")), "private ephemeral rollout was retained"
-        [attempts] = sql("SELECT count(*),count(rollout) FROM token_agent_attempts WHERE source='feishu'")
-        assert attempts == (4, 0)
+        feishu_home = assessor_home / ".codex-ark"
+        bindings = sql("""SELECT thread,turn,codex_home,selected_model FROM token_agent_attempts a
+            JOIN token_feishu_attempt_launch f ON f.attempt=a.id WHERE source='feishu'""")
+        assert len(bindings) == len({thread for thread, *_ in bindings}) == 4
+        for thread, turn, home, model in bindings:
+            assert (home, model) == (str(feishu_home), FEISHU_MODEL)
+            records = confirm_rollout(feishu_home, thread, turn)
+            assert any(r["type"] == "turn_context" and r["payload"]["model"] == FEISHU_MODEL
+                       for r in records)
+            assert ASSESSED in json.dumps(records)
+            assert not list(router_home.rglob(f"*-{thread}.jsonl"))
         meters = sql("""SELECT response,meter FROM token_agent_requests q JOIN token_agent_turns t
             USING(thread,turn) WHERE t.source='feishu'""")
         assert {key for key, _ in meters} == {key for source, key in calls if source == "feishu"}
         assert all(ASSESSED not in raw and json.loads(raw)["provider_counts"] for _, raw in meters)
 
+    confirm_reopened(feishu_home, [(thread, turn) for thread, turn, *_ in bindings])
+    config = json.loads(feishu.read_text())
+    replacement = root / "new-assessor-home"
+    replacement.mkdir()
+    config["agent"]["home"] = str(replacement)
+    feishu.write_text(json.dumps(config))
     with server(args.server, root, env, **options):
         send(PROMPTS[1])
         assert_usage("router", 2)
@@ -165,17 +209,23 @@ env_key = "ARK_API_KEY"
             WHERE source='router'""") == [(1, 2)]
         copies = sql("""SELECT meter FROM token_agent_requests q JOIN token_agent_turns t
             USING(thread,turn) WHERE t.source='router'""")
-        assert sorted(json.loads(raw).get("provider_counts", False) for raw, in copies) == [False, True]
+        assert len(copies) == 2 and any(json.loads(raw).get("provider_counts", False) for raw, in copies)
+        router_attempts = sql("SELECT thread,turn FROM token_agent_turns WHERE source='router'")
+        for thread, turn in router_attempts:
+            confirm_rollout(router_home, thread, turn)
         assert_usage("feishu", 4)
         job = "native-optional-zeros"
         cli("token-usage", "backfill", "--all", "--job", job)
         receipt = wait_for(lambda: cli("token-usage", "status", job),
                            lambda status: status["state"].startswith("finished"))
-        assert any(r["source"] == "feishu" and r["detail"] == "ephemeral_no_history"
-                   for r in receipt["server"])
+        assert [r for r in receipt["server"] if r["source"] == "feishu"] == [{
+            "source": "feishu", "state": "scanned", "detail": None, "attempts": 4, "native_keys": 4}], receipt
+        assert not list(replacement.rglob("rollout-*.jsonl"))
         assert_usage("router", 2)
         assert_usage("feishu", 4)
-    print("PASS actual Codex Router fresh/resumed and Feishu ephemeral lookup, exact usage, optional unknowns and no private rollout")
+    confirm_reopened(router_home, router_attempts)
+    assert not (root / "os-home" / ".codex").exists()
+    print("PASS real Router fresh/resumed and four Feishu threads in independent homes, original turn lookup, model, exact usage and backfill")
 
 
 def main():

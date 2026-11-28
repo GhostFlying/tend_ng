@@ -32,7 +32,7 @@ def main():
         ]
         (root / "runner.json").write_text(json.dumps(options))
         (root / "delegate-now").touch()
-        env = {**os.environ, "TEND_TOKEN": "review-fixture", "TEND_URL": f"http://{address}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "review-fixture", "TEND_URL": f"http://{address}"}
 
         def cli(*words):
             return json.loads(subprocess.check_output([cli_bin, *words], env=env, timeout=5))

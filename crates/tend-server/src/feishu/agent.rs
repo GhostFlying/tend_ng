@@ -21,6 +21,8 @@ const INSTRUCTIONS: &str = "You are Tend's isolated Feishu assessor, not Main Ch
 pub struct Config {
     pub id: String,
     home: PathBuf,
+    #[serde(skip)]
+    codex_home: PathBuf,
     cwd: PathBuf,
     #[serde(default = "default_program")]
     program: PathBuf,
@@ -47,7 +49,16 @@ fn default_timeout() -> u64 {
 }
 
 impl Config {
-    pub fn resolve(&mut self, root: &Path) -> Result<()> {
+    pub fn private_home(&self) -> &Path {
+        &self.home
+    }
+
+    pub fn resolve(
+        &mut self,
+        root: &Path,
+        router_home: &Path,
+        discussion_home: Option<&Path>,
+    ) -> Result<()> {
         ensure!(
             protocol::valid_id(&self.id)
                 && !self.model.trim().is_empty()
@@ -75,6 +86,24 @@ impl Config {
                 "Feishu assessment requires a separate home from the Server"
             );
         }
+        for other in std::iter::once(router_home).chain(discussion_home) {
+            ensure!(
+                [&self.home, &self.cwd]
+                    .into_iter()
+                    .all(|path| !path.starts_with(other) && !other.starts_with(path)),
+                "Feishu assessment requires a separate home and cwd from Router and Discussion"
+            );
+        }
+        let expected = self.home.join(".codex-ark");
+        // Keep the path used by the existing Ark launcher. Reject an alias
+        // that would move the retained private material outside this home.
+        if fs::symlink_metadata(&expected).is_ok() {
+            ensure!(
+                expected.canonicalize()? == expected,
+                "Feishu Codex home must be local to its configured HOME"
+            );
+        }
+        self.codex_home = codex_app::prepare_home(&expected)?;
         Ok(())
     }
 }
@@ -114,7 +143,7 @@ fn assess(
         .current_dir(&config.cwd)
         .env_clear()
         .env("HOME", &config.home)
-        .env("CODEX_HOME", config.home.join(".codex-ark"))
+        .env("CODEX_HOME", &config.codex_home)
         .stderr(Stdio::null());
     // Ark's provider authentication is separate from Tend and the Feishu CLI.
     for var in [
@@ -134,16 +163,20 @@ fn assess(
         &config.cwd,
         Duration::from_secs(config.timeout_seconds),
     )?;
-    let thread = client.start_ephemeral_analysis(&config.cwd, INSTRUCTIONS, &config.model)?;
+    let (thread, selected_model) =
+        client.start_analysis(&config.cwd, INSTRUCTIONS, &config.model)?;
     let context = serde_json::to_string(job)?;
     let attempt = protocol::new_id();
-    let metering = client
-        .process_identity()
-        .and_then(|process| store.start_feishu_metering(&attempt, &thread, &process));
-    if let Err(error) = &metering {
-        eprintln!("Register Feishu model attempt: {error:#}");
-    }
-    let turn = client.run_turn(
+    store
+        .start_feishu_metering(
+            &attempt,
+            &thread,
+            &client.process_identity()?,
+            &config.codex_home,
+            &selected_model,
+        )
+        .context("register Feishu attempt before requesting a model turn")?;
+    let turn = client.run_metered_turn(
         TurnInput {
             thread_id: &thread,
             client_id: &attempt,
@@ -154,7 +187,7 @@ fn assess(
         },
         &mut AnalysisTurn {
             store,
-            attempt: metering.ok().map(|_| attempt.as_str()),
+            attempt: &attempt,
         },
     )?;
     ensure!(
@@ -213,24 +246,20 @@ fn validate(job: &FeishuSuggestionEvidence, result: &FeishuAssessment) -> Result
 
 struct AnalysisTurn<'a> {
     store: &'a Store,
-    attempt: Option<&'a str>,
+    attempt: &'a str,
 }
 
 impl TurnHandler for AnalysisTurn<'_> {
     fn started(&mut self, turn: &str) -> Result<()> {
-        if let Some(attempt) = self.attempt
-            && let Err(error) = self.store.bind_feishu_metering(attempt, turn)
-        {
+        if let Err(error) = self.store.bind_feishu_metering(self.attempt, turn) {
             eprintln!("Bind Feishu model turn: {error:#}");
         }
         Ok(())
     }
 
     fn request_usage(&mut self, thread: &str, turn: &str, response: codex_app::usage::Response) {
-        if let Some(attempt) = self.attempt {
-            self.store
-                .record_agent_response(attempt, thread, turn, response);
-        }
+        self.store
+            .record_agent_response(self.attempt, thread, turn, response);
     }
     fn tool(&mut self, _: ToolCall) -> Result<ToolOutput> {
         Ok(ToolOutput {

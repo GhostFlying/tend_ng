@@ -150,9 +150,11 @@ def run(args, root):
             scenario.replace(root / "feishu-scenario.json")
             cli("feishu-suggestions", "sync")
             wait_for(lambda: requests("feishu"), lambda n: n == 4)
-            assert sources()["feishu"]["usage"]["models"][0]["model"] is None
+            models = sources()["feishu"]["usage"]["models"]
+            assert models[0]["model"] == "fixture-confirmed-model" and models[0]["selected_model_requests"] == 4
             assert sources()["feishu"]["usage"]["estimate"]["usd"] is None
-            assert not list(assessor_home.rglob("rollout-*.jsonl"))
+            assert sql("SELECT DISTINCT selected_model,codex_home FROM token_feishu_attempt_launch") == [
+                ("fixture-confirmed-model", str(assessor_home / ".codex-ark"))]
 
             # A completed native turn whose startup reply was dropped is
             # recoverable, but its queued meter must not be guessed live.
@@ -161,12 +163,38 @@ def run(args, root):
             assert requests("router") == before_recovery
             initial = overview()
 
-        with server(args.server, root, env, **options):
+        replacement = {**env, "CODEX_HOME": str(root / "replacement-router-home")}
+        with server(args.server, root, replacement, **options):
             assert overview() == initial
+            # The existing attempts retain their old absolute paths after the
+            # service is reconfigured. Even a readable bound file must obey
+            # the original home's layout before any response can enter usage.
+            sessions = router_home / "sessions"
+            moved = root / "moved-router-sessions"
+            sessions.rename(moved)
+            sessions.symlink_to(moved, target_is_directory=True)
+            blocked = job("system-history-linked-root")
+            [router] = [row for row in blocked["server"] if row["source"] == "router"]
+            assert (router["state"], router["detail"], router["native_keys"]) == (
+                "gap", "source_unreadable", 0), router
+            assert requests("router") == before_recovery
+            sessions.unlink()
+            moved.rename(sessions)
+
+            archived = router_home / "archived_sessions"
+            archived.symlink_to(sessions, target_is_directory=True)
+            blocked = job("system-history-linked-sibling")
+            [router] = [row for row in blocked["server"] if row["source"] == "router"]
+            assert (router["state"], router["detail"], router["native_keys"]) == (
+                "gap", "source_unreadable", 0), router
+            assert requests("router") == before_recovery
+            archived.unlink()
+
             receipt = job("system-history-first")
             rows = receipt["server"]
             assert any(r["source"] == "router" and r["state"] == "scanned" for r in rows), rows
-            assert any(r["source"] == "feishu" and r["detail"] == "ephemeral_no_history" for r in rows), rows
+            assert any(r["source"] == "feishu" and r["detail"] == "source_missing"
+                       and r["attempts"] == 4 for r in rows), rows
             assert requests("router") == before_recovery + 1
             assert sources()["discussion"]["responses_without_usage"] == 0
             assert sources()["discussion"]["usage"]["cache_write_input_tokens"] == {
@@ -192,9 +220,15 @@ def run(args, root):
             assert sol["selected_model_requests"] > 0 and sol["response_model_requests"] > 0
             cli("token-usage", "rebuild", "--all")
             assert overview() == merged
+            archived.mkdir()
+            for path in sessions.glob("rollout-*.jsonl"):
+                path.rename(archived / path.name)
             for job_id in ("system-history-first", "system-history-repeat"):
-                job(job_id)
+                repeated = job(job_id)
+                assert any(row["source"] == "router" and row["state"] == "scanned"
+                           and row["native_keys"] > 0 for row in repeated["server"]), repeated
                 assert overview() == merged
+            print("PASS bound Router history rejects linked session roots, recovers from the original home after config drift and archive, and never double counts")
     if args.legacy_runner:
         # Reuse only the local database and retained evidence of this isolated
         # fixture, with the actual pre-feature Runner attached to the new Server.

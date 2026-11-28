@@ -198,9 +198,9 @@ def main():
         parser.add_argument(f"--{executable}", type=lambda value: Path(value).resolve(),
                             required=executable.endswith("-server"))
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "issue-short-number-fixture"}
     with tempfile.TemporaryDirectory(prefix="tend-issue-short-numbers-") as directory:
         root = Path(directory)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "issue-short-number-fixture"}
         for version, legacy_server in [(22, args.v22_server), (23, args.v23_server)]:
             check_upgrade(root / f"v{version}", legacy_server, version, args, env)
 

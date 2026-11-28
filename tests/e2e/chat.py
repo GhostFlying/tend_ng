@@ -126,8 +126,8 @@ def lose_first_response(upstream, drop_when=lambda _reply: True, *, after_header
             thread.join()
 
 
-def wait_for(read, predicate):
-    deadline = time.monotonic() + 12
+def wait_for(read, predicate, *, timeout=12):
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         result = read()
         if predicate(result):
@@ -151,10 +151,9 @@ def main():
     parser.add_argument("server", type=lambda value: Path(value).resolve())
     parser.add_argument("cli", type=lambda value: Path(value).resolve())
     args = parser.parse_args()
-
-    env = {**os.environ, "TEND_TOKEN": "tend-chat-e2e"}
     with tempfile.TemporaryDirectory(prefix="tend-chat-") as temp:
         root = Path(temp)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "tend-chat-e2e"}
 
         def cli(address, *words, accepts=True, namespace="chat"):
             result = subprocess.run(

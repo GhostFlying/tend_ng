@@ -45,7 +45,7 @@ def main():
             "model_api_keys": {"FIXTURE_API_KEY": "app-home/synthetic-key"},
         }))
         token = "tend-discussion-progress-fixture"
-        env = {**os.environ, "TEND_TOKEN": token}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": token}
         result_file = root / "browser-result.json"
         options = dict(discussion_config=config, web_dir=WEB / "dist")
         with server(args.server, root, env, **options) as address:

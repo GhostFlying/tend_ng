@@ -31,6 +31,7 @@ pub struct Runtime {
     pub artifacts: crate::artifacts::Transfer,
     pub program: OsString,
     pub args: Vec<OsString>,
+    pub codex_home: Option<PathBuf>,
 }
 
 pub fn serve(mut store: Store, db: PathBuf, config: Arc<Config>, runtime: Runtime) {
@@ -121,9 +122,6 @@ pub(crate) fn client(
         Some(app) => {
             let mut command = Command::new(&app.program);
             command.args(&app.args);
-            if let Some(home) = &app.codex_home {
-                command.env("CODEX_HOME", home);
-            }
             command
         }
         None => {
@@ -132,8 +130,22 @@ pub(crate) fn client(
             command
         }
     };
-    command.current_dir(cwd).env_remove(TOKEN_ENV);
+    let path = configured_home(
+        runtime,
+        app_server.and_then(|app| app.codex_home.as_deref()),
+    )?;
+    let home = codex_app::validate_home(path).context("open original Runner Codex home")?;
+    command
+        .current_dir(cwd)
+        .env("CODEX_HOME", home)
+        .env_remove(TOKEN_ENV);
     Client::connect(&mut command)
+}
+
+fn configured_home<'a>(runtime: &'a Runtime, configured: Option<&'a Path>) -> Result<&'a Path> {
+    configured
+        .or(runtime.codex_home.as_deref())
+        .context("set Runner CODEX_HOME or configure a dedicated app_servers.codex_home")
 }
 
 fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
@@ -194,13 +206,10 @@ fn frozen_launch(
         .to_str()
         .context("App Server path is not UTF-8")?
         .to_owned();
-    let home = launch
-        .codex_home
-        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".codex")))
-        .context("App Server has no Codex home")?;
-    let home = cwd.join(home);
-    launch.codex_home = Some(home.canonicalize().unwrap_or(home));
+    launch.codex_home = Some(codex_app::prepare_home(configured_home(
+        runtime,
+        launch.codex_home.as_deref(),
+    )?)?);
     Ok(launch)
 }
 
@@ -235,9 +244,7 @@ fn native_context(
         .as_ref()
         .and_then(|path| std::fs::metadata(path).ok())
         .map(|metadata| (metadata.len(), metadata.modified().ok()));
-    let home = home
-        .or_else(|| std::env::var_os("CODEX_HOME").map(PathBuf::from))
-        .or_else(|| std::env::var_os("HOME").map(|path| PathBuf::from(path).join(".codex")));
+    let home = home.or_else(|| runtime.codex_home.clone());
     let home_config = home
         .as_ref()
         .and_then(|home| std::fs::metadata(home.join("config.toml")).ok())

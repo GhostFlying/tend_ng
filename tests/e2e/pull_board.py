@@ -33,7 +33,7 @@ def main():
         runner_config["agents"][0]["reasoning_effort"] = "low"
         (root / "runner.json").write_text(json.dumps(runner_config))
         (root / "delegate-now").touch()
-        env = {**os.environ, "TEND_TOKEN": "pull-board-fixture", "TEND_URL": f"http://{address}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "pull-board-fixture", "TEND_URL": f"http://{address}"}
 
         def cli(*words, error=None):
             result = subprocess.run([args.cli, *words], env=env, text=True,

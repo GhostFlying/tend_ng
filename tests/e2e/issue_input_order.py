@@ -144,9 +144,9 @@ def main():
     parser.add_argument("--expect-current-gap", action="store_true",
                         help="Reproduce the pre-change behavior instead of asserting the target order.")
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "isolated-input-order-fixture"}
     with tempfile.TemporaryDirectory(prefix="tend-input-order-") as directory:
         root = Path(directory)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "isolated-input-order-fixture"}
         with server(args.server, root, env) as address:
             after_c, before, after_e3, after_stop = exercise(root, address, env["TEND_TOKEN"], args.expect_current_gap)
 

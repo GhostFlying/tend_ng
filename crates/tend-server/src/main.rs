@@ -139,6 +139,9 @@ fn main() -> Result<()> {
     let cwd = cwd
         .canonicalize()
         .context("resolve Router working directory")?;
+    let router_home = codex_app::prepare_home(Path::new(
+        &env::var_os("CODEX_HOME").context("set Router CODEX_HOME to a dedicated path")?,
+    ))?;
     let token = env::var(TOKEN_ENV).context("set TEND_TOKEN before starting Server")?;
     ensure!(!token.is_empty(), "TEND_TOKEN is empty");
     let auth = format!("Bearer {token}");
@@ -153,21 +156,26 @@ fn main() -> Result<()> {
     let inspections = inspect::serve(Store::open(&db)?, auth.clone());
     let synchronization = runner_api::serve(&db, codebase_cli.clone())?;
     let pull_links = serve_pull_links(&db, codebase_cli.clone())?;
-    let discussion = std::sync::Arc::new(discussion::Service::new(
+    let mut discussion = discussion::Service::new(
         discussion_config.as_deref(),
         &db,
         github_cli.clone(),
         auth.clone(),
-    )?);
-    let router_home = std::env::var_os("CODEX_HOME")
-        .map(std::path::PathBuf::from)
-        .or_else(|| {
-            std::env::var_os("HOME").map(|home| std::path::PathBuf::from(home).join(".codex"))
-        });
-    let history = store::agent_metering::spawn_history(&db, router_home, discussion.codex_home())?;
+    )?;
+    let discussion_home = discussion.codex_home();
+    let feishu = feishu::load(
+        feishu_config.as_deref(),
+        &router_home,
+        discussion_home.as_deref(),
+    )?;
+    if let Some(home) = feishu.as_ref().and_then(feishu::Config::private_home) {
+        discussion.protect_feishu_home(home.to_owned())?;
+    }
+    let feishu_api = feishu::serve(feishu, &db)?;
+    let discussion = std::sync::Arc::new(discussion);
+    let history = store::agent_metering::spawn_history(&db, router_home.clone(), discussion_home)?;
     let token_usage_maintenance = token_usage_api::serve(&db, history)?;
     let discussion_api = discussion.serve_api(&db)?;
-    let feishu_api = feishu::serve(feishu_config.as_deref(), &db)?;
     thread::spawn(move || schedule(placement));
     pull_worker::spawn(
         Store::open(&db)?,
@@ -200,6 +208,7 @@ fn main() -> Result<()> {
     router::spawn(router::Config {
         db,
         cwd,
+        codex_home: router_home,
         program,
         args: app_args,
         effort: router_effort,

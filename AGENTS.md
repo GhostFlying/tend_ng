@@ -12,7 +12,7 @@
 | Issue、Task、Run、审阅、取消、等待与续跑 | [任务生命周期](docs/task-lifecycle.md) |
 | 具名 Agent、category、capability、候选匹配 | [具名 Agent 与任务分配](docs/agent-selection.md) |
 | 派发、Runner 生命周期、workspace、同步与升级 | [Server 与 Runner 的契约](docs/server-runner.md) |
-| 工具调用、操作回执、session 恢复 | [Agent 工具与本地受理](docs/agent-tools.md) |
+| 工具调用、操作回执、session 恢复 | [Agent 工具与本地受理](docs/agent-tools.md) · [Codex 原生会话](docs/codex-rollouts.md) |
 | PR / CI 关联、采集与投递 | [外部事实与等待](docs/design.md#4-消息投递外部事件与等待) |
 | SQLite、消息与交付原件、查询代价 | [数据库存储与访问边界](docs/storage.md) |
 
@@ -32,6 +32,7 @@
 
 - Server、Runner 和 CLI 用独立 Rust 构建入口，tsnet 用独立 Go 进程。Server 和每个 Runner 各用自己的 SQLite WAL 库。开发和验证在 devcontainer 中完成，Web 工具链沿用旧 Tend 的基线。 [基础选型](docs/engineering.md#基础技术栈)
 - 测试用固定输入和 App Server 输出 fixture。局部修改跑定向模块测试，共享接口变化验证受影响的边界。少量端到端测试用真实 Server、Runner 和临时 workspace，核对用户可读的结果、原身份、实际副作用和资源释放。首期以本地定向验证支撑迭代，CI 卡口在稳定后确定。 [实现顺序与验证范围](docs/engineering.md#实现顺序与验证范围)
+- 所有 Tend 管理的 Codex 会话，包括隔离研判与转交，都在各自显式配置的独立 `CODEX_HOME` 保留原生 rollout，不启用 ephemeral，不回退个人 `~/.codex`。原件保留在所属实例和 home，不复制进仓库、业务库或 UI。 [原件及排障契约](docs/codex-rollouts.md)
 - 真实 Codex 验收须显式指定独立、已认证的 Codex home，验收会话与个人会话分别存放。使用 `tests/e2e/live_codex.py --codex-home` 运行真实验收，日常 fixture 使用模拟 App Server。凭据保存在独立 home 的本机配置中。
 
 ## 提交与交付

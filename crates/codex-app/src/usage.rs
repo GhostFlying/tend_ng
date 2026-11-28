@@ -153,7 +153,7 @@ pub type Rollouts = std::collections::HashMap<String, Option<PathBuf>>;
 /// descend through symlinked entries or trust any pathname supplied by Server.
 pub fn rollout_index(home: &Path) -> Result<Rollouts, TokenSourceGap> {
     let mut result = Rollouts::new();
-    let mut dirs = vec![home.join("sessions"), home.join("archived_sessions")];
+    let mut dirs = crate::home::session_roots(home).map_err(|_| SourceUnreadable)?;
     while let Some(dir) = dirs.pop() {
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,

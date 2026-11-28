@@ -204,6 +204,7 @@ fn main() -> Result<()> {
         artifacts: transfer,
         program,
         args: app_args,
+        codex_home: env::var_os("CODEX_HOME").map(PathBuf::from),
     };
     if let Some(inspection) = &config.inspect {
         inspect::serve(

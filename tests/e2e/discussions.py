@@ -93,6 +93,36 @@ else:
     return discussion_config, github
 
 
+def check_discussion_home(server_binary, root, config, env):
+    user = root / "test-os-home"
+    user.mkdir()
+    personal = root / "personal-codex-target"
+    personal.mkdir()
+    alias = user / ".codex"
+    alias.symlink_to(personal, target_is_directory=True)
+    invalid = root / "invalid-discussion.json"
+    settings = json.loads(config.read_text())
+    settings.pop("model_api_keys", None)
+
+    def reject(home, message):
+        invalid.write_text(json.dumps({**settings, "codex_home": str(home)}))
+        ready = subprocess.run(
+            [server_binary, "--db", root / "invalid-home.sqlite", "--listen", "127.0.0.1:0",
+             "--router-cwd", root, "--discussion-config", invalid, "--app-server", "/bin/false"],
+            env={**env, "HOME": str(user)}, text=True, capture_output=True, timeout=10,
+        )
+        assert ready.returncode and message in ready.stderr, ready.stderr
+
+    for path in (alias, personal):
+        reject(path, "separate from the personal Codex home")
+    linked = root / "linked-discussion-home"
+    linked.mkdir()
+    (linked / "sessions").symlink_to(personal, target_is_directory=True)
+    reject(linked, "CODEX_HOME/sessions must be a directory")
+    assert not list(personal.iterdir())
+    print("PASS Discussion startup rejects personal home aliases, resolved targets and linked session roots")
+
+
 def sql(db, statement, *params):
     with sqlite3.connect(db, timeout=5) as con:
         return con.execute(statement, params).fetchall()
@@ -170,6 +200,7 @@ def main():
         token = "tend-discussion-fixture"
         env = {**os.environ, "TEND_TOKEN": token, "TEND_URL": f"http://{address}",
                "CODEX_HOME": str(root / "runner-home"), "OPENAI_API_KEY": "must-not-inherit"}
+        check_discussion_home(args.server, root, config, env)
         command = [args.runner, "--config", root / "runner.json", "--db", root / "runner.sqlite",
                    "--app-server", sys.executable, TESTS / "fixtures/coordination_app_server.py", root, "issue-chat"]
         db = root / "server.sqlite"
@@ -280,7 +311,7 @@ def main():
         sql(db, "UPDATE discussions SET updated_at=created_at+1 WHERE chat_id=?", renamed_to_default)
         sql(db, "DROP INDEX issues_token_usage_page")
         sql(db, "DROP TABLE token_global_rollup")
-        for table in ("token_agent_backfill", "token_agent_requests", "token_agent_turns",
+        for table in ("token_feishu_attempt_launch", "token_agent_backfill", "token_agent_requests", "token_agent_turns",
                       "token_agent_attempts", "token_agent_rollups"):
             sql(db, f"DROP TABLE {table}")
         for trigger in ("token_issue_tree_insert", "token_backfill_reroute", "token_rebuild_track_start",

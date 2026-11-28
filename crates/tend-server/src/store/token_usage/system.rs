@@ -2,7 +2,7 @@
 //! and one tally path, regardless of how many ancestors display its subtotal.
 use super::{Breakdown, Summary, Tally};
 use crate::store::Store;
-use anyhow::{Result, ensure};
+use anyhow::{Context, Result, ensure};
 use codex_app::usage::{Response, valid_native_id};
 use protocol::{RequestMeter, TokenCounts, TokenModel};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
@@ -50,6 +50,17 @@ struct Stats {
     responses_without_usage: i64,
     conflicts: i64,
     summary: Summary,
+}
+
+pub(in crate::store) fn migrate_feishu_history(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "CREATE TABLE IF NOT EXISTS token_feishu_attempt_launch (
+            attempt TEXT PRIMARY KEY NOT NULL REFERENCES token_agent_attempts(id),
+            codex_home TEXT NOT NULL,
+            selected_model TEXT NOT NULL
+         ) WITHOUT ROWID;",
+    )?;
+    Ok(())
 }
 
 pub(in crate::store) fn migrate(db: &Connection) -> Result<()> {
@@ -140,9 +151,19 @@ impl Store {
         id: &str,
         thread: &str,
         process: &codex_app::ProcessIdentity,
+        home: &Path,
+        selected_model: &str,
     ) -> Result<()> {
         let tx = self.db.unchecked_transaction()?;
         launch(&tx, id, Source::Feishu, thread, None, process)?;
+        tx.execute(
+            "INSERT INTO token_feishu_attempt_launch(attempt, codex_home, selected_model) VALUES (?1, ?2, ?3)",
+            params![
+                id,
+                home.to_str().context("Feishu Codex home is not UTF-8")?,
+                selected_model
+            ],
+        )?;
         tx.commit()?;
         Ok(())
     }
@@ -354,7 +375,14 @@ pub(super) fn agent_meter(
         .map_err(Into::into)
 }
 
-fn count(stats: &mut Stats, meter: &RequestMeter, conflict: bool, shadowed: bool, sign: i64) {
+fn count(
+    stats: &mut Stats,
+    meter: &RequestMeter,
+    selected_model: Option<&str>,
+    conflict: bool,
+    shadowed: bool,
+    sign: i64,
+) {
     if shadowed {
         stats.shared_issue_responses += sign;
         return;
@@ -365,7 +393,24 @@ fn count(stats: &mut Stats, meter: &RequestMeter, conflict: bool, shadowed: bool
         model: Some(TokenModel::Unresolved),
         provider_counts: false,
     };
-    let meter = if conflict { &unknown } else { meter };
+    // Launch selection is a display fallback, not a second native observation.
+    // Keep it out of request merges and out of corroboration of Issue evidence.
+    let projected;
+    let meter = if conflict {
+        &unknown
+    } else if matches!(
+        meter.model.as_ref().map(TokenModel::basis),
+        None | Some(TokenModel::Unresolved)
+    ) && let Some(selected) = selected_model
+    {
+        projected = RequestMeter {
+            model: Some(TokenModel::TurnContext(selected.to_owned())),
+            ..meter.clone()
+        };
+        &projected
+    } else {
+        meter
+    };
     stats.responses_without_usage += if meter.counts.missing() { sign } else { 0 };
     stats.summary.tally.count(meter, sign);
 }
@@ -382,10 +427,11 @@ fn persist(
     if ![thread, turn, response].into_iter().all(valid_native_id) {
         return Ok(false);
     }
-    let Some((source, observed, legacy)) = db
+    let Some((source, observed, legacy, selected_model)) = db
         .prepare_cached(
-            "SELECT t.source, t.observed, t.legacy FROM token_agent_turns t
+            "SELECT t.source, t.observed, t.legacy, f.selected_model FROM token_agent_turns t
          JOIN token_agent_attempts a ON a.id=t.attempt OR (a.thread=t.thread AND a.turn=t.turn)
+         LEFT JOIN token_feishu_attempt_launch f ON f.attempt=t.attempt
          WHERE a.id=?1 AND t.thread=?2 AND t.turn=?3",
         )?
         .query_row(params![attempt, thread, turn], |r| {
@@ -393,12 +439,14 @@ fn persist(
                 r.get::<_, String>(0)?,
                 r.get::<_, bool>(1)?,
                 r.get::<_, bool>(2)?,
+                r.get::<_, Option<String>>(3)?,
             ))
         })
         .optional()?
     else {
         return Ok(false);
     };
+    let selected_model = selected_model.as_deref();
     let previous: Option<(String, Option<String>, bool)> = db.prepare_cached(
         "SELECT meter, conflict, shadowed FROM token_agent_requests WHERE thread=?1 AND turn=?2 AND response=?3"
     )?.query_row(params![thread, turn, response], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
@@ -425,7 +473,14 @@ fn persist(
         if old == next && old_had_conflict == disagreement.is_some() && old_shadowed == shadowed {
             return Ok(disagreement.is_some());
         }
-        count(&mut stats, &old, old_had_conflict, old_shadowed, -1);
+        count(
+            &mut stats,
+            &old,
+            selected_model,
+            old_had_conflict,
+            old_shadowed,
+            -1,
+        );
         if !old_had_conflict {
             previous_agent = Some(old);
         }
@@ -448,7 +503,14 @@ fn persist(
         conflict,
         shadowed
     ])?;
-    count(&mut stats, &meter, conflict.is_some(), shadowed, 1);
+    count(
+        &mut stats,
+        &meter,
+        selected_model,
+        conflict.is_some(),
+        shadowed,
+        1,
+    );
     if !observed {
         db.execute(
             "UPDATE token_agent_turns SET observed=1 WHERE thread=?1 AND turn=?2",
@@ -473,8 +535,9 @@ fn persist(
 // touched turns, including a historical correction that removes such a key.
 pub(super) fn sync_overlap(db: &Connection, thread: &str, turn: &str) -> Result<()> {
     let mut query = db.prepare_cached(
-        "SELECT q.response, q.meter, q.conflict IS NOT NULL, q.shadowed, t.source
+        "SELECT q.response, q.meter, q.conflict IS NOT NULL, q.shadowed, t.source, f.selected_model
          FROM token_agent_requests q JOIN token_agent_turns t USING(thread,turn)
+         LEFT JOIN token_feishu_attempt_launch f ON f.attempt=t.attempt
          WHERE q.thread=?1 AND q.turn=?2 AND q.shadowed != EXISTS(
              SELECT 1 FROM token_requests i
              WHERE i.thread_id=q.thread AND i.turn_id=q.turn AND i.response_id=q.response
@@ -487,13 +550,28 @@ pub(super) fn sync_overlap(db: &Connection, thread: &str, turn: &str) -> Result<
         let meter = serde_json::from_str(row.get_ref(1)?.as_str()?)?;
         let conflict = row.get(2)?;
         let shadowed: bool = row.get(3)?;
+        let selected_model: Option<String> = row.get(5)?;
         if changed.is_none() {
             let source: String = row.get(4)?;
             changed = Some((source.clone(), read(db, &source)?));
         }
         let stats = &mut changed.as_mut().expect("stats loaded").1;
-        count(stats, &meter, conflict, shadowed, -1);
-        count(stats, &meter, conflict, !shadowed, 1);
+        count(
+            stats,
+            &meter,
+            selected_model.as_deref(),
+            conflict,
+            shadowed,
+            -1,
+        );
+        count(
+            stats,
+            &meter,
+            selected_model.as_deref(),
+            conflict,
+            !shadowed,
+            1,
+        );
         db.execute(
             "UPDATE token_agent_requests SET shadowed=?4 WHERE thread=?1 AND turn=?2 AND response=?3",
             params![thread, turn, response, !shadowed],
@@ -696,6 +774,159 @@ mod tests {
         assert_eq!(feishu["responses_without_usage"], 1);
         assert_eq!(feishu["conflicts"], 1);
         assert_eq!(feishu["usage"]["estimate"]["usd"], Value::Null);
+        Ok(())
+    }
+
+    #[test]
+    fn feishu_migration_preserves_legacy_unknowns_and_confirms_new_attempt_models() -> Result<()> {
+        let file = Fixture::new()?;
+        let store = Store::initialize(&file.file())?;
+        attempt(&store, "old", Source::Feishu, "old-thread", "old-turn")?;
+        store.record_agent_response(
+            "old",
+            "old-thread",
+            "old-turn",
+            response("old-response", Some(12)),
+        );
+        let initial = root_page(&store)?;
+        store
+            .db
+            .execute_batch("DROP TABLE token_feishu_attempt_launch; PRAGMA user_version=50;")?;
+        drop(store);
+        let mut store = Store::initialize(&file.file())?;
+        let job = protocol::StartTokenBackfill {
+            job_id: "legacy-feishu".into(),
+            scope: protocol::TokenUsageScope::All,
+            policy: Default::default(),
+        };
+        store.start_token_backfill(&job)?;
+        history::drain(&mut store, Path::new("/fixture/router"), None)?;
+        assert_eq!(root_page(&store)?, initial);
+        let status = store.token_backfill_status(&job.job_id, 0)?.unwrap();
+        assert_eq!(status["server"][0]["detail"], "ephemeral_no_history");
+        assert_eq!(status["server"][0]["attempts"], 1);
+        assert_eq!(status["server"][0]["native_keys"], 0);
+
+        let process = codex_app::ProcessIdentity {
+            pid: 1,
+            started_at: "fixture".into(),
+        };
+        store.start_feishu_metering(
+            "new",
+            "new-thread",
+            &process,
+            Path::new("/fixture/feishu"),
+            "confirmed",
+        )?;
+        store.bind_feishu_metering("new", "new-turn")?;
+        let mut native = response("new-response", Some(17));
+        store.record_agent_response(
+            "new",
+            "new-thread",
+            "new-turn",
+            response("new-response", Some(17)),
+        );
+        let key = ("new-thread", "new-turn", "new-response");
+        assert_eq!(
+            agent_meter(&store.db, key)?.unwrap().model,
+            Some(TokenModel::Unresolved)
+        );
+        let feishu = row(&root_page(&store)?, "feishu");
+        assert!(
+            feishu["usage"]["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|r| { r["model"] == "confirmed" && r["selected_model_requests"] == 1 })
+        );
+        native.meter.model = Some(TokenModel::Response("provider-actual".into()));
+        store.record_agent_response("new", "new-thread", "new-turn", native);
+        assert_eq!(
+            agent_meter(&store.db, key)?.unwrap().model,
+            Some(TokenModel::Response("provider-actual".into()))
+        );
+        let page = root_page(&store)?;
+        assert_eq!(row(&page, "feishu")["usage"]["reported_requests"], 2);
+        Ok(())
+    }
+
+    #[test]
+    fn feishu_native_turn_model_supersedes_launch_selection_in_both_arrival_orders() -> Result<()> {
+        for live_first in [true, false] {
+            let file = Fixture::new()?;
+            let mut store = Store::initialize(&file.file())?;
+            let home = file.file().with_file_name("feishu");
+            let sessions = home.join("sessions");
+            std::fs::create_dir_all(&sessions)?;
+            let thread = "fixture-thread";
+            let turn = "fixture-turn";
+            let key = (thread, turn, "provider-response");
+            store.start_feishu_metering(
+                "assessment",
+                thread,
+                &codex_app::ProcessIdentity {
+                    pid: 1,
+                    started_at: "fixture".into(),
+                },
+                &home,
+                "launch-model",
+            )?;
+            store.bind_feishu_metering("assessment", turn)?;
+            let live = |store: &Store| {
+                store.record_agent_response("assessment", thread, turn, response(key.2, Some(40)));
+            };
+            if live_first {
+                live(&store);
+                let page = row(&root_page(&store)?, "feishu");
+                assert_eq!(page["usage"]["models"][0]["model"], "launch-model");
+            }
+            let lines = [
+                json!({"type":"session_meta","payload":{"id":thread}}),
+                json!({"type":"turn_context","payload":{"turn_id":turn,"model":"native-turn-model"}}),
+                json!({"type":"token_usage_record","payload":{
+                    "thread_id":thread,"turn_id":turn,"response_id":key.2,
+                    "usage":{"total_tokens":40},"thread_token_usage":{"total_tokens":40}
+                }}),
+            ];
+            std::fs::write(
+                sessions.join(format!("rollout-2026-01-02T03-04-05-{thread}.jsonl")),
+                lines
+                    .iter()
+                    .map(|line| format!("{line}\n"))
+                    .collect::<String>(),
+            )?;
+            let job = protocol::StartTokenBackfill {
+                job_id: "native-feishu".into(),
+                scope: protocol::TokenUsageScope::All,
+                policy: Default::default(),
+            };
+            store.start_token_backfill(&job)?;
+            history::drain(&mut store, Path::new("/fixture/router"), None)?;
+            let status = store.token_backfill_status(&job.job_id, 0)?.unwrap();
+            assert_eq!(status["server"][0]["state"], "scanned");
+            assert_eq!(status["server"][0]["native_keys"], 1);
+            if !live_first {
+                live(&store);
+            }
+            let page = row(&root_page(&store)?, "feishu");
+            assert_eq!(page["usage"]["reported_requests"], 1);
+            assert_eq!(page["usage"]["total_tokens"]["tokens"], "40");
+            assert_eq!(page["usage"]["models"].as_array().unwrap().len(), 1);
+            assert_eq!(page["usage"]["models"][0]["model"], "native-turn-model");
+            assert_eq!(
+                agent_meter(&store.db, key)?.unwrap().model.unwrap().basis(),
+                &TokenModel::TurnContext("native-turn-model".into())
+            );
+
+            let mut contradictory = response(key.2, Some(40));
+            contradictory.meter.model = Some(TokenModel::TurnContext(
+                "different-native-turn-model".into(),
+            ));
+            store.record_agent_response("assessment", thread, turn, contradictory);
+            let page = row(&root_page(&store)?, "feishu");
+            assert_eq!(page["usage"]["reported_requests"], 1);
+            assert_eq!(page["usage"]["models"][0]["model"], Value::Null);
+        }
         Ok(())
     }
 

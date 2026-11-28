@@ -23,7 +23,7 @@ def main():
         prepare(root, free_port())
         if self_stop:
             (root / "agent-stop").touch()
-        env = {**os.environ, "TEND_TOKEN": "control-fixture", "TEND_URL": f"http://{addr}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "control-fixture", "TEND_URL": f"http://{addr}"}
 
         def cli(*words):
             return json.loads(subprocess.check_output([cli_bin, *words], env=env, timeout=6))

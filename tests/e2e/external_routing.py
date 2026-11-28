@@ -21,7 +21,7 @@ def main():
         addr = free_port()
         prepare(root, free_port())
         (root / "wait-mode").write_text("pending")
-        env = {**os.environ, "TEND_TOKEN": "external-routing", "TEND_URL": f"http://{addr}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "external-routing", "TEND_URL": f"http://{addr}"}
         server_env = {**env, "GH_TOKEN": "fixture-read-token", "TEND_GITHUB_FIXTURE_DIR": str(root)}
 
         def cli(*words):

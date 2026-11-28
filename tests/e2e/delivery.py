@@ -82,10 +82,10 @@ def main():
     parser.add_argument("--web", action="store_true")
     parser.add_argument("--repeat-report", action="store_true")
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "tend-delivery-fixture"}
 
     with tempfile.TemporaryDirectory(prefix="tend-delivery-") as temporary:
         root = Path(temporary)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "tend-delivery-fixture"}
         source = root / "source"
         subprocess.run(["git", "init", "--quiet", "-b", "main", source], check=True)
         (source / "README.md").write_text("A fixed repository.\n")

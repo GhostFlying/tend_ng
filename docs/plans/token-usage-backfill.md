@@ -13,6 +13,8 @@
 
 Server 持久保存作业和 Run 明细，复用已有 Run 原归属及正式退役的同 Host 后继查找。普通 RunnerSync 用有能力才启用的可选字段下发当前工作与回传有界页。旧代及旧协议缺省行为保持。Runner 在独立线程读取原 Run 本地绑定或同 Host 历史索引的冻结 Codex home，不启动 Codex，不向 Server 发送原件或路径。只定位该 thread 的 sessions/archived_sessions 原件，并按 thread/turn/response_id 读取原生逐请求记录。append 文件按一次有界快照读，批次用快照身份和推进位置防重。再执行一次作业以纳入受理后新 Started 或读取后发生的 append。
 
+全量作业也让 Server 按已登记的 attempt 扫描本机原件。新飞书 attempt 只使用当次配置并登记的原 Codex home，按原 thread/turn/response 去重。旧飞书 ephemeral 记录保持缺口及已有实时证据，不从日志时间、当前模型配置或线程累计值自动补写。 [系统来源回填](system-agent-token-usage.md)
+
 未同步、旧 Runner 不支持、离线、原绑定、原文件缺失、读取失败、文件损坏和无逐请求证据分别可见。运行中回合只证明扫描到的前缀，不推断最终覆盖。Server 独有键保留并报告，绝不把缺失当作零。原生计量与实时共用非负可选字段和 response 身份校验，只使用请求的 usage，不使用累计值、估计和历史恢复快照。
 
 ## 冲突与聚合

@@ -50,7 +50,7 @@ print(json.dumps({'number':number,'title':'Synthetic export PR','body':'Syntheti
             "model_api_keys": {"FIXTURE_API_KEY": "fixture-home/synthetic-key"},
         }))
         address = free_port()
-        env = {**os.environ, "TEND_TOKEN": "test-only-quick-handoff", "TEND_URL": f"http://{address}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "test-only-quick-handoff", "TEND_URL": f"http://{address}"}
         db = root / "server.sqlite"
         native = home / "fixture.sqlite"
 

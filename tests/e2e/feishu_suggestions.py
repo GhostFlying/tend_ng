@@ -31,7 +31,7 @@ def main():
 def run(args, root):
     at = int(time.time())
     address = free_port()
-    env = {**os.environ, "TEND_TOKEN": "test-only-feishu", "TEND_URL": f"http://{address}"}
+    env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "test-only-feishu", "TEND_URL": f"http://{address}"}
     db = root / "server.sqlite"
     (root / "assessor-home").mkdir()
     (root / "assessor-cwd").mkdir()

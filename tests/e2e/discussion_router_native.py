@@ -144,7 +144,8 @@ enabled = true
             discussion_config.write_text(json.dumps({"host_id": "native-fixture", "program": str(args.codex),
                 "model": MODEL, "codex_home": str(discussion_home), "cwd": str(discussion_cwd),
                 "model_api_keys": {"FIXTURE_API_KEY": "discussion/key"}}))
-            env = {**os.environ, "TEND_TOKEN": "test-only-native-router", "FIXTURE_API_KEY": "fixture-only"}
+            env = {**os.environ, "TEND_TOKEN": "test-only-native-router", "FIXTURE_API_KEY": "fixture-only",
+                   "CODEX_HOME": str(router_home)}
             with server(args.server, root, env, router_launcher=launcher, router_model=MODEL,
                         discussion_config=discussion_config) as address:
                 def cli(*words):

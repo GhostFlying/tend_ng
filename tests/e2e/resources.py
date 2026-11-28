@@ -69,7 +69,7 @@ def main():
         root = Path(temp)
         prepare(root, free_port())
         address = free_port()
-        env = {**os.environ, "TEND_TOKEN": "resources-fixture", "TEND_URL": f"http://{address}"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "resources-fixture", "TEND_URL": f"http://{address}"}
 
         def cli(*words):
             return json.loads(subprocess.check_output([args.cli, *words], env=env, timeout=6))

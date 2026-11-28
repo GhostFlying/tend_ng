@@ -16,10 +16,10 @@ def main():
     parser.add_argument("cli", type=lambda value: Path(value).resolve())
     parser.add_argument("runner", type=lambda value: Path(value).resolve())
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "tend-runner-e2e"}
 
     with tempfile.TemporaryDirectory(prefix="tend-runner-") as temporary:
         root = Path(temporary)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "tend-runner-e2e"}
         repo = root / "example"
         subprocess.run(["git", "init", "--quiet", repo], check=True)
 

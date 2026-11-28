@@ -71,7 +71,7 @@ def main():
             "codex_home": str(args.codex_home), "cwd": str(cwd),
             "model": args.model, "effort": args.effort,
         }))
-        env = {**os.environ, "TEND_TOKEN": "synthetic-live-discussion"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "synthetic-live-discussion"}
         db = root / "server.sqlite"
         with server(args.server, root, env, discussion_config=config, router_launcher=args.router_launcher,
                     router_model=args.model, router_effort=args.effort) as address:

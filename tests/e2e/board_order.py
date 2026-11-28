@@ -20,10 +20,10 @@ def main():
         parser.add_argument(executable, type=lambda value: Path(value).resolve())
     parser.add_argument("--web", action="store_true")
     args = parser.parse_args()
-    env = {**os.environ, "TEND_TOKEN": "board-order-fixture"}
 
     with tempfile.TemporaryDirectory(prefix="tend-board-order-") as directory:
         root = Path(directory)
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_TOKEN": "board-order-fixture"}
         with server(args.server, root, env, web_dir=WEB / "dist" if args.web else None) as address:
             env["TEND_URL"] = f"http://{address}"
 

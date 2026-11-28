@@ -45,7 +45,7 @@ def main():
             (root / "independent-decision").touch()
         if args.prestart_failure:
             (root / "fail-before-native").touch()
-        env = {**os.environ, "TEND_URL": f"http://{address}", "TEND_TOKEN": "proposal-fixture"}
+        env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_URL": f"http://{address}", "TEND_TOKEN": "proposal-fixture"}
 
         def cli(*words, binary=args.cli, override=None):
             return subprocess.run([binary, *words], env=override or env, timeout=8,

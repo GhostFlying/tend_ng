@@ -35,7 +35,7 @@ def exercise(root, address, fact):
     original.write_bytes(CONTENTS)
     marker = archive / "unrelated.part"
     marker.write_text("keep")
-    env = {**os.environ, "TEND_URL": address, "TEND_TOKEN": "fixture"}
+    env = {**os.environ, "CODEX_HOME": str(root / "fixture-codex"), "TEND_URL": address, "TEND_TOKEN": "fixture"}
     bin_dir = root / "bin"
     bin_dir.mkdir()
     for binary in ("codex", "codex-ark"):
