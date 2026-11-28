@@ -15,6 +15,7 @@ pub fn asset(root: &Path, request: &Request) -> Option<ResponseBox> {
             | "/token-usage"
             | "/more"
             | "/feishu-suggestions"
+            | "/maintenance-suggestions"
     ) || path
         .strip_prefix("/issues/")
         .map(|route| route.strip_suffix("/overview").unwrap_or(route))

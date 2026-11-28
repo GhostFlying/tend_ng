@@ -5,6 +5,7 @@ mod discussion;
 mod feishu;
 mod github;
 mod inspect;
+mod maintenance;
 mod pull_worker;
 mod router;
 mod runner_api;
@@ -171,11 +172,13 @@ fn main() -> Result<()> {
     if let Some(home) = feishu.as_ref().and_then(feishu::Config::private_home) {
         discussion.protect_feishu_home(home.to_owned())?;
     }
+    let feishu_owner = feishu.as_ref().map(|config| config.owner().to_owned());
     let feishu_api = feishu::serve(feishu, &db)?;
     let discussion = std::sync::Arc::new(discussion);
     let history = store::agent_metering::spawn_history(&db, router_home.clone(), discussion_home)?;
     let token_usage_maintenance = token_usage_api::serve(&db, history)?;
     let discussion_api = discussion.serve_api(&db)?;
+    let maintenance_api = maintenance::serve(&db, feishu_owner)?;
     thread::spawn(move || schedule(placement));
     pull_worker::spawn(
         Store::open(&db)?,
@@ -289,6 +292,15 @@ fn main() -> Result<()> {
                 discussion_api.try_send(request)
             {
                 let (_, body) = api_error(503, "Discussion API is busy");
+                let _ = request.respond(json_response(503, &body)?);
+            }
+            continue;
+        }
+        if maintenance::matches(route) {
+            if let Err(TrySendError::Full(request) | TrySendError::Disconnected(request)) =
+                maintenance_api.try_send(request)
+            {
+                let (_, body) = api_error(503, "Maintenance suggestions API is busy");
                 let _ = request.respond(json_response(503, &body)?);
             }
             continue;

@@ -5,6 +5,7 @@ type IconName =
   | "discussion"
   | "board"
   | "feishu"
+  | "maintenance"
   | "agents"
   | "hosts"
   | "usage"
@@ -17,6 +18,12 @@ export function NavIcon({ name }: { name: IconName }) {
     discussion: <path d="M3.5 4.5h13v9h-8l-4.5 3v-3H3.5zM7 8h6m-6 2.5h4" />,
     feishu: (
       <path d="m2.7 9 14.5-5.4-4.4 13.1-3.3-5-6.8-2.7Zm6.8 2.7 4.4-4.2" />
+    ),
+    maintenance: (
+      <>
+        <rect x="3.3" y="3.5" width="13.4" height="13" rx="2" />
+        <path d="M5.6 10h2.3l1.4-3 2 6 1.2-3h1.9" />
+      </>
     ),
     board: (
       <>
@@ -77,11 +84,13 @@ export function PhoneNavigation({
   board,
   discussions,
   feishu,
+  maintenance,
 }: {
   resource: boolean;
   board: boolean;
   discussions: boolean;
   feishu: boolean;
+  maintenance: boolean;
 }) {
   return (
     <nav className="phone-nav" aria-label="手机导航">
@@ -89,7 +98,9 @@ export function PhoneNavigation({
         className="phone-item"
         href="/"
         aria-current={
-          !resource && !board && !discussions && !feishu ? "page" : undefined
+          !resource && !board && !discussions && !feishu && !maintenance
+            ? "page"
+            : undefined
         }
       >
         <NavIcon name="chat" />
@@ -119,6 +130,14 @@ export function PhoneNavigation({
       >
         <NavIcon name="feishu" />
         飞书建议
+      </a>
+      <a
+        className="phone-item"
+        href="/maintenance-suggestions"
+        aria-current={maintenance ? "page" : undefined}
+      >
+        <NavIcon name="maintenance" />
+        维护建议
       </a>
       <Notifications mobileIcon={<NavIcon name="notice" />} />
       <a

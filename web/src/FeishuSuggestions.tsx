@@ -65,6 +65,9 @@ function ScanStatus({ scan }: { scan: FeishuFeed["scan"] }) {
           ? `上次成功扫描 ${stamp(scan.last_success_at)}`
           : "尚无成功扫描"}
       </span>
+      {scan.checkpoint_at && (
+        <span>已提交检查点 {stamp(scan.checkpoint_at)}</span>
+      )}
       {scan.phase === "running" && <span>正在扫描</span>}
       {scan.gap && (
         <span className="fs-gap" role="status">
@@ -223,7 +226,7 @@ export function FeishuSuggestions({
           <h2>值得跟进的飞书消息</h2>
           <p>只收集明确 @ 你的消息；同一话题有新进展时更新，不打扰主 Chat。</p>
         </div>
-        <div className="fs-scan">
+        <div className="fs-scan" id="scan-status">
           <div className="fs-scan-copy">
             {data && <ScanStatus scan={data.scan} />}
           </div>

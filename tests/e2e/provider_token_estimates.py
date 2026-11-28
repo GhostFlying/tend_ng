@@ -123,7 +123,8 @@ def run(args, root):
         assert cli("issue", "token-usage", primary) == issue
         assert cli("token-usage", "overview") == overview
         with sqlite3.connect(db_file) as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (52,)
+            # Later independent migrations may raise the current schema version.
+            assert db.execute("PRAGMA user_version").fetchone()[0] >= 52
             assert ledger(db) == original
             samples = db.execute(
                 "SELECT last FROM token_requests q JOIN token_runs r USING(run_id) "

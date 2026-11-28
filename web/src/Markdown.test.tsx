@@ -99,4 +99,19 @@ echo hello
     "file:///example",
     "https://user:pass@example.test",
   ])("rejects URL %j", (url) => expect(markdownLink(url)).toBeUndefined());
+
+  it("only enables generated maintenance evidence routes in that rendering context", () => {
+    const text =
+      "[Case](/maintenance-suggestions?id=case-1) [Run](/issues/7#message-example) [Topic](/#message-original) [Host](//other.test) [Private](/api/v1/chats/main/messages)";
+    const html = renderToStaticMarkup(
+      <Markdown text={text} maintenanceLinks />,
+    );
+    expect(html).toContain('href="/maintenance-suggestions?id=case-1"');
+    expect(html).toContain('href="/issues/7#message-example"');
+    expect(html).toContain('href="/#message-original"');
+    expect(html).not.toMatch(/href="(?:\/\/|\/api\/)/);
+    expect(renderToStaticMarkup(<Markdown text={text} />)).not.toContain(
+      "href=",
+    );
+  });
 });

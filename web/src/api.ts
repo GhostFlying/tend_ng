@@ -197,7 +197,7 @@ export type NotificationPage = {
 export type Message = {
   id: string;
   text: string;
-  author: "user" | "router" | "discussion";
+  author: "user" | "router" | "discussion" | "maintenance";
   reply_to: string | null;
   router_state: "queued" | "awaiting_turn" | "completed" | "failed" | null;
   router_error: string | null;

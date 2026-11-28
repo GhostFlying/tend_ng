@@ -34,6 +34,12 @@ const FeishuSuggestions = lazy(() =>
   })),
 );
 
+const MaintenanceSuggestions = lazy(() =>
+  import("./MaintenanceSuggestions").then(({ MaintenanceSuggestions }) => ({
+    default: MaintenanceSuggestions,
+  })),
+);
+
 const DiscussionSidebar = lazy(() =>
   import("./Discussions").then(({ DiscussionSidebar }) => ({
     default: DiscussionSidebar,
@@ -148,6 +154,7 @@ function App() {
   const board = path === "/issues";
   const discussions = path === "/discussions";
   const feishu = path === "/feishu-suggestions";
+  const maintenance = path === "/maintenance-suggestions";
   const resourceTitle =
     path === "/agents"
       ? "Agents"
@@ -199,7 +206,12 @@ function App() {
             <a
               href="/"
               aria-current={
-                issue || board || discussions || feishu || resourceTitle
+                issue ||
+                board ||
+                discussions ||
+                feishu ||
+                maintenance ||
+                resourceTitle
                   ? undefined
                   : "page"
               }
@@ -241,6 +253,13 @@ function App() {
               <NavIcon name="feishu" />
               <span>飞书建议</span>
             </a>
+            <a
+              href="/maintenance-suggestions"
+              aria-current={maintenance ? "page" : undefined}
+            >
+              <NavIcon name="maintenance" />
+              <span>维护建议</span>
+            </a>
             <div className="resource-nav">
               <h2>资源</h2>
               {resourceLinks.map(({ href, label, icon }) => (
@@ -281,7 +300,8 @@ function App() {
                 (resourceTitle ||
                   (board && "Issue 看板") ||
                   (discussions && "讨论") ||
-                  (feishu && "飞书建议"))) ||
+                  (feishu && "飞书建议") ||
+                  (maintenance && "维护建议"))) ||
                 "Tend"}
             </h1>
           )}
@@ -345,6 +365,15 @@ function App() {
                 onReachable={setReachable}
               />
             </Suspense>
+          ) : maintenance ? (
+            <Suspense
+              fallback={<main className="resource-page" aria-busy="true" />}
+            >
+              <MaintenanceSuggestions
+                search={search}
+                onReachable={setReachable}
+              />
+            </Suspense>
           ) : path === "/agents" ? (
             <Agents onReachable={setReachable} />
           ) : path === "/hosts" ? (
@@ -377,6 +406,7 @@ function App() {
             board={board || !!issue}
             discussions={discussions}
             feishu={feishu}
+            maintenance={maintenance}
           />
         )}
       </div>

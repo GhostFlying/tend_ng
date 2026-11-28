@@ -71,6 +71,10 @@ pub fn load(
 }
 
 impl Config {
+    pub fn owner(&self) -> &str {
+        &self.owner_open_id
+    }
+
     pub fn private_home(&self) -> Option<&Path> {
         self.agent.as_ref().map(agent::Config::private_home)
     }
@@ -224,7 +228,7 @@ fn scan(store: &mut Store, config: &Config, end: i64) -> ScanResult<()> {
     let mut cursor = checkpoint.unwrap_or(end - 3 * DAY).min(end);
     if checkpoint.is_some_and(|last| last < end - 3 * DAY) {
         store
-            .feishu_scan_phase(owner, "running", Some("catching_up"))
+            .feishu_scan_phase(owner, "catching_up", None)
             .map_err(|_| ScanError::Storage)?;
     }
     loop {

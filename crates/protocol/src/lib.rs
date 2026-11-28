@@ -53,7 +53,10 @@ pub enum Author {
     User,
     Router,
     Discussion,
+    Maintenance,
 }
+
+pub const MAINTENANCE_SUGGESTIONS_PATH: &str = "/api/v1/maintenance-suggestions";
 
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

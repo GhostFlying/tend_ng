@@ -383,15 +383,25 @@ impl Store {
     }
 
     pub fn interrupt_feishu_scan(&self, owner: &str) -> Result<()> {
-        self.db.execute("UPDATE feishu_scan SET phase='interrupted',gap='interrupted' WHERE owner=?1 AND phase='running'", [owner])?;
+        self.db.execute(
+            "UPDATE feishu_scan SET phase='interrupted'
+             WHERE owner=?1 AND phase IN ('running','resuming','catching_up')",
+            [owner],
+        )?;
         Ok(())
     }
 
-    pub fn feishu_scan_phase(&self, owner: &str, phase: &str, gap: Option<&str>) -> Result<()> {
+    // A running retry is not a new diagnostic outcome. Keep the last confirmed
+    // gap while the phase changes, until a new failure or a full window commits.
+    // A resumed scan keeps the public interruption hint in its phase, not gap.
+    pub fn feishu_scan_phase(&self, owner: &str, phase: &str, failure: Option<&str>) -> Result<()> {
         self.db.execute(
             "INSERT INTO feishu_scan(owner,phase,gap) VALUES(?1,?2,?3)
-             ON CONFLICT(owner) DO UPDATE SET phase=excluded.phase,gap=COALESCE(excluded.gap,feishu_scan.gap)",
-            params![owner,phase,gap],
+             ON CONFLICT(owner) DO UPDATE SET
+                phase=CASE WHEN excluded.phase='running' AND feishu_scan.phase IN ('interrupted','resuming')
+                    THEN 'resuming' ELSE excluded.phase END,
+                gap=COALESCE(excluded.gap,feishu_scan.gap)",
+            params![owner,phase,failure],
         )?;
         Ok(())
     }
@@ -452,13 +462,22 @@ impl Store {
         {
             add_mention(&tx, owner, message, now)?;
         }
+        let previous = tx
+            .query_row(
+                "SELECT checkpoint_at,last_success_at FROM feishu_scan WHERE owner=?1",
+                [owner],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?
+            .unwrap_or_default();
         tx.execute(
             "INSERT INTO feishu_scan(owner,checkpoint_at,last_success_at,phase,gap) VALUES(?1,?2,?3,?4,NULL)
              ON CONFLICT(owner) DO UPDATE SET checkpoint_at=MAX(COALESCE(feishu_scan.checkpoint_at,0),excluded.checkpoint_at),
                 last_success_at=excluded.last_success_at,phase=excluded.phase,
                 gap=CASE WHEN ?5 THEN NULL ELSE feishu_scan.gap END",
-            params![owner,through,now,if final_window { "idle" } else { "running" },final_window],
+            params![owner,through,now,if final_window { "idle" } else { "catching_up" },final_window],
         )?;
+        super::maintenance::scan_committed(&tx, owner, previous, through, now, final_window)?;
         timing::commit(tx, clock)?;
         Ok(())
     }
@@ -604,7 +623,11 @@ impl Store {
             return Ok(json!({"phase":"disabled"}));
         };
         Ok(self.db.query_row(
-            "SELECT phase,checkpoint_at,last_success_at,gap FROM feishu_scan WHERE owner=?1", [owner], |r| Ok(json!({
+            "SELECT CASE WHEN phase IN ('catching_up','resuming') THEN 'running' ELSE phase END,
+                checkpoint_at,last_success_at,
+                CASE WHEN phase='catching_up' THEN 'catching_up'
+                    WHEN phase IN ('interrupted','resuming') THEN 'interrupted' ELSE gap END
+             FROM feishu_scan WHERE owner=?1", [owner], |r| Ok(json!({
                 "phase":r.get::<_,String>(0)?,"checkpoint_at":r.get::<_,Option<i64>>(1)?,
                 "last_success_at":r.get::<_,Option<i64>>(2)?,"gap":r.get::<_,Option<String>>(3)?,
             })),

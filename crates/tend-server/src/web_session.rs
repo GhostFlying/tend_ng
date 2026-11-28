@@ -329,6 +329,16 @@ fn web_route(method: &Method, url: &str) -> bool {
                 .is_some_and(|n| protocol::parse_issue_number(n).is_some())
     };
     match (method, segments.as_slice()) {
+        (Method::Get, ["maintenance-suggestions"]) => true,
+        (Method::Get, ["maintenance-suggestions", id])
+        | (
+            Method::Post,
+            [
+                "maintenance-suggestions",
+                id,
+                "ignore" | "discussions" | "handoff",
+            ],
+        ) => valid(id),
         (Method::Get, ["feishu-suggestions"]) | (Method::Post, ["feishu-suggestions", "sync"]) => {
             true
         }

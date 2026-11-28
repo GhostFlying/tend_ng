@@ -314,7 +314,11 @@ function MessageRow({
             {user
               ? "你"
               : (detail?.author ??
-                (message.author === "discussion" ? "讨论助手" : "Tend"))}
+                (message.author === "discussion"
+                  ? "讨论助手"
+                  : message.author === "maintenance"
+                    ? "维护建议"
+                    : "Tend"))}
           </span>
         )}
         {descendant && detail && (
@@ -340,7 +344,11 @@ function MessageRow({
         </a>
       )}
       {!message.attention?.proposal ? (
-        <Markdown text={message.text} variant="chat" />
+        <Markdown
+          text={message.text}
+          variant="chat"
+          maintenanceLinks={message.author === "maintenance"}
+        />
       ) : (
         (message.text !== message.attention.proposal.question ||
           message.attention.proposal.decision) && (
@@ -373,7 +381,10 @@ function MessageRow({
         </a>
       )}
       {!message.attention &&
-      (detail || message.issue_ids?.length || source?.issue_ids?.length) ? (
+      (detail ||
+        message.author === "maintenance" ||
+        message.issue_ids?.length ||
+        source?.issue_ids?.length) ? (
         <button
           className="text-button"
           type="button"

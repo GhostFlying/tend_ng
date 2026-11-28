@@ -7,6 +7,7 @@ const pages = new Set([
   "/",
   "/discussions",
   "/feishu-suggestions",
+  "/maintenance-suggestions",
   "/issues",
   "/agents",
   "/hosts",

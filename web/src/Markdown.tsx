@@ -16,9 +16,11 @@ export function markdownLink(value: string) {
 export function Markdown({
   text,
   variant,
+  maintenanceLinks = false,
 }: {
   text: string;
   variant?: "chat";
+  maintenanceLinks?: boolean;
 }) {
   const chat = variant === "chat";
   return (
@@ -26,9 +28,17 @@ export function Markdown({
       <ReactMarkdown
         skipHtml
         remarkPlugins={chat ? [remarkGfm, remarkBreaks] : [remarkGfm]}
-        urlTransform={(url, key) =>
-          key === "href" ? markdownLink(url) : undefined
-        }
+        urlTransform={(url, key) => {
+          if (key !== "href") return undefined;
+          if (
+            maintenanceLinks &&
+            /^\/(?:feishu-suggestions#scan-status|maintenance-suggestions\?id=[\w-]+|(?:issues\/[1-9]\d*)?(?:#message-[\w-]+)|issues\/[1-9]\d*)$/.test(
+              url,
+            )
+          )
+            return url;
+          return markdownLink(url);
+        }}
         components={{
           a: ({ href, children }) =>
             href ? (
