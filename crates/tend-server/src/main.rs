@@ -24,12 +24,12 @@ use std::{
     path::{Path, PathBuf},
     sync::mpsc::TrySendError,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use store::{Accepted, Store};
 use tiny_http::{Header, Method, Request, Response, Server};
 
-const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--discussion-config <json-file>] [--feishu-suggestions-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
+const USAGE: &str = "Usage: tend-server --db <sqlite-file> [--listen <addr>] [--router-cwd <dir>] [--router-name <name>] [--router-model <model>] [--router-effort <effort>] [--web-dir <dist-dir>] [--web-origin <https-origin>] [--github-cli <program>] [--codebase-cli <program>] [--agent-categories <json-file>] [--discussion-config <json-file>] [--feishu-suggestions-config <json-file>] [--app-server <program> <args>...]\n\nTEND_TOKEN authenticates users of the API.";
 const MAX_REQUEST_BYTES: u64 = protocol::MAX_REQUEST_BYTES as u64;
 
 fn main() -> Result<()> {
@@ -42,6 +42,7 @@ fn main() -> Result<()> {
     let mut router_effort = None;
     let mut router_name = None;
     let mut discussion_config = None;
+    let mut category_config = None;
     let mut feishu_config = None;
     let mut router_model = None;
     let mut program = OsString::from("codex");
@@ -106,6 +107,12 @@ fn main() -> Result<()> {
                         .map_err(|_| anyhow!("invalid --web-origin"))?,
                 );
             }
+            Some("--agent-categories") => {
+                category_config = Some(PathBuf::from(
+                    args.next()
+                        .context("--agent-categories needs a JSON file")?,
+                ));
+            }
             Some("--discussion-config") => {
                 discussion_config = Some(PathBuf::from(
                     args.next()
@@ -148,6 +155,16 @@ fn main() -> Result<()> {
     let auth = format!("Bearer {token}");
     let sessions = web_session::Sessions::new(web_origin.as_deref(), &token)?;
     let mut store = Store::initialize(&db)?;
+    let optional_path = category_config.is_none();
+    let category_path =
+        category_config.unwrap_or_else(|| db.with_extension("agent-categories.json"));
+    if let Err(error) = store.refresh_agent_categories(&category_path, optional_path) {
+        if !store.has_saved_category_snapshot()? {
+            return Err(error);
+        }
+        eprintln!("Agent category configuration: using the last valid catalogue ({error:#})");
+    }
+    let reload = protocol::AgentConfigReload::from_env()?;
     store.enable_foreground_writes()?;
     let server = Server::http(&listen).map_err(|error| anyhow!("{error}"))?;
     sessions.prepare(&store)?;
@@ -179,7 +196,7 @@ fn main() -> Result<()> {
     let token_usage_maintenance = token_usage_api::serve(&db, history)?;
     let discussion_api = discussion.serve_api(&db)?;
     let maintenance_api = maintenance::serve(&db, feishu_owner)?;
-    thread::spawn(move || schedule(placement));
+    thread::spawn(move || schedule(placement, category_path, optional_path, reload));
     pull_worker::spawn(
         Store::open(&db)?,
         protocol::PullProvider::GitHub,
@@ -354,9 +371,29 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn schedule(mut store: Store) {
+fn schedule(
+    mut store: Store,
+    category_path: PathBuf,
+    optional_path: bool,
+    mut reload: protocol::AgentConfigReload,
+) {
     let mut after = 0;
+    let mut category_error = None;
     loop {
+        if reload.due(Instant::now()) {
+            let error = store
+                .refresh_agent_categories(&category_path, optional_path)
+                .err()
+                .map(|error| format!("{error:#}"));
+            if error != category_error {
+                if let Some(error) = &error {
+                    eprintln!(
+                        "Agent category refresh (retaining the last valid catalogue): {error}"
+                    );
+                }
+                category_error = error;
+            }
+        }
         if let Err(error) = store.release_external() {
             eprintln!("Release external facts: {error:#}");
         }
@@ -437,6 +474,9 @@ fn handle(
             },
         };
     }
+    if path == protocol::AGENT_CATEGORIES_PATH && request.method() == &Method::Get {
+        return Ok((200, json!({"categories": store.agent_categories()?})));
+    }
     if path == "/api/v1/agent-candidates" {
         if request.method() != &Method::Post {
             return Ok(api_error(405, "method not allowed"));
@@ -450,10 +490,13 @@ fn handle(
         if !query.valid() {
             return Ok(api_error(400, "invalid category or task requirements"));
         }
-        return Ok((
-            200,
-            json!({"candidates": store.agent_candidates(&query, false)?}),
-        ));
+        return Ok(match store.agent_candidates(&query, false) {
+            Ok(result) => (200, result),
+            Err(error) => match error.downcast::<store::categories::Unavailable>() {
+                Ok(error) => api_error(400, &error.0),
+                Err(error) => return Err(error),
+            },
+        });
     }
     if let Some(message) = path
         .strip_prefix("/api/v1/messages/")
@@ -878,7 +921,13 @@ fn handle(
             };
             store.return_to_backlog(&issue_id, None, operation)?
         } else {
-            store.start_issue(&issue_id, None, input.operation_id.as_deref())?
+            match store.start_issue(&issue_id, None, input.operation_id.as_deref()) {
+                Ok(result) => result,
+                Err(error) => match error.downcast::<store::categories::Unavailable>() {
+                    Ok(error) => return Ok(api_error(409, &error.0)),
+                    Err(error) => return Err(error),
+                },
+            }
         };
         use store::control::ResultState;
         return Ok(match result {

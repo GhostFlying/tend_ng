@@ -2,7 +2,7 @@ use crate::store::discussion::HandoffSource;
 use crate::store::{Attempt, DispatchRequest, Input, Store};
 use anyhow::{Result, ensure};
 use codex_app::{Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus};
-use protocol::{AgentQuery, ExternalCondition, IssueDetail, TOP_LEVEL_CATEGORIES};
+use protocol::{AgentQuery, ExternalCondition, IssueDetail};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet},
@@ -14,7 +14,7 @@ use std::{
 };
 
 pub(crate) const MAX_ATTEMPTS: i64 = 2;
-const TOOL_REVISION: i64 = 22;
+const TOOL_REVISION: i64 = 23;
 const HANDOFF_WRITES: &[&str] = &[
     "tend_dispatch_issue",
     "tend_record_issue",
@@ -39,6 +39,7 @@ const ROUTER_INSTRUCTIONS: &str = concat!(
     "Publish one concise, concrete sentence in the user's language about what you will check or do. Do not rely on native commentary, publish reasoning, or send a progress message for an ordinary direct answer. ",
     "Use tend_dispatch_issue to assign project work. Its receipt tells you the current assignment status. ",
     "When one person can deliver the outcome, explicitly set category to implementation or investigation so the Work Agent owns and works on the original top-level Issue and Task. ",
+    "When a concrete implementation difficulty warrants a specialist, explain it in the objective. For a deployment-specific category, use tend_agent_candidates with no category to read the live top-level directory. Use its stable ID, not its display name. Do not switch categories automatically when an explicitly requested category has no candidate. ",
     "For a small, clear implementation you may explicitly choose implementation-economy. Use issue-router only when multiple independent deliveries need coordination. Do not create a placeholder child for one person's work. ",
     "Keep the same delivery endpoint through every handoff. When the user asks to merge, apply the repository's existing merge gates, do focused verification, and report the verified remote main SHA. ",
     "Extend tracking beyond merge to CI success, a package, or deployment only when the user explicitly asks for that endpoint. ",
@@ -110,7 +111,7 @@ fn dispatch_tool(name: &str, description: &str) -> Value {
             "properties": {
                 "title": { "type": "string", "description": "Concrete work and expected result for the new Issue." },
                 "objective": { "type": "string" },
-                "category": { "type": "string", "enum": TOP_LEVEL_CATEGORIES },
+                "category": { "type": "string", "description": "Stable category ID from the live candidate directory." },
                 "repo_ids": { "type": "array", "items": { "type": "string" } },
                 "agent": {"type":"object","properties":{"id":{"type":"string"},"runner_id":{"type":"string"}},
                           "required":["id","runner_id"],"additionalProperties":false},
@@ -316,12 +317,12 @@ fn consume_inputs(
         }),
         json!({
             "type":"function", "name":"tend_agent_candidates",
-            "description":"Read qualifying top-level Owner configurations by category, repository, and capability.",
+            "description":"With no arguments, list the live top-level category IDs, roles, and purposes. With a category ID, read eligible Owner configurations for the requirements.",
             "inputSchema":{"type":"object","properties":{
-                "category":{"type":"string","enum":TOP_LEVEL_CATEGORIES},
+                "category":{"type":"string"},
                 "repo_ids":{"type":"array","items":{"type":"string"}},
                 "required_capabilities":{"type":"array","items":{"type":"string"}}
-            },"required":["category"],"additionalProperties":false}
+            },"additionalProperties":false}
         }),
     ];
     tools.extend(attention_tools());
@@ -739,7 +740,15 @@ impl TurnHandler for DispatchHandler<'_> {
                         format!("{}:{}", self.attempt_id, call.call_id)
                     };
                     let result = if call.tool == "tend_start_issue" {
-                        self.store.start_issue(&id, Some(&chat), Some(&operation))?
+                        match self.store.start_issue(&id, Some(&chat), Some(&operation)) {
+                            Ok(result) => result,
+                            Err(error) => {
+                                match error.downcast::<crate::store::categories::Unavailable>() {
+                                    Ok(error) => return Ok(tool_error(&error.0)),
+                                    Err(error) => return Err(error),
+                                }
+                            }
+                        }
                     } else {
                         self.store.return_to_backlog(&id, Some(&chat), &operation)?
                     };
@@ -764,20 +773,42 @@ impl TurnHandler for DispatchHandler<'_> {
                 }
             }
             "tend_agent_candidates" => {
+                if call
+                    .arguments
+                    .as_object()
+                    .is_some_and(|args| args.is_empty())
+                {
+                    let categories: Vec<_> = self
+                        .store
+                        .agent_categories()?
+                        .into_iter()
+                        .filter(|entry| entry.top_level)
+                        .collect();
+                    return Ok(ToolOutput {
+                        success: true,
+                        body: json!({"categories": categories}),
+                    });
+                }
                 let Ok(query) = serde_json::from_value::<AgentQuery>(call.arguments.clone()) else {
                     return Ok(tool_error(
                         "Provide category and any repository or capability requirements",
                     ));
                 };
-                if !TOP_LEVEL_CATEGORIES.contains(&query.category.as_str()) || !query.valid() {
+                if !query.valid() {
                     return Ok(tool_error(
                         "Provide a valid top-level category and task requirements",
                     ));
                 }
-                Ok(ToolOutput {
-                    success: true,
-                    body: json!({"candidates": self.store.agent_candidates(&query, true)?}),
-                })
+                match self.store.agent_candidates(&query, true) {
+                    Ok(body) => Ok(ToolOutput {
+                        success: true,
+                        body,
+                    }),
+                    Err(error) => match error.downcast::<crate::store::categories::Unavailable>() {
+                        Ok(error) => Ok(tool_error(&error.0)),
+                        Err(error) => Err(error),
+                    },
+                }
             }
             "tend_subscribe" => {
                 let Ok(mut condition) =
@@ -883,7 +914,7 @@ impl DispatchHandler<'_> {
         if dispatch
             .category
             .as_deref()
-            .is_some_and(|category| !TOP_LEVEL_CATEGORIES.contains(&category))
+            .is_some_and(|category| !protocol::valid_category_id(category))
             || work.title.trim().is_empty()
             || work.objective.trim().is_empty()
             || work
@@ -903,16 +934,23 @@ impl DispatchHandler<'_> {
                 "Dispatch needs a title, objective, and valid requirements",
             ));
         }
-        tool_receipt(
-            self.store.dispatch_issue(
-                self.attempt_id,
-                call,
-                &dispatch,
-                call.tool == "tend_record_issue",
-                self.dispatcher_name,
-            )?,
-            "Dispatch call does not match its saved origin or intent",
-        )
+        let result = self.store.dispatch_issue(
+            self.attempt_id,
+            call,
+            &dispatch,
+            call.tool == "tend_record_issue",
+            self.dispatcher_name,
+        );
+        match result {
+            Ok(result) => tool_receipt(
+                result,
+                "Dispatch call does not match its saved origin or intent",
+            ),
+            Err(error) => match error.downcast::<crate::store::categories::Unavailable>() {
+                Ok(error) => Ok(tool_error(&error.0)),
+                Err(error) => Err(error),
+            },
+        }
     }
 }
 

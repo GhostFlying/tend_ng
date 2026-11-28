@@ -24,9 +24,23 @@
 
 尚未明确的要求在具体子 Issue 派发时核对。领取后新增工作能力要求时，仍在所属 Runner 上匹配。缺少合格工作配置时，保留原派发的待分配状态，并让派发方看到缺少的能力。 [绑定后新增能力的 TODO](design-questions.md#todo-绑定后缺少必需能力)
 
+## 部署分类目录
+
+Server 从数据库旁的 `<db stem>.agent-categories.json` 发布权威快照，也可通过 `--agent-categories` 指定路径。文件仅覆盖部署声明的条目，既有五个 Runner 分类仍作为默认项。分类由稳定 ID、显示名、用途、角色、顶层/委派范围和启停状态组成。角色及范围是 ID 的不可变属性。整份声明验证后才替换快照，删除自定义 ID 时保留禁用记录。保留内置 ID 及角色/范围，内置项可显式覆盖显示名、说明或启停状态。`router` 和 `feishu-router` 只作为 Server 本机目录项展示，不是 Runner 候选，也不改变已有本机服务配置。
+
+Runner 角色是有限集合。`coordinator` 只能作为顶层协调 Owner，`work` 可分别加入顶层或委派范围，`review` 只可作为审阅子项。顶层 Work Agent 仍可按原约定报告和委派独立子项，子 Work Agent 不会获得顶层工具。分类 ID、描述和候选名称不授予权限。专用的绑定独立审阅工具仍使用 `review`，自定义 Review 分类可用于显式委派的普通审阅。Server 上的写入检查和 Runner 原生工具均以领取契约里的角色和 Issue 归属为准。
+
+在 Server 用 `GET /api/v1/agent-categories` 与 `tend agent categories` 读目录，在现有候选 API/CLI 中按 ID 查候选。主 Router 的 `tend_agent_candidates {}` 返回顶层目录，已领取的顶层 Owner 同名工具返回委派目录。候选带筛选结果，查询不到时说明未配置、停用、范围不合、无匹配或不可用。Router 和 Owner 的动态工具用稳定类别字符串，部署更新不会改变线程的工具 schema。当前版本首次上线时，旧 Router 工具版本仍走既有的一次性 session 迁移，之后热更新不换 session。活跃回合内不重启 Codex。空闲 Router 及已停妥的 Runner Run 仍按既有生命周期释放 App Server；后续正常回合可复用原 thread，等待 Task 保持其原 Task 和领取身份。
+
+Server 和 Runner 在启动时加载本机配置，默认每 60 秒复读。Runner 通过下一次正常同步发布具名 Agent 并收取目录。各实例按自己已接收的有效目录受理新工作；离线时已在 Runner 持久受理的委派可以在恢复连接后补交。N−1 端继续使用原内置类别和匹配规则。
+
+**何时生效。** 临时停用分类会阻止下一次顶层派发、新子项委派和首次申请独立审阅。Backlog 在开始工作时检查分类。已经受理的 Task 可以继续排队、领取、重送、复审和在同 Host 接替。继续既有 Issue 的 Owner 工作沿用原执行身份。工具查询实时反映新工作可选择的类别。
+
+**具名 Agent 配置。** 对当时已登记且匹配的 Host，Server 在 Task 受理时记录具名 Agent 版本，空闲槽位稍后再分配。当时没有匹配配置的 Task 在首次匹配时绑定。Runner 在对外发布前保存可恢复的启动配置。调整同名 Agent 的模型、effort、CLI、参数或 Codex home 后，新 Task 使用新版；旧 Task 在后续 Run 以及同机换代时按原配置启动。运行旧版本期间应保留其程序、依赖及 Codex home。 [运行与验证计划](plans/runtime-agent-categories.md)
+
 ## Category 与 capability
 
-一期使用以下五个 category。
+未配置覆盖时使用以下五个 Runner category。
 
 | Category | 角色 | 派发场景 |
 | --- | --- | --- |

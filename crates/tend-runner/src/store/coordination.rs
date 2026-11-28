@@ -121,6 +121,7 @@ impl Store {
         &mut self,
         run: &LocalRun,
         call: &ToolCall,
+        config: &crate::config::Config,
         build: impl FnOnce(&str) -> Result<WorkAction>,
     ) -> Result<Option<WorkOperation>> {
         let request = serde_json::to_string(&(&call.tool, &call.arguments))?;
@@ -370,7 +371,45 @@ impl Store {
                 "Select the Markdown attachment of a report returned by this Task"
             );
         }
+        let target = match &action {
+            WorkAction::Delegate { category, work, .. } => Some((category.as_str(), work)),
+            WorkAction::RequestReview {
+                rereview: false,
+                work,
+                ..
+            } => Some(("review", work)),
+            _ => None,
+        };
+        let admission = if let Some((id, work)) = target {
+            if let Some(raw) = self.saved_agent_categories()? {
+                let catalogue: Vec<protocol::AgentCategory> = serde_json::from_str(&raw)?;
+                let category = protocol::check_agent_category(&catalogue, id, Some(false))
+                    .map_err(anyhow::Error::msg)?;
+                let profile = config.profile(0);
+                let agent = protocol::matching_task_agent(
+                    &profile,
+                    category,
+                    &catalogue,
+                    work,
+                    work.agent.as_ref().map(|pin| pin.id.as_str()),
+                )
+                .cloned();
+                Some(protocol::ChildTaskAdmission { agent })
+            } else {
+                // N-1 Server owns built-in matching and must receive its original operation shape.
+                protocol::check_agent_category(
+                    &protocol::default_agent_categories(),
+                    id,
+                    Some(false),
+                )
+                .map_err(anyhow::Error::msg)?;
+                None
+            }
+        } else {
+            None
+        };
         let operation = WorkOperation {
+            admission,
             operation_id,
             assignment_id: run.assignment.placement.assignment_id.clone(),
             run_id: run.id.clone(),

@@ -38,7 +38,8 @@ def main():
         config.write_text(json.dumps({**json.loads(config.read_text()), "slot_limit": 2}))
         home = root / "codex-home"
         home.mkdir()
-        env = {**os.environ, "TEND_TOKEN": "runner-upgrade-fixture", "TEND_URL": f"http://{address}",
+        env = {**os.environ, "TEND_AGENT_CONFIG_RELOAD_SECONDS": "1",
+               "TEND_TOKEN": "runner-upgrade-fixture", "TEND_URL": f"http://{address}",
                "CODEX_HOME": str(home)}
         # Simulate interruption between durable retirement and local cleanup,
         # without modifying the bundle passed by CI or a previous release.
@@ -133,7 +134,8 @@ def main():
         stack.callback(cleanup_successor)
         stack.push(lambda *_: report_log(prior_log))
         stack.push(lambda *_: report_log(generation / "runner.log"))
-        wait_for(roster, lambda rows: rows.get("demo-runner", {}).get("online"))
+        initial = wait_for(roster, lambda rows: rows.get("demo-runner", {}).get("online"))
+        early_slot_release = initial["demo-runner"]["profile"].get("handoff_slots", False)
         # A different Runner on this Host is neither the predecessor nor
         # part of the temporary two-generation budget.
         peer_config, peer_db = root / "peer.json", root / "peer.sqlite"
@@ -219,12 +221,20 @@ def main():
         assert cli("runner", "replace", "demo-runner", successor) == {
             "predecessor": "demo-runner", "successor": successor}
 
+        next_config = root / f"{successor}.json"
+        changed = json.loads(next_config.read_text())
+        changed["app_servers"] = {"new-cli": {"program": sys.executable, "args": ["-B", str(FIXTURE), str(root)],
+                                               "codex_home": str(home)}}
+        changed["agents"][0].update(model="updated-owner", app_server="new-cli")
+        next_config.write_text(json.dumps(changed))
+        wait_for(roster, lambda rows: rows[successor]["profile"]["agents"][0]["model"] == "updated-owner")
+
         overlap = {name: dispatch(name) for name in ("overlap-a", "overlap-b")}
         sent = cli("issue", "message", original["issue_id"], "Continue on the new Runner.")
         wait_for(lambda: SQL(db, "SELECT count(*) FROM local_issue_inputs WHERE run_id IS NULL"), lambda rows: rows == [(1,)])
         assert local_active(next_db) == 0
         release("laggard")
-        if not args.predecessor:
+        if early_slot_release:
             wait_for(roster, lambda rows: rows[successor]["execution_slot_limit"] == 1)
             def started():
                 return [name for name in overlap if (root / f"{name}.started").exists()]
@@ -268,6 +278,10 @@ def main():
         terminate(first)
         first.communicate()
         refuse_mismatched_identity(command)
+        next_config.write_text(json.dumps({**changed, "slot_limit": 9}))
+        mismatched = subprocess.run(command, env=upgrade_env, capture_output=True, text=True, timeout=5)
+        assert mismatched.returncode and "startup configuration differs" in mismatched.stderr, mismatched.stderr
+        next_config.write_text(json.dumps(changed))
         assert roster()["demo-runner"]["successor"] == successor
         marker = next(generation.glob("ready-*"))
         next_pid = marker.read_text()
@@ -275,8 +289,8 @@ def main():
         assert os.fsencode(f"CODEX_HOME={home}") in runtime_env
         server_context.close()
         start_server(server_context)
-        assert roster()[successor]["execution_slot_limit"] == (0 if args.predecessor else 1)
-        assert local_active(db) == 1 and local_active(next_db) == (0 if args.predecessor else 1)
+        assert roster()[successor]["execution_slot_limit"] == (1 if early_slot_release else 0)
+        assert local_active(db) == 1 and local_active(next_db) == (1 if early_slot_release else 0)
         retry = subprocess.Popen(command, env=upgrade_env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         stack.callback(terminate, retry)
         # The original process has started its native turn and still owns it.
@@ -296,6 +310,7 @@ def main():
         assert (generation / "retirement.json").is_file()
         interrupt.unlink()
         completed = subprocess.run(command, env=upgrade_env, capture_output=True, check=True, text=True, timeout=15)
+        assert json.loads(next_config.read_text()) == changed
         receipt = json.loads(completed.stdout)
         assert receipt["successor"] == successor and receipt["state"] == "retired"
         assert Path(receipt["db"]) == next_db and next_db.is_file() and not db.exists()
@@ -318,6 +333,13 @@ def main():
         assert continued["runner"] == successor and old_run["runner"] == "demo-runner"
         assert continued["thread"] != old_run["thread"] and continued["run"] != old_run["run"]
         assert continued["cwd"] == old_run["cwd"] and Path(continued["cwd"]).is_relative_to(root)
+        for name, task in [("original", original), *overlap.items()]:
+            [(model, launch_args)] = SQL(next_db, """
+                SELECT json_extract(contract, '$.placement.agent.model'), json_extract(app_server, '$.args')
+                FROM received_assignments WHERE task_id=? AND execution_state!='rejected'
+            """, task["task_id"])
+            assert model == ("fixture-coordinator" if name == "original" else "updated-owner"), (name, model)
+            assert ("-B" in json.loads(launch_args)) == (name != "original")
         wait_for(lambda: SQL(root / "server.sqlite",
                              "SELECT run_id FROM issue_inputs WHERE json_extract(payload, '$.message.id') = ?",
                              sent["message_id"]), lambda rows: rows == [(continued["run"],)])

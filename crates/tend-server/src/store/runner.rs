@@ -1,11 +1,12 @@
 use super::{
-    Store, coordination, run,
+    Store, categories, coordination, run,
     work::{DISPATCH_QUERY, read_dispatch},
 };
 use anyhow::{Result, ensure};
 use protocol::{
-    AgentCandidate, AgentQuery, ClaimDecision, CoordinationFollowup, IssueDispatch, Placement,
-    RunnerProfile, RunnerRecord, RunnerSync, RunnerSyncReply, TaskAssignment, matching_agents,
+    AgentCandidate, AgentQuery, AgentRole, ClaimDecision, CoordinationFollowup, IssueDispatch,
+    Placement, RunnerProfile, RunnerRecord, RunnerSync, RunnerSyncReply, TaskAssignment,
+    matching_agents,
 };
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
@@ -130,6 +131,137 @@ impl RunnerLoad {
     }
 }
 
+// Store one matching execution profile per Host, independently of free slots.
+// Host balancing remains a scheduling decision. A later Host can supply the
+// same execution profile, and work without a known match binds on first placement.
+pub(super) fn freeze_task_agents(db: &Connection, task: &str) -> Result<()> {
+    let dispatch = db.query_row(
+        &format!("{DISPATCH_QUERY} WHERE t.id = ?1"),
+        [task],
+        read_dispatch,
+    )?;
+    let catalogue = categories::read(db)?;
+    let top_level = dispatch.parent_issue_id.is_none();
+    let Ok(category) =
+        protocol::admitted_agent_category(&catalogue, &dispatch.category, Some(top_level))
+    else {
+        return Ok(());
+    };
+    let (pinned_runner, named): (Option<String>, Option<String>) = db.query_row(
+        "SELECT pinned_runner_id, pinned_agent_id FROM tasks WHERE id=?1",
+        [task],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let mut query = db.prepare(
+        "SELECT profile FROM runners r WHERE (?1 IS NULL OR r.id = ?1)
+         AND EXISTS(SELECT 1 FROM json_each(r.profile, '$.agents') agent
+                    WHERE json_extract(agent.value, '$.category') = ?2)
+         AND NOT EXISTS (SELECT 1 FROM runner_replacements p WHERE p.predecessor = r.id)
+         AND (coalesce(json_extract(profile, '$.standby'), 0) = 0
+              OR EXISTS (SELECT 1 FROM runner_replacements p WHERE p.successor = r.id))
+         ORDER BY r.last_seen DESC, r.id",
+    )?;
+    for raw in query.query_map(params![pinned_runner, dispatch.category], |row| {
+        row.get::<_, String>(0)
+    })? {
+        let profile: RunnerProfile = serde_json::from_str(&raw?)?;
+        if profile.supports_category(category, top_level)
+            && let Some(agent) = protocol::matching_task_agent(
+                &profile,
+                category,
+                &catalogue,
+                &dispatch.work,
+                named.as_deref(),
+            )
+        {
+            db.execute(
+                "INSERT OR IGNORE INTO task_agent_versions VALUES (?1, ?2, ?3)",
+                params![task, profile.host_id, serde_json::to_string(agent)?],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// An offline delegation may have already bound a version on its originating Host.
+pub(super) fn freeze_task_agent_for_host(
+    db: &Connection,
+    task: &str,
+    host: &str,
+    agent: &protocol::AgentProfile,
+) -> Result<()> {
+    db.execute(
+        "INSERT INTO task_agent_versions VALUES (?1, ?2, ?3)
+         ON CONFLICT(task_id, host_id) DO UPDATE SET agent = excluded.agent",
+        params![task, host, serde_json::to_string(agent)?],
+    )?;
+    Ok(())
+}
+
+fn task_agent(
+    db: &Connection,
+    profile: &RunnerProfile,
+    category: &protocol::AgentCategory,
+    catalogue: &[protocol::AgentCategory],
+    dispatch: &IssueDispatch,
+    named: Option<&str>,
+) -> Result<Option<protocol::AgentProfile>> {
+    if !dispatch
+        .work
+        .repo_ids
+        .iter()
+        .all(|id| profile.repos.contains(id))
+    {
+        return Ok(None);
+    }
+    // An accepted handoff or Owner follow-up retains the exact prior execution
+    // identity, even for a Task created before the version table existed.
+    let bound: Option<String> = db.query_row(
+        "SELECT json_extract(a.contract, '$.placement.agent') FROM tasks t
+         JOIN runner_assignments a ON a.task_id = t.id OR
+             (a.task_id = t.previous_task_id AND NOT EXISTS (
+                 SELECT 1 FROM parked_tasks p WHERE p.task_id = t.previous_task_id))
+         WHERE t.id = ?1 AND a.state = 'accepted' AND json_extract(a.contract, '$.placement.host_id') = ?2
+         ORDER BY (a.task_id = t.id) DESC, a.rowid DESC LIMIT 1",
+        params![dispatch.task_id, profile.host_id], |r| r.get(0),
+    ).optional()?;
+    let frozen = match bound {
+        Some(bound) => Some(bound),
+        None => db
+            .query_row(
+                "SELECT agent FROM task_agent_versions WHERE task_id=?1 AND host_id=?2",
+                params![dispatch.task_id, profile.host_id],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?,
+    };
+    if let Some(raw) = frozen {
+        let agent: protocol::AgentProfile = serde_json::from_str(&raw)?;
+        return Ok((agent.category == category.id
+            && named.is_none_or(|id| id == agent.id)
+            && (profile.dynamic_categories || profile.agents.contains(&agent)))
+        .then_some(agent));
+    }
+    let mut saved = db.prepare("SELECT agent FROM task_agent_versions WHERE task_id = ?1")?;
+    let known = saved
+        .query_map([&dispatch.task_id], |row| row.get::<_, String>(0))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    for agent in matching_agents(
+        profile,
+        category,
+        catalogue,
+        &dispatch.work.repo_ids,
+        &dispatch.work.required_capabilities,
+    ) {
+        if named.is_none_or(|id| agent.id == id)
+            && (known.is_empty() || known.contains(&serde_json::to_string(agent)?))
+        {
+            return Ok(Some(agent.clone()));
+        }
+    }
+    Ok(None)
+}
+
 pub(super) fn assign_task(db: &Connection, task: &str) -> Result<()> {
     let dispatch = db.query_row(
         &format!("{DISPATCH_QUERY} WHERE t.id = ?1"),
@@ -150,6 +282,13 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
              WHERE t.id = ?1)",
         [&dispatch.task_id], |row| row.get::<_, bool>(0),
     )? { return Ok(()) }
+    let catalogue = categories::read(db)?;
+    let top_level = dispatch.parent_issue_id.is_none();
+    let Ok(category) =
+        protocol::admitted_agent_category(&catalogue, &dispatch.category, Some(top_level))
+    else {
+        return Ok(());
+    };
     let (pinned, named, previous, workspace_key, continuation) = db.query_row(
         "SELECT coalesce(h.runner_id, t.pinned_runner_id), t.pinned_agent_id, t.previous_task_id, t.workspace_key, t.handoff
          FROM tasks t JOIN issues i ON i.id = t.issue_id
@@ -180,12 +319,11 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
     let mut selected = None;
     let mut lowest_load: Option<RunnerLoad> = None;
     for available in available_runners(db, review.is_some())? {
-        if available.protocol < 2 && (dispatch.category == "review" || bound_author) {
+        if available.protocol < 2 && (category.role == AgentRole::Review || bound_author) {
             continue;
         }
         let profile = &available.profile;
-        if dispatch.parent_issue_id.is_none() && !profile.supports_root_category(&dispatch.category)
-        {
+        if !profile.supports_category(category, top_level) {
             continue;
         }
         if pinned.as_ref().is_some_and(|id| id != &profile.runner_id) {
@@ -233,13 +371,15 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
             )",
             params![dispatch.task_id, profile.runner_id], |row| row.get::<_, bool>(0),
         )? { continue; }
-        let Some(agent) = protocol::matching_task_agent(
+        let Some(agent) = task_agent(
+            db,
             profile,
-            &dispatch.category,
-            &dispatch.work,
+            category,
+            &catalogue,
+            &dispatch,
             named.as_deref(),
-        )
-        .cloned() else {
+        )?
+        else {
             continue;
         };
         if balance {
@@ -256,6 +396,7 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
     }
     if let Some((available, agent)) = selected {
         let profile = available.profile;
+        freeze_task_agent_for_host(db, &dispatch.task_id, &profile.host_id, &agent)?;
         let placement = Placement {
             assignment_id: protocol::new_id(),
             runner_id: profile.runner_id,
@@ -279,6 +420,9 @@ pub(super) fn assign(db: &Connection, mut dispatch: IssueDispatch) -> Result<()>
         };
         let assignment = TaskAssignment {
             placement,
+            agent_role: protocol::legacy_agent_role(&category.id)
+                .is_none()
+                .then_some(category.role),
             task_id: dispatch.task_id,
             issue_id: dispatch.issue_id,
             source_message_id: dispatch.source_message_id,
@@ -347,26 +491,37 @@ impl Store {
         &self,
         query: &AgentQuery,
         root_only: bool,
-    ) -> Result<Vec<AgentCandidate>> {
-        let available: std::collections::HashSet<_> = available_runners(&self.db, false)?
+    ) -> Result<serde_json::Value> {
+        let snapshot = self.db.unchecked_transaction()?;
+        let catalogue = categories::read(&snapshot)?;
+        let category =
+            protocol::check_agent_category(&catalogue, &query.category, root_only.then_some(true))
+                .map_err(categories::Unavailable)?;
+        let available: std::collections::HashSet<_> = available_runners(&snapshot, false)?
             .into_iter()
             .map(|runner| runner.profile.runner_id)
             .collect();
-        let mut statement = self.db.prepare(
-            "SELECT profile FROM runners
+        let mut statement = snapshot.prepare(
+            "SELECT profile, protocol FROM runners
              WHERE NOT EXISTS(SELECT 1 FROM runner_replacements p WHERE p.predecessor = runners.id)
              ORDER BY id",
         )?;
         let mut candidates = Vec::new();
-        for row in statement.query_map([], |row| row.get::<_, String>(0))? {
-            let profile: RunnerProfile = serde_json::from_str(&row?)?;
-            if root_only && !profile.supports_root_category(&query.category) {
+        for row in statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, u32>(1)?))
+        })? {
+            let (raw, version) = row?;
+            let profile: RunnerProfile = serde_json::from_str(&raw)?;
+            if !profile.supports_category(category, root_only || !category.delegated)
+                || category.role == AgentRole::Review && version < 2
+            {
                 continue;
             }
             candidates.extend(
                 matching_agents(
                     &profile,
-                    &query.category,
+                    category,
+                    &catalogue,
                     &query.repo_ids,
                     &query.required_capabilities,
                 )
@@ -377,7 +532,16 @@ impl Store {
                 }),
             );
         }
-        Ok(candidates)
+        let reason = if candidates.is_empty() {
+            Some(
+                "No Runner can offer this category with the requested repositories and capabilities",
+            )
+        } else if candidates.iter().all(|candidate| !candidate.available) {
+            Some("Matching Runners are offline, draining, or have no available slot")
+        } else {
+            None
+        };
+        Ok(serde_json::json!({"category": category, "candidates": candidates, "reason": reason}))
     }
 
     pub fn reconcile_scope(&self, task: &str, request: &RunnerSync) -> Result<bool> {
@@ -455,24 +619,38 @@ impl Store {
         };
         *after = pending.last().map_or(0, |(seq, ..)| *seq);
         let query = format!("{DISPATCH_QUERY} WHERE t.id = ?1");
+        let catalogue = categories::read(&self.db)?;
         for (_, id, pinned, named) in pending {
             let Some(dispatch) = self.db.query_row(&query, [&id], read_dispatch).optional()? else {
                 continue;
             };
-            if runners.iter().any(|runner| {
-                (dispatch.parent_issue_id.is_some()
-                    || runner.profile.supports_root_category(&dispatch.category))
+            let top_level = dispatch.parent_issue_id.is_none();
+            let Ok(category) =
+                protocol::admitted_agent_category(&catalogue, &dispatch.category, Some(top_level))
+            else {
+                continue;
+            };
+            let mut eligible = false;
+            for runner in &runners {
+                if runner.profile.supports_category(category, top_level)
                     && pinned
                         .as_ref()
                         .is_none_or(|id| *id == runner.profile.runner_id)
-                    && protocol::matching_task_agent(
+                    && task_agent(
+                        &self.db,
                         &runner.profile,
-                        &dispatch.category,
-                        &dispatch.work,
+                        category,
+                        &catalogue,
+                        &dispatch,
                         named.as_deref(),
-                    )
+                    )?
                     .is_some()
-            }) {
+                {
+                    eligible = true;
+                    break;
+                }
+            }
+            if eligible {
                 let tx = self
                     .db
                     .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -573,6 +751,7 @@ impl Store {
                     request.protocol,
                     profile.shared_reviews,
                     profile.direct_issue_owners,
+                    profile.dynamic_categories,
                 )?
             } else {
                 Vec::new()
@@ -585,6 +764,10 @@ impl Store {
                 proposal_approval: true,
                 stage_attention: true,
                 issue_rename: true,
+                agent_categories: profile
+                    .dynamic_categories
+                    .then(|| categories::read(&snapshot))
+                    .transpose()?,
                 workspace_reclaims: if task.is_none() {
                     super::reclaim::pending(&snapshot, &profile.runner_id)?
                 } else {
@@ -784,7 +967,10 @@ impl Store {
         } else {
             Vec::new()
         };
-        let assignments = if task.is_none() {
+        let catalogue = (task.is_none() || profile.dynamic_categories)
+            .then(|| categories::read(&tx))
+            .transpose()?;
+        let mut assignments = if task.is_none() {
             assignments_to_send(
                 &tx,
                 &profile.runner_id,
@@ -792,10 +978,42 @@ impl Store {
                 request.protocol,
                 profile.shared_reviews,
                 profile.direct_issue_owners,
+                profile.dynamic_categories,
             )?
         } else {
             Vec::new()
         };
+        if let Some(catalogue) = &catalogue {
+            // Retransmit issued contracts unchanged. Only an unissued reservation
+            // can be revoked when the refreshed directory/config cannot serve it.
+            let mut deliverable = Vec::with_capacity(assignments.len());
+            for assignment in assignments {
+                let agent = &assignment.placement.agent;
+                let top_level = assignment.parent_issue_id.is_none();
+                let valid =
+                    protocol::admitted_agent_category(catalogue, &agent.category, Some(top_level))
+                        .is_ok_and(|category| {
+                            profile.supports_category(category, top_level)
+                                && Some(category.role) == assignment.role()
+                                && assignment
+                                    .work
+                                    .repo_ids
+                                    .iter()
+                                    .all(|id| profile.repos.contains(id))
+                                && (profile.dynamic_categories || profile.agents.contains(agent))
+                        });
+                if valid
+                    || !revoke_reserved(
+                        &tx,
+                        &assignment.placement.assignment_id,
+                        &assignment.task_id,
+                    )?
+                {
+                    deliverable.push(assignment);
+                }
+            }
+            assignments = deliverable;
+        }
         for assignment in &assignments {
             let id = &assignment.placement.assignment_id;
             if tx.execute(
@@ -848,6 +1066,7 @@ impl Store {
             proposal_approval: true,
             stage_attention: true,
             issue_rename: true,
+            agent_categories: catalogue.filter(|_| profile.dynamic_categories),
             workspace_reclaims,
             confirmed_reclaims,
             assignments,
@@ -887,6 +1106,21 @@ fn expire(db: &Connection) -> Result<()> {
     Ok(())
 }
 
+fn revoke_reserved(db: &Connection, assignment: &str, task: &str) -> Result<bool> {
+    let changed = db.execute(
+        "UPDATE runner_assignments SET state = 'revoked' WHERE id = ?1 AND state = 'reserved'",
+        [assignment],
+    )? != 0;
+    if changed {
+        db.execute(
+            "UPDATE tasks SET current_assignment = NULL, status = 'awaiting_assignment'
+             WHERE id = ?1 AND current_assignment = ?2",
+            params![task, assignment],
+        )?;
+    }
+    Ok(changed)
+}
+
 fn assignments_to_send(
     db: &Connection,
     runner: &str,
@@ -894,15 +1128,20 @@ fn assignments_to_send(
     version: u32,
     shared_reviews: bool,
     direct_issue_owners: bool,
+    dynamic_categories: bool,
 ) -> Result<Vec<TaskAssignment>> {
     let mut statement = db.prepare(
         "SELECT contract FROM runner_assignments WHERE runner_id = ?1 AND
          (state = 'issued' OR (?2 AND state = 'reserved' AND expires_at > unixepoch()))
-         AND (?4 >= 2 OR json_extract(contract, '$.placement.agent.category') != 'review')
+         AND (?4 >= 2 OR (json_extract(contract, '$.placement.agent.category') != 'review'
+                              AND coalesce(json_extract(contract, '$.agent_role'), '') != 'review'))
+         AND (?7 OR json_extract(contract, '$.placement.agent.category') IN
+                    ('issue-router', 'implementation', 'implementation-economy', 'investigation', 'review'))
          AND (?5 OR json_extract(contract, '$.review.author_workspace') IS NULL)
          AND (?6 OR json_extract(contract, '$.parent_issue_id') IS NOT NULL
                  OR json_extract(contract, '$.workspace_key') IS NULL
-                 OR json_extract(contract, '$.placement.agent.category') = 'issue-router')
+                 OR json_extract(contract, '$.placement.agent.category') = 'issue-router'
+                 OR json_extract(contract, '$.agent_role') = 'coordinator')
          ORDER BY rowid LIMIT ?3",
     )?;
     statement
@@ -913,7 +1152,8 @@ fn assignments_to_send(
                 PAGE_SIZE,
                 version,
                 shared_reviews,
-                direct_issue_owners
+                direct_issue_owners,
+                dynamic_categories,
             ],
             |row| row.get::<_, String>(0),
         )?
@@ -973,6 +1213,7 @@ mod tests {
                 handoff_slots: false,
                 codebase_review_comments: false,
                 direct_issue_owners: false,
+                dynamic_categories: false,
             },
             drained: false,
             reclaim_receipts: vec![],
@@ -1074,7 +1315,7 @@ mod tests {
         }
         let ids = |protocol, shared| -> Result<Vec<String>> {
             Ok(
-                assignments_to_send(&db, "runner", true, protocol, shared, false)?
+                assignments_to_send(&db, "runner", true, protocol, shared, false, false)?
                     .into_iter()
                     .map(|task| task.task_id)
                     .collect(),

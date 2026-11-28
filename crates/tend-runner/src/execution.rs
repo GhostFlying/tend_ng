@@ -271,8 +271,14 @@ fn native_context(
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
     let is_review = run.assignment.review.is_some();
-    let started = config.native_agent(&run.assignment).and_then(|agent| {
-        let app_server = agent.app_server.as_ref().map(|id| &config.app_servers[id]);
+    let started = (|| {
+        let agent = &run.assignment.placement.agent;
+        let app_server = run.app_server.as_ref();
+        anyhow::ensure!(run.assignment.role().is_some(), "unknown frozen Agent role");
+        anyhow::ensure!(
+            agent.app_server.is_none() || app_server.is_some(),
+            "missing frozen Agent launcher"
+        );
         let directory = if is_review {
             workspace::verify_review(&runtime.root, run, &config.repos)
         } else {
@@ -280,7 +286,7 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         }
         .context("prepare Tend workspace")?;
         Ok((agent, app_server, directory))
-    });
+    })();
     let started = started.and_then(|(agent, app_server, directory)| {
         let artifact = run
             .assignment
@@ -591,9 +597,10 @@ impl TurnHandler for Handler<'_> {
             namespace: None,
             arguments: serde_json::to_value(&observation)?,
         };
-        self.store.accept_operation(self.run, &call, |_| {
-            Ok(protocol::WorkAction::ObserveSubagent { observation })
-        })?;
+        self.store
+            .accept_operation(self.run, &call, self.config, |_| {
+                Ok(protocol::WorkAction::ObserveSubagent { observation })
+            })?;
         Ok(())
     }
 
@@ -639,45 +646,77 @@ impl TurnHandler for Handler<'_> {
             && call.namespace.is_none()
             && self.run.assignment.owns_root()
         {
-            let query = serde_json::from_value::<protocol::AgentQuery>(call.arguments.clone());
-            if let Ok(query) = query
-                && query.valid()
-                && query.category != "issue-router"
+            let catalogue = self.store.agent_categories()?;
+            if call
+                .arguments
+                .as_object()
+                .is_some_and(|args| args.is_empty())
             {
-                let repos = if call.arguments.get("repo_ids").is_some() {
-                    &query.repo_ids
-                } else {
-                    &self.run.assignment.work.repo_ids
-                };
-                let profile = self.config.profile(0);
-                let candidates: Vec<_> = protocol::matching_agents(
-                    &profile,
-                    &query.category,
-                    repos,
-                    &query.required_capabilities,
-                )
-                .collect();
+                let categories: Vec<_> = catalogue
+                    .into_iter()
+                    .filter(|entry| entry.delegated)
+                    .collect();
                 return Ok(ToolOutput {
                     success: true,
-                    body: json!({"runner_id": profile.runner_id, "candidates": candidates}),
+                    body: json!({
+                        "runner_id": self.config.runner_id, "categories": categories,
+                    }),
                 });
             }
+            let query = serde_json::from_value::<protocol::AgentQuery>(call.arguments.clone());
+            let error = if let Ok(query) = query
+                && query.valid()
+            {
+                match protocol::check_agent_category(&catalogue, &query.category, Some(false)) {
+                    Ok(category) => {
+                        let repos = if call.arguments.get("repo_ids").is_some() {
+                            &query.repo_ids
+                        } else {
+                            &self.run.assignment.work.repo_ids
+                        };
+                        let profile = self.config.profile(0);
+                        let candidates: Vec<_> = protocol::matching_agents(
+                            &profile,
+                            category,
+                            &catalogue,
+                            repos,
+                            &query.required_capabilities,
+                        )
+                        .collect();
+                        let reason = candidates.is_empty().then_some(
+                            "This Runner has no configuration matching the category, repositories and capabilities"
+                        );
+                        return Ok(ToolOutput {
+                            success: true,
+                            body: json!({
+                                "runner_id": profile.runner_id, "category": category,
+                                "candidates": candidates, "reason": reason,
+                            }),
+                        });
+                    }
+                    Err(error) => error,
+                }
+            } else {
+                "Provide a valid category ID and task requirements".to_owned()
+            };
             return Ok(ToolOutput {
                 success: false,
-                body: json!({"error": "Provide a valid work category and task requirements"}),
+                body: json!({"error": error}),
             });
         }
-        match self.store.accept_operation(self.run, &call, |id| {
-            tools::action(
-                self.run,
-                &call,
-                self.cwd,
-                self.artifacts,
-                id,
-                self.proposal_approval.load(Ordering::Relaxed),
-                self.stage_attention.load(Ordering::Relaxed),
-            )
-        }) {
+        match self
+            .store
+            .accept_operation(self.run, &call, self.config, |id| {
+                tools::action(
+                    self.run,
+                    &call,
+                    self.cwd,
+                    self.artifacts,
+                    id,
+                    self.proposal_approval.load(Ordering::Relaxed),
+                    self.stage_attention.load(Ordering::Relaxed),
+                )
+            }) {
             Ok(Some(operation)) => Ok(ToolOutput {
                 success: true,
                 body: serde_json::to_value(operation)?,

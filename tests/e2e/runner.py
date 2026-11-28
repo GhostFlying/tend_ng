@@ -15,6 +15,8 @@ def main():
     parser.add_argument("server", type=lambda value: Path(value).resolve())
     parser.add_argument("cli", type=lambda value: Path(value).resolve())
     parser.add_argument("runner", type=lambda value: Path(value).resolve())
+    parser.add_argument("--legacy-review-capability", action="store_true",
+                        help="Run against a pre-catalogue Server that counts built-in review capabilities for issue-router.")
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory(prefix="tend-runner-") as temporary:
@@ -32,8 +34,8 @@ def main():
                 "repos": [{"id": "example", "path": "example"}],
                 "agents": [
                     {"id": "coordinator", "category": "issue-router", "revision": "coord-1"},
-                    {"id": "worker", "category": "implementation", "revision": "impl-1",
-                     "capabilities": capabilities},
+                    {"id": "worker", "category": "review" if args.legacy_review_capability else "implementation",
+                     "revision": "worker-1", "capabilities": capabilities},
                 ],
             }))
             return path

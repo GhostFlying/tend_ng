@@ -48,12 +48,23 @@ fn runner(id: &str, limit: u32, available: u32) -> RunnerProfile {
         handoff_slots: false,
         codebase_review_comments: false,
         direct_issue_owners: true,
+        dynamic_categories: false,
     }
 }
 
 fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<()> {
+    beat(store, profile, protocol, vec![])?;
+    Ok(())
+}
+
+fn beat(
+    store: &mut Store,
+    profile: RunnerProfile,
+    protocol: u32,
+    receipts: Vec<protocol::ClaimReceipt>,
+) -> Result<RunnerSyncReply> {
     assert!(profile.valid());
-    store
+    Ok(store
         .sync_runner(
             RunnerSync {
                 repair_host_artifacts: false,
@@ -62,7 +73,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
                 drained: false,
                 drain_active_slots: None,
                 reclaim_receipts: vec![],
-                receipts: vec![],
+                receipts,
                 runs: vec![],
                 records: vec![],
                 token_usage: vec![],
@@ -71,8 +82,7 @@ fn announce(store: &mut Store, profile: RunnerProfile, protocol: u32) -> Result<
             None,
             None,
         )?
-        .expect("fixture heartbeat");
-    Ok(())
+        .expect("fixture heartbeat"))
 }
 
 fn work() -> DispatchIssue {
@@ -531,9 +541,9 @@ fn direct_root_keeps_recorded_intent_and_requires_a_compatible_named_profile() -
     )?;
     let assignment: TaskAssignment = serde_json::from_str(&contract)?;
     assert_eq!(assignment.placement.runner_id, "selected");
-    assert!(assignments_to_send(&store.db, "selected", true, 2, true, false)?.is_empty());
+    assert!(assignments_to_send(&store.db, "selected", true, 2, true, false, false)?.is_empty());
     assert_eq!(
-        assignments_to_send(&store.db, "selected", true, 2, true, true)?.as_slice(),
+        assignments_to_send(&store.db, "selected", true, 2, true, true, false)?.as_slice(),
         std::slice::from_ref(&assignment),
     );
     assert_eq!(
@@ -565,6 +575,194 @@ fn direct_root_keeps_recorded_intent_and_requires_a_compatible_named_profile() -
     assert_eq!(
         placement(&store, &legacy.task_id)?.as_deref(),
         Some("legacy")
+    );
+    Ok(())
+}
+
+#[test]
+fn category_disable_preserves_reserved_issued_and_same_host_handoff() -> Result<()> {
+    let mut store = fixture(Path::new(":memory:"))?;
+    let mut catalogue = protocol::default_agent_categories();
+    let mut custom = catalogue
+        .iter()
+        .find(|entry| entry.id == "implementation")
+        .unwrap()
+        .clone();
+    custom.id = "variant".to_owned();
+    catalogue.push(custom);
+
+    fn publish(store: &Store, catalogue: &[protocol::AgentCategory]) -> Result<()> {
+        store.db.execute(
+            "INSERT INTO agent_category_snapshot VALUES (1, ?1)
+             ON CONFLICT(singleton) DO UPDATE SET catalogue = excluded.catalogue",
+            [serde_json::to_string(catalogue)?],
+        )?;
+        Ok(())
+    }
+
+    publish(&store, &catalogue)?;
+    let mut old = runner("old", 4, 4);
+    old.agents[1].category = "variant".into();
+    assert!(
+        beat(&mut store, old.clone(), 2, vec![])?
+            .agent_categories
+            .is_none()
+    );
+    let IssueDetail::Dispatched(pending) =
+        dispatch_category(&mut store, "variant", &work(), false, Some("variant"))?
+    else {
+        panic!("expected a dispatched Issue");
+    };
+    assert_eq!(pending.status, "awaiting_assignment");
+    assert!(pending.placement.is_none());
+
+    let mut current = old;
+    current.runner_id = "new".into();
+    current.dynamic_categories = true;
+    announce(&mut store, current.clone(), 2)?;
+    store.schedule_assignments(&mut 0)?;
+    let first: String = store.db.query_row(
+        "SELECT id FROM runner_assignments WHERE task_id=?1 AND state='reserved'",
+        [&pending.task_id],
+        |r| r.get(0),
+    )?;
+    let original = current.agents[1].clone();
+    catalogue.last_mut().unwrap().enabled = false;
+    publish(&store, &catalogue)?;
+    current.agents[1].revision = "updated".into();
+    current.agents[1].model = Some("new-model".into());
+    current.workspace_root = Some("/work".into());
+    let issued = beat(&mut store, current.clone(), 2, vec![])?.assignments;
+    assert_eq!(issued.len(), 1);
+    assert_eq!(issued[0].placement.assignment_id, first);
+    assert_eq!(issued[0].placement.agent, original);
+    assert!(dispatch_category(&mut store, "denied", &work(), false, Some("variant")).is_err());
+    store.db.execute(
+        "UPDATE runner_assignments SET expires_at=0 WHERE id=?1",
+        [&first],
+    )?;
+    store.schedule_assignments(&mut 0)?;
+    assert_eq!(
+        beat(&mut store, current.clone(), 2, vec![])?.assignments,
+        issued
+    );
+    for _ in 0..2 {
+        let reply = beat(
+            &mut store,
+            current.clone(),
+            2,
+            vec![protocol::ClaimReceipt {
+                assignment_id: first.clone(),
+                decision: ClaimDecision::Accepted,
+            }],
+        )?;
+        assert_eq!(reply.confirmed_receipts, [first.clone()]);
+    }
+    let mut successor = current.clone();
+    successor.runner_id = "successor".into();
+    successor.standby = true;
+    successor.handoff_slots = true;
+    announce(&mut store, successor.clone(), 2)?;
+    assert!(store.replace_runner("new", "successor", None)?.is_some());
+    let proof = protocol::HandoffProof {
+        id: "handoff".into(),
+        assignment_id: first,
+        task_id: pending.task_id.clone(),
+        successor: "successor".into(),
+        context: protocol::HandoffContext {
+            phase: protocol::HandoffPhase::Queued,
+            operations: vec![],
+            workspace_stamp: None,
+        },
+    };
+    assert!(crate::store::handoff::apply(&store.db, "new", &proof)?);
+    crate::store::handoff::note_drain_slots(&store.db, "new", 0)?;
+    store.schedule_assignments(&mut 0)?;
+    let next = beat(&mut store, successor, 2, vec![])?.assignments;
+    assert_eq!(next.len(), 1);
+    assert_eq!(next[0].task_id, pending.task_id);
+    assert_eq!(next[0].placement.agent, original);
+    assert!(next[0].handoff.is_some());
+    Ok(())
+}
+
+#[test]
+fn queued_tasks_keep_the_agent_profile_at_admission() -> Result<()> {
+    let mut store = fixture(Path::new(":memory:"))?;
+    let mut profile = runner("one", 3, 0);
+    profile.dynamic_categories = true;
+    let original = profile.agents[1].clone();
+    announce(&mut store, profile.clone(), 2)?;
+    let IssueDetail::Dispatched(early) =
+        dispatch_category(&mut store, "early", &work(), false, Some("implementation"))?
+    else {
+        panic!("missing old Task")
+    };
+    assert!(early.placement.is_none());
+    profile.agents[1].model = Some("new-model".into());
+    profile.agents[1].app_server = Some("new-cli".into());
+    profile.agents[1].revision = "v2".into();
+    profile.available_for_assignment = 3;
+    announce(&mut store, profile.clone(), 2)?;
+    store.schedule_assignments(&mut 0)?;
+    let IssueDetail::Dispatched(late) =
+        dispatch_category(&mut store, "late", &work(), false, Some("implementation"))?
+    else {
+        panic!("missing new Task")
+    };
+    let deliveries = beat(&mut store, profile.clone(), 2, vec![])?.assignments;
+    assert_eq!(deliveries.len(), 2);
+    assert_eq!(
+        deliveries
+            .iter()
+            .find(|a| a.task_id == early.task_id)
+            .unwrap()
+            .placement
+            .agent,
+        original
+    );
+    assert_eq!(
+        deliveries
+            .iter()
+            .find(|a| a.task_id == late.task_id)
+            .unwrap()
+            .placement
+            .agent,
+        profile.agents[1]
+    );
+    Ok(())
+}
+
+#[test]
+fn pending_task_can_move_to_a_later_host_offering_the_same_version() -> Result<()> {
+    let mut store = fixture(Path::new(":memory:"))?;
+    let mut full = runner("original", 1, 0);
+    full.host_id = "old-host".into();
+    full.dynamic_categories = true;
+    announce(&mut store, full.clone(), 2)?;
+    let IssueDetail::Dispatched(task) = dispatch_category(
+        &mut store,
+        "pending",
+        &work(),
+        false,
+        Some("implementation"),
+    )?
+    else {
+        panic!("expected dispatched work")
+    };
+    let mut newcomer = runner("another", 2, 2);
+    newcomer.host_id = "new-host".into();
+    newcomer.dynamic_categories = true;
+    newcomer.agents[1].model = Some("different".into());
+    announce(&mut store, newcomer.clone(), 2)?;
+    store.schedule_assignments(&mut 0)?;
+    assert!(placement(&store, &task.task_id)?.is_none());
+    newcomer.agents[1] = full.agents[1].clone();
+    announce(&mut store, newcomer, 2)?;
+    store.schedule_assignments(&mut 0)?;
+    assert_eq!(
+        placement(&store, &task.task_id)?.as_deref(),
+        Some("another")
     );
     Ok(())
 }

@@ -31,7 +31,7 @@ impl DispatchRequest {
         })
     }
 
-    fn category(&self) -> &str {
+    pub(crate) fn category(&self) -> &str {
         self.category.as_deref().unwrap_or("issue-router")
     }
 }
@@ -176,6 +176,15 @@ impl Store {
             };
         }
 
+        if record_only {
+            // A backlog record has no Task yet. Check enablement on explicit start.
+            protocol::admitted_agent_category(
+                &super::categories::read(&tx)?,
+                dispatch.category(),
+                Some(true),
+            )
+            .map_err(super::categories::Unavailable)?;
+        }
         let issue_id = protocol::new_id();
         let operation_id = protocol::new_id();
         tx.execute(
@@ -345,6 +354,10 @@ fn start_first_task(
 ) -> Result<()> {
     let task = protocol::new_id();
     let work = &dispatch.work;
+    let catalogue = super::categories::read(db)?;
+    let category = protocol::check_agent_category(&catalogue, dispatch.category(), Some(true))
+        .map_err(super::categories::Unavailable)?;
+    let workspace = (category.role == protocol::AgentRole::Work).then_some(issue);
     db.execute(
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities, base_refs,
                             requested_agent, pinned_runner_id, pinned_agent_id, workspace_key)
@@ -358,13 +371,14 @@ fn start_first_task(
             work.agent.as_ref().and_then(|agent| agent.runner_id.as_ref()),
             work.agent.as_ref().map(|agent| &agent.id),
             dispatch.category(),
-            dispatch.category.as_ref().map(|_| issue),
+            workspace,
         ],
     )?;
     db.execute(
         "UPDATE router_dispatches SET task_id = ?2 WHERE operation_id = ?1",
         params![operation, task],
     )?;
+    super::runner::freeze_task_agents(db, &task)?;
     let issue = db.query_row(
         &format!("{DISPATCH_QUERY} WHERE t.id = ?1"),
         [&task],
@@ -463,6 +477,11 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
                 Box::new(error),
             )
         })?;
+    let category: String = row.get(5)?;
+    let status: String = row.get(6)?;
+    let assignment_reason = (status == "awaiting_assignment").then(|| {
+        format!("Waiting for assignment in category {category}. Check eligible Runners, available slots, required repositories and capabilities, and any pinned Agent.")
+    });
     Ok(IssueDispatch {
         issue_id: row.get(0)?,
         short_number: row.get(18)?,
@@ -470,8 +489,9 @@ pub(super) fn read_dispatch(row: &rusqlite::Row<'_>) -> rusqlite::Result<IssueDi
         operation_id: row.get(2)?,
         source_message_id: row.get(3)?,
         chat_id: row.get(4)?,
-        category: row.get(5)?,
-        status: row.get(6)?,
+        category,
+        status,
+        assignment_reason,
         placement,
         issue_state: row.get(13)?,
         parent_issue_id: row.get(15)?,

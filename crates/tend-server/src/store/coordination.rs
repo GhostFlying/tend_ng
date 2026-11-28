@@ -1,7 +1,7 @@
 use anyhow::Result;
 use protocol::{
-    IssueDelivery, IssueInput, IssueInputCause, RUNNER_SYNC_BATCH, RunObservation, RunOutcome,
-    RunPhase, RunnerProfile, TaskAssignment, WORK_CATEGORIES, WorkAction, WorkOperation,
+    AgentRole, IssueDelivery, IssueInput, IssueInputCause, RUNNER_SYNC_BATCH, RunObservation,
+    RunOutcome, RunPhase, RunnerProfile, TaskAssignment, WorkAction, WorkOperation,
     matching_task_agent,
 };
 use rusqlite::{Connection, OptionalExtension, params};
@@ -126,7 +126,27 @@ pub fn apply(
     else {
         return Ok(false);
     };
-    let owns_root = protocol::can_own_root(&category, parent_issue.as_deref());
+    let role = if let Some(role) = protocol::legacy_agent_role(&category) {
+        role
+    } else {
+        let assignment: TaskAssignment = serde_json::from_str(&contract)?;
+        let Some(role @ (AgentRole::Coordinator | AgentRole::Work | AgentRole::Review)) =
+            assignment.role()
+        else {
+            return Ok(false);
+        };
+        if assignment.placement.agent.category != category {
+            return Ok(false);
+        }
+        role
+    };
+    let owns_root =
+        parent_issue.is_none() && matches!(role, AgentRole::Coordinator | AgentRole::Work);
+    if role == AgentRole::Coordinator
+        && matches!(operation.action, WorkAction::SubmitArtifact { .. })
+    {
+        return Ok(false);
+    }
     if !owns_root
         && matches!(
             operation.action,
@@ -161,7 +181,9 @@ pub fn apply(
         ..
     } = &operation.action
         && (!owns_root
-            || !WORK_CATEGORIES.contains(&requested.as_str())
+            || !super::categories::read(db)?.iter().any(|entry| {
+                entry.id == *requested && entry.delegated && runner.supports_category(entry, false)
+            })
             || work
                 .agent
                 .as_ref()
@@ -178,7 +200,7 @@ pub fn apply(
             scope,
             work,
             rereview,
-        } if category == "review"
+        } if role == AgentRole::Review
             || !protocol::valid_id(issue_id)
             || !protocol::valid_id(task_id)
             || !protocol::valid_tend_review(candidate, scope, work)
@@ -206,7 +228,7 @@ pub fn apply(
         }
         WorkAction::DeliverReview { result, request_id } => {
             let bound = super::tend_review::request_for_run(db, &operation.run_id)?;
-            if category != "review"
+            if role != AgentRole::Review
                 || !result.valid()
                 || bound.is_none()
                 || request_id
@@ -291,7 +313,7 @@ pub fn apply(
             }
             let author: TaskAssignment = serde_json::from_str(&contract)?;
             let workspace = author.workspace_path();
-            if !rereview {
+            let unavailable = if !rereview {
                 let coordination_parent = parent_issue.as_deref().unwrap_or(&source_issue);
                 delegate(
                     db,
@@ -305,8 +327,10 @@ pub fn apply(
                     "review",
                     workspace.strip_prefix("workspaces/"),
                     work,
-                )?;
-            }
+                )?
+            } else {
+                None
+            };
             super::tend_review::bind(
                 db,
                 &operation.operation_id,
@@ -318,7 +342,10 @@ pub fn apply(
                 scope,
                 &workspace,
             )?;
-            if !super::tend_review::author_can_request(db, operation, task_id, &source_task)? {
+            if let Some(reason) = unavailable {
+                super::tend_review::not_run(db, task_id, operation, &reason)?;
+            } else if !super::tend_review::author_can_request(db, operation, task_id, &source_task)?
+            {
                 if !rereview {
                     db.execute(
                         "UPDATE tasks SET status = 'cancelled' WHERE id = ?1",
@@ -580,7 +607,7 @@ fn delegate(
     requested: &str,
     workspace_key: Option<&str>,
     work: &protocol::DispatchIssue,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let runner_id = &runner.runner_id;
     db.execute(
         "INSERT INTO issues (id, source_seq, title, objective, parent_issue_id)
@@ -621,17 +648,73 @@ fn delegate(
     )?;
     if super::backlog::parked(db, parent_issue)? || super::backlog::old_task(db, source_task)? {
         super::backlog::park_late_child(db, issue_id, task_id)?;
-        return Ok(());
+        return Ok(None);
     }
-    if requested == "review" && !runner.shared_reviews
-        || matching_task_agent(
-            runner,
-            requested,
-            work,
-            work.agent.as_ref().map(|agent| agent.id.as_str()),
-        )
-        .is_none()
+    let catalogue = super::categories::read(db)?;
+    // Runner-side admission is durable. A disable or removal between local
+    // acceptance and upload does not change the child's execution contract.
+    // Older clients have no local catalogue and admission is decided here.
+    if operation.admission.is_none()
+        && let Err(reason) = protocol::check_agent_category(&catalogue, requested, Some(false))
     {
+        let summary = format!("Delegation was not started: {reason}.");
+        db.execute(
+            "UPDATE tasks SET status = 'cancelled' WHERE id = ?1",
+            [task_id],
+        )?;
+        db.execute(
+            "UPDATE issues SET state = 'cancelled' WHERE id = ?1",
+            [issue_id],
+        )?;
+        if matches!(operation.action, WorkAction::Delegate { .. }) {
+            enqueue(
+                db,
+                source_task,
+                IssueInput {
+                    input_id: operation.operation_id.clone(),
+                    child_issue_id: issue_id.to_owned(),
+                    child_task_id: task_id.to_owned(),
+                    cause: IssueInputCause::IssueClosed,
+                    summary: summary.clone(),
+                },
+            )?;
+        }
+        return Ok(Some(summary));
+    }
+    if let Some(agent) = operation
+        .admission
+        .as_ref()
+        .and_then(|admission| admission.agent.as_ref())
+    {
+        super::runner::freeze_task_agent_for_host(db, task_id, &runner.host_id, agent)?;
+        return Ok(None);
+    }
+    super::runner::freeze_task_agents(db, task_id)?;
+    let reason = match protocol::admitted_agent_category(&catalogue, requested, Some(false)) {
+        Err(error) => Some(error),
+        Ok(category) if category.role == AgentRole::Review && !runner.shared_reviews => Some(
+            format!("Runner {runner_id} does not yet support shared review"),
+        ),
+        Ok(category) if !runner.supports_category(category, false) => Some(format!(
+            "Runner {runner_id} cannot interpret Agent category {requested}"
+        )),
+        Ok(category)
+            if matching_task_agent(
+                runner,
+                category,
+                &catalogue,
+                work,
+                work.agent.as_ref().map(|agent| agent.id.as_str()),
+            )
+            .is_none() =>
+        {
+            Some(format!(
+                "Runner {runner_id} currently has no matching configuration"
+            ))
+        }
+        _ => None,
+    };
+    if let Some(reason) = reason {
         let missing_repo_ids = work
             .repo_ids
             .iter()
@@ -651,19 +734,11 @@ fn delegate(
                     required_capabilities: work.required_capabilities.clone(),
                     agent_id: work.agent.as_ref().map(|agent| agent.id.clone()),
                 },
-                summary: if requested == "review" && !runner.shared_reviews {
-                    format!(
-                        "Runner {runner_id} does not yet support shared review. The original dispatch remains pending."
-                    )
-                } else {
-                    format!(
-                        "Runner {runner_id} currently has no matching configuration. The original dispatch remains pending."
-                    )
-                },
+                summary: format!("{reason}. The original dispatch remains pending."),
             },
         )?;
     }
-    Ok(())
+    Ok(None)
 }
 
 // A bound review for a direct Owner already delivers a result (including
@@ -676,7 +751,9 @@ pub(super) fn review_reports_directly(
 ) -> Result<bool> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM tend_reviews v JOIN tasks author ON author.id = v.author_task_id
-         WHERE v.review_task_id = ?1 AND author.issue_id = ?2 AND author.category != 'issue-router')",
+         LEFT JOIN runner_assignments assignment ON assignment.id = author.current_assignment
+         WHERE v.review_task_id = ?1 AND author.issue_id = ?2 AND author.category != 'issue-router'
+           AND coalesce(json_extract(assignment.contract, '$.agent_role'), '') != 'coordinator')",
         params![review_task, parent_issue],
         |row| row.get(0),
     )?)
@@ -840,13 +917,14 @@ fn find_target_task(db: &Connection, issue: &str, barrier: bool) -> Result<Optio
         "INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities,
                             pinned_runner_id, pinned_agent_id, previous_task_id, workspace_key, base_refs, requested_agent)
          SELECT ?1, issue_id, category, 'awaiting_assignment', repo_ids,
-                CASE WHEN category = 'issue-router' THEN '[]' ELSE required_capabilities END, ?3, ?4, id, workspace_key, base_refs, requested_agent
+                CASE WHEN ?5 THEN '[]' ELSE required_capabilities END, ?3, ?4, id, workspace_key, base_refs, requested_agent
          FROM tasks WHERE id = ?2",
         params![
             task,
             previous,
             prior.placement.runner_id,
-            prior.placement.agent.id
+            prior.placement.agent.id,
+            prior.role() == Some(AgentRole::Coordinator),
         ],
     )?;
     db.execute(
@@ -1179,6 +1257,77 @@ mod tests {
                 created_at: None,
             },
         }
+    }
+
+    #[test]
+    fn offline_child_uses_locally_admitted_version_after_disable() -> Result<()> {
+        let store = Store::initialize(std::path::Path::new(":memory:"))?;
+        let db = store.db;
+        db.execute_batch(r#"
+            INSERT INTO chat_messages (id, chat_id, text) VALUES ('source','main','Fixture');
+            INSERT INTO issues (id, source_seq, title, objective) VALUES ('root',1,'Fixture','');
+            INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities)
+                VALUES ('owner','root','issue-router','running','[]','[]');
+            INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner','host','{}',0);
+            INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at)
+                VALUES ('assignment','owner','runner','{"placement":{"agent":{"id":"owner"}}}','accepted',0);
+            INSERT INTO task_runs (id, assignment_id, task_id, observation)
+                VALUES ('run','assignment','owner','{"turn_id":"turn"}');
+        "#)?;
+        let mut catalogue = protocol::default_agent_categories();
+        catalogue
+            .iter_mut()
+            .find(|e| e.id == "implementation")
+            .unwrap()
+            .enabled = false;
+        db.execute(
+            "INSERT INTO agent_category_snapshot VALUES (1, ?1)",
+            [serde_json::to_string(&catalogue)?],
+        )?;
+        let runner: RunnerProfile = serde_json::from_value(serde_json::json!({
+            "runner_id": "runner", "host_id":"host", "repos":[], "slot_limit":1,
+            "running_slots":1, "available_for_assignment":0, "dynamic_categories": true,
+            "agents":[{"id":"dev","category":"implementation","revision":"v2","model":"new"}]
+        }))?;
+        for (id, admitted) in [("offline", true), ("legacy", false)] {
+            let mut operation = serde_json::json!({
+                "operation_id": id, "assignment_id":"assignment", "run_id":"run",
+                "action":{"kind":"delegate","issue_id": id, "task_id":id,"category":"implementation",
+                    "isolated_workspace":false,"work":{"title":"Child","objective":"Implement"}},
+            });
+            if admitted {
+                operation["admission"] = serde_json::json!({
+                    "agent":{"id":"dev","category":"implementation","revision":"v1","model":"original"}
+                });
+            }
+            let op: WorkOperation = serde_json::from_value(operation)?;
+            // Synchronization and response-loss replay must accept the original record.
+            for _ in 0..2 {
+                assert!(apply(&db, &runner, &op, &Default::default())?);
+            }
+        }
+        let version = db.query_row(
+            "SELECT json_extract(agent,'$.model') FROM task_agent_versions WHERE task_id = 'offline' AND host_id = 'host'",
+            [], |r| r.get::<_, String>(0),
+        )?;
+        assert_eq!(version, "original");
+        assert_eq!(
+            db.query_row("SELECT status FROM tasks WHERE id = 'legacy'", [], |r| {
+                r.get::<_, String>(0)
+            })?,
+            "cancelled"
+        );
+        let input: String = db.query_row(
+            "SELECT payload FROM issue_inputs WHERE id = 'legacy' AND task_id = 'owner'",
+            [],
+            |r| r.get(0),
+        )?;
+        assert!(
+            serde_json::from_str::<IssueInput>(&input)?
+                .summary
+                .contains("disabled")
+        );
+        Ok(())
     }
 
     #[test]

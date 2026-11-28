@@ -2,6 +2,7 @@ mod artifacts;
 pub(crate) mod attention;
 mod backlog;
 mod board;
+pub(crate) mod categories;
 mod codebase_comments;
 pub(crate) mod control;
 mod coordination;
@@ -97,7 +98,8 @@ const PAGE_SIZE: usize = 50;
 const REQUEST_PRICING_COVERAGE_SCHEMA: i64 = 54;
 const ARCHIVED_CHATS_SCHEMA: i64 = 56;
 const FEISHU_SOURCE_EXPIRY_SCHEMA: i64 = 57;
-pub(crate) const SCHEMA_VERSION: i64 = FEISHU_SOURCE_EXPIRY_SCHEMA;
+const AGENT_CATEGORIES_SCHEMA: i64 = 58;
+pub(crate) const SCHEMA_VERSION: i64 = AGENT_CATEGORIES_SCHEMA;
 
 pub struct Store {
     db: Connection,
@@ -399,6 +401,9 @@ impl Store {
         }
         if version < FEISHU_SOURCE_EXPIRY_SCHEMA {
             feishu::migrate_source_expiry(&tx)?;
+        }
+        if version < AGENT_CATEGORIES_SCHEMA {
+            categories::migrate(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

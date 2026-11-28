@@ -105,7 +105,8 @@ impl Store {
                        OR (json_extract(o.operation, '$.action.kind') = 'submit_artifact'
                          AND EXISTS (SELECT 1 FROM received_assignments a WHERE a.id = ?1
                             AND json_extract(a.contract, '$.parent_issue_id') IS NULL
-                            AND json_extract(a.contract, '$.placement.agent.category') != 'issue-router'))
+                            AND json_extract(a.contract, '$.placement.agent.category') != 'issue-router'
+                            AND coalesce(json_extract(a.contract, '$.agent_role'), '') != 'coordinator'))
                        OR (json_extract(o.operation, '$.action.kind') = 'request_review'
                          AND NOT EXISTS(SELECT 1 FROM local_issue_inputs i WHERE i.assignment_id = ?1
                            AND i.run_id IS NOT NULL AND json_extract(i.payload, '$.kind') = 'review_finished'

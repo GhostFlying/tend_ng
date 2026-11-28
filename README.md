@@ -94,6 +94,33 @@ Send new ordinary messages to `main`. Use `tend chat list --archived` to find hi
 
 Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach.
 
+## 运行期更新 Agent 分类与候选
+
+Server 默认检查数据库旁的分类文件，例如 `server.sqlite` 对应 `server.agent-categories.json`。可以在运行中首次创建该文件，也可以用 `--agent-categories /path/to/agent-categories.json` 指定位置。文件内容 `[]` 表示只启用默认分类。例如：
+
+```json
+[
+  {
+    "id": "implementation-complex",
+    "display_name": "深度实施",
+    "description": "已有实现路径存在实质技术不确定性，例如多个子系统的行为必须一起验证。",
+    "role": "work",
+    "top_level": true,
+    "delegated": true
+  }
+]
+```
+
+同时在准备接单的 Runner **原** `--config` 文件的 `agents` 中加入具名候选。下例假定本机 `app_servers` 中已登记 `codex-ark`。常规实施和经济档可以继续使用各自的具名 Agent。
+
+```json
+{ "id": "aspen", "category": "implementation-complex", "revision": "1", "app_server": "codex-ark", "model": "gpt-6.2-astra", "reasoning_effort": "high" }
+```
+
+运行时在同一目录写入完整的新 JSON，再原子替换原文件。Server 和 Runner 启动时加载配置，之后默认每 60 秒检查各自的配置文件。可用 `TEND_AGENT_CONFIG_RELOAD_SECONDS` 设置检查间隔（正整数秒）。Runner 在正常同步时发布新候选并接收 Server 的分类快照。然后用 `tend agent categories` 确认分类，用 `tend agent candidates implementation-complex` 核对目标 Runner 有匹配候选。旧 Runner 的快照仍可见，但它们只会领取支持的内置类别。Router 与顶层 Owner 均可用 `tend_agent_candidates` 查当前目录。
+
+更名或改说明用原 ID。停用时设 `"enabled": false`，移除自定义条目也会停用该 ID。要改 ID、角色或派发范围，新增一个 ID 并停用旧 ID。可以原地修改同名 Agent 的 CLI、launcher 参数、Codex home、模型和 effort；Runner 为不同的执行配置保留可区分的版本。只有 `agents` 和 `app_servers` 在运行中刷新，实例 ID、仓库、槽位和其他启动配置不变。无效的热更新保留原快照并记日志。已经受理且有匹配配置的 Task，包括排队、等待和同 Host 换代后的接续，使用原具名 Agent 版本。新 Task 使用更新后的配置。请保留仍有工作或历史记录依赖的 launcher 和 Codex home。详见 [类别与调度契约](docs/agent-selection.md#部署分类目录)。
+
 ## Runner 常规升级（默认同机新旧代交接）
 
 先让 Server 使用支持共享接替预算和退役文件确认的版本（Runner 注册行含 `host_data_policy: 1`），再把目标 [main-build](https://github.com/GhostFlying/tend_ng/releases/tag/main-build) 归档解压到本机版本目录。保留归档的 `bin/` 和 `REVISION`，不要覆盖前驱正在使用的文件。用与前驱相同的 Linux 用户、PID 命名空间和服务环境运行以下入口（需要 Python 3.9+）。保持前驱运行。若由服务管理器启动，确保它不会在前驱正常退出后重启旧代。

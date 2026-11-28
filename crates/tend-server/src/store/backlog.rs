@@ -226,6 +226,16 @@ impl Store {
             if super::tend_review::binding(&tx, &previous)?.is_some() {
                 return Ok(ResultState::Conflict);
             }
+            let (category, top_level): (String, bool) = tx.query_row(
+                "SELECT t.category, i.parent_issue_id IS NULL FROM tasks t JOIN issues i ON i.id = t.issue_id WHERE t.id = ?1",
+                [&previous], |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            protocol::check_agent_category(
+                &super::categories::read(&tx)?,
+                &category,
+                Some(top_level),
+            )
+            .map_err(super::categories::Unavailable)?;
             super::coordination::flush_pending(&tx, &previous)?;
             let task = protocol::new_id();
             tx.execute(
@@ -239,6 +249,7 @@ impl Store {
                  WHERE t.id = ?2",
                 params![task, previous],
             )?;
+            super::runner::freeze_task_agents(&tx, &task)?;
             super::coordination::move_pending(&tx, &previous, &task)?;
             tx.execute("DELETE FROM issue_parks WHERE issue_id = ?1", [issue])?;
             super::runner::assign_task(&tx, &task)?;
@@ -283,7 +294,9 @@ mod tests {
                  ('neighbor-task', 'neighbor', 'issue-router', 'awaiting_assignment', '[]', '[]');
              INSERT INTO router_dispatches (operation_id, issue_id, task_id, attempt_id, call_id, request)
                  VALUES ('dispatch', 'root', 'root-task', 'attempt', 'call', '{}');
-             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host', '{}', 0);
+             INSERT INTO runners (id, host_id, profile, last_seen) VALUES ('runner', 'host',
+                json_object('runner_id','runner','host_id','host','repos',json_array(),'agents',json_array(),
+                            'slot_limit',1,'running_slots',0,'available_for_assignment',1), 0);
              INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at)
                  VALUES ('child-claim', 'child-task', 'runner', '{}', 'reserved', 1);
              UPDATE tasks SET current_assignment = 'child-claim' WHERE id = 'child-task';",
@@ -328,6 +341,28 @@ mod tests {
             store.start_issue("root", None, Some("park"))?,
             ResultState::Conflict
         ));
+        let mut catalogue = protocol::default_agent_categories();
+        catalogue
+            .iter_mut()
+            .find(|entry| entry.id == "issue-router")
+            .unwrap()
+            .enabled = false;
+        store.db.execute(
+            "INSERT INTO agent_category_snapshot VALUES (1, ?1)",
+            [serde_json::to_string(&catalogue)?],
+        )?;
+        assert!(
+            store
+                .start_issue("root", None, Some("start"))
+                .err()
+                .expect("disabled category")
+                .to_string()
+                .contains("disabled")
+        );
+        assert!(parked(&store.db, "root")?);
+        store
+            .db
+            .execute("DELETE FROM agent_category_snapshot", [])?;
         let ResultState::Found(continued) = store.start_issue("root", None, Some("start"))? else {
             panic!("expected restart")
         };

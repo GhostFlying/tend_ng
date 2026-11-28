@@ -1,27 +1,11 @@
-use crate::{AttentionRequest, DispatchIssue, IssueMessage};
+use crate::{
+    AgentCategory, AgentRole, AttentionRequest, DispatchIssue, IssueMessage, legacy_agent_role,
+};
 use serde::{Deserialize, Serialize};
 
 pub const RUNNER_PROTOCOL: u32 = 2;
 pub const EXECUTION_HOSTS_PATH: &str = "/api/v1/execution-hosts";
 pub const RUNNER_SYNC_BATCH: usize = 32;
-pub const WORK_CATEGORIES: &[&str] = &[
-    "implementation",
-    "implementation-economy",
-    "investigation",
-    "review",
-];
-
-pub const TOP_LEVEL_CATEGORIES: &[&str] = &[
-    "issue-router",
-    "implementation",
-    "implementation-economy",
-    "investigation",
-];
-
-pub fn can_own_root(category: &str, parent_issue: Option<&str>) -> bool {
-    parent_issue.is_none() && TOP_LEVEL_CATEGORIES.contains(&category)
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentProfile {
     pub id: String,
@@ -61,7 +45,7 @@ pub struct AgentQuery {
 
 impl AgentQuery {
     pub fn valid(&self) -> bool {
-        (self.category == "issue-router" || WORK_CATEGORIES.contains(&self.category.as_str()))
+        crate::valid_category_id(&self.category)
             && self
                 .repo_ids
                 .iter()
@@ -77,7 +61,7 @@ pub struct AgentCandidate {
     pub agent: AgentProfile,
 }
 
-#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RunnerProfile {
     pub runner_id: String,
     pub host_id: String,
@@ -100,12 +84,14 @@ pub struct RunnerProfile {
     pub codebase_review_comments: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub direct_issue_owners: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dynamic_categories: bool,
 }
 
 impl RunnerProfile {
-    pub fn supports_root_category(&self, category: &str) -> bool {
-        category == "issue-router"
-            || self.direct_issue_owners && TOP_LEVEL_CATEGORIES.contains(&category)
+    pub fn supports_category(&self, category: &AgentCategory, top_level: bool) -> bool {
+        (self.dynamic_categories || legacy_agent_role(&category.id) == Some(category.role))
+            && (!top_level || category.role == AgentRole::Coordinator || self.direct_issue_owners)
     }
 
     pub fn valid(&self) -> bool {
@@ -117,6 +103,7 @@ impl RunnerProfile {
                 crate::valid_id(&agent.id)
                     && agent.app_server.as_deref().is_none_or(crate::valid_id)
                     && !agent.category.is_empty()
+                    && (!self.dynamic_categories || crate::valid_category_id(&agent.category))
                     && !agent.revision.is_empty()
             })
     }
@@ -133,6 +120,8 @@ pub struct Placement {
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct TaskAssignment {
     pub placement: Placement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_role: Option<AgentRole>,
     pub task_id: String,
     pub issue_id: String,
     pub source_message_id: String,
@@ -153,11 +142,13 @@ pub struct TaskAssignment {
 }
 
 impl TaskAssignment {
+    pub fn role(&self) -> Option<AgentRole> {
+        legacy_agent_role(&self.placement.agent.category).or(self.agent_role)
+    }
+
     pub fn owns_root(&self) -> bool {
-        can_own_root(
-            &self.placement.agent.category,
-            self.parent_issue_id.as_deref(),
-        )
+        self.parent_issue_id.is_none()
+            && matches!(self.role(), Some(AgentRole::Coordinator | AgentRole::Work))
     }
 
     pub fn workspace_path(&self) -> String {
@@ -220,6 +211,8 @@ pub struct RunnerSync {
 #[derive(Debug, Deserialize, Serialize)]
 pub struct RunnerSyncReply {
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_categories: Option<Vec<AgentCategory>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution_slot_limit: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub drain_acknowledged: Option<bool>,
@@ -270,6 +263,14 @@ pub struct WorkOperation {
     pub assignment_id: String,
     pub run_id: String,
     pub action: WorkAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub admission: Option<ChildTaskAdmission>,
+}
+
+/// Captured together with the local tool receipt, before a possibly offline sync.
+#[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct ChildTaskAdmission {
+    pub agent: Option<AgentProfile>,
 }
 
 #[derive(Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -509,13 +510,15 @@ pub fn reconcile_path(runner_id: &str, task_id: &str) -> String {
 
 pub fn matching_task_agent<'a>(
     profile: &'a RunnerProfile,
-    category: &str,
+    category: &AgentCategory,
+    categories: &[AgentCategory],
     work: &DispatchIssue,
     named: Option<&str>,
 ) -> Option<&'a AgentProfile> {
     matching_agents(
         profile,
         category,
+        categories,
         &work.repo_ids,
         &work.required_capabilities,
     )
@@ -524,7 +527,8 @@ pub fn matching_task_agent<'a>(
 
 pub fn matching_agents<'profile, 'filters>(
     profile: &'profile RunnerProfile,
-    category: &'filters str,
+    category: &'filters AgentCategory,
+    categories: &[AgentCategory],
     repos: &[String],
     capabilities: &'filters [String],
 ) -> impl Iterator<Item = &'profile AgentProfile> + use<'profile, 'filters> {
@@ -533,14 +537,23 @@ pub fn matching_agents<'profile, 'filters>(
             .iter()
             .all(|cap| agent.capabilities.contains(cap))
     };
-    let coordinator = category == "issue-router";
+    let coordinator = category.role == AgentRole::Coordinator;
     let eligible = repos.iter().all(|repo| profile.repos.contains(repo))
         && (!coordinator
             || capabilities.is_empty()
             || profile.agents.iter().any(|agent| {
-                WORK_CATEGORIES.contains(&agent.category.as_str()) && satisfies(agent)
+                categories.iter().any(|entry| {
+                    // Before category negotiation, issue-router capability matching
+                    // included all four built-in delegated categories, including review.
+                    let can_provide_capabilities = entry.role == AgentRole::Work
+                        || (!profile.dynamic_categories && entry.id == "review");
+                    entry.id == agent.category
+                        && can_provide_capabilities
+                        && entry.dispatchable(false)
+                        && profile.supports_category(entry, false)
+                }) && satisfies(agent)
             }));
     profile.agents.iter().filter(move |agent| {
-        eligible && agent.category == category && (coordinator || satisfies(agent))
+        eligible && agent.category == category.id && (coordinator || satisfies(agent))
     })
 }

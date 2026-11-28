@@ -2,7 +2,9 @@ mod feishu;
 pub use feishu::*;
 use serde::{Deserialize, Serialize};
 
+mod categories;
 mod runner;
+pub use categories::*;
 pub use runner::*;
 pub mod token_prices;
 mod token_usage;
@@ -147,6 +149,8 @@ pub struct IssueDispatch {
     pub chat_id: String,
     pub category: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignment_reason: Option<String>,
     #[serde(default = "open_issue")]
     pub issue_state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]

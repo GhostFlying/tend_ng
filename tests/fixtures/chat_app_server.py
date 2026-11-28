@@ -611,7 +611,8 @@ for line in sys.stdin:
                     ).fetchone()
                     schema = next(tool["inputSchema"] for tool in json.loads(catalogue)
                                   if tool["name"] == "tend_dispatch_issue")
-                    assert category in schema["properties"]["category"]["enum"]
+                    category_schema = schema["properties"]["category"]
+                    assert category_schema["type"] == "string" and "enum" not in category_schema
                     for rule in ("one person can deliver the outcome", "verified remote main SHA",
                                  "only when the user explicitly asks for that endpoint",
                                  "one responsible Agent observe"):

@@ -286,8 +286,15 @@ def upgrade(args, bundle, revision, config, db, state_dir):
                     "Inspection options can change only before replace and with the successor stopped")
             settings["inspect"] = inspect
             publish(manifest, state)
-    if not next_config.exists() or json.loads(next_config.read_text()) != settings:
-        require(find_runner(next_db, next_config) is None, f"Live successor configuration differs at {next_config}")
+    if next_config.exists() and old["successor"] == new_id:
+        def startup_fields(value):
+            return {key: setting for key, setting in value.items() if key not in ("agents", "app_servers")}
+        actual = json.loads(next_config.read_text())
+        require(startup_fields(actual) == startup_fields(settings),
+                f"Successor startup configuration differs at {next_config}")
+    elif not next_config.exists() or json.loads(next_config.read_text()) != settings:
+        require(old["successor"] is None and find_runner(next_db, next_config) is None,
+                f"Missing or changed successor configuration at {next_config}")
         publish(next_config, settings)
 
     print(f"Upgrading {old_id} to {new_id} from {revision}; state and logs: {state_dir}", file=sys.stderr)
@@ -317,11 +324,17 @@ def upgrade(args, bundle, revision, config, db, state_dir):
                 check_predecessor_process(prior, db, server)
             ready_file = state_dir / f"ready-{uuid.uuid4().hex}"
             with log.open("ab") as output:
+                runner = [bundle / "bin/tend-runner", "--config", next_config, "--db", next_db]
+                runtime_env = {**os.environ, "CODEX_HOME": state["runtime"]["codex_home"],
+                               "PATH": state["runtime"].get("path", os.defpath)}
+                if not old["profile"].get("dynamic_categories"):
+                    seed = subprocess.run([*runner, "--import-predecessor-launches", db,
+                                           *state["app_server_args"]], cwd=state["cwd"], env=runtime_env,
+                                          stdin=subprocess.DEVNULL, stdout=output, stderr=output)
+                    require(seed.returncode == 0, f"Cannot import predecessor Agent launchers; check {log}")
                 launched = subprocess.Popen(
-                    [bundle / "bin/tend-runner", "--config", next_config, "--db", next_db,
-                     "--ready-file", ready_file, *state["app_server_args"]],
-                    cwd=state["cwd"], env={**os.environ, "CODEX_HOME": state["runtime"]["codex_home"],
-                                            "PATH": state["runtime"].get("path", os.defpath)},
+                    [*runner, "--ready-file", ready_file, *state["app_server_args"]],
+                    cwd=state["cwd"], env=runtime_env,
                     stdin=subprocess.DEVNULL, stdout=output, stderr=output,
                     start_new_session=True,
                 )
@@ -344,10 +357,11 @@ def upgrade(args, bundle, revision, config, db, state_dir):
             require(profile.get("inspect_url") == (settings.get("inspect") or {}).get("url"),
                     "Successor did not register the configured inspection URL")
             old_profile = old["profile"]
-            require(sorted(profile["repos"]) == sorted(old_profile["repos"])
-                    and profile["agents"] == old_profile["agents"],
-                    "Successor and predecessor advertise different repos or Agents; compare their service environment")
+            require(sorted(profile["repos"]) == sorted(old_profile["repos"]),
+                    "Successor and predecessor advertise different repos; compare their service environment")
             if old["successor"] is None and old["online"] and prior is not None:
+                require(profile["agents"] == old_profile["agents"],
+                        "Successor and predecessor advertise different Agents before replace")
                 verify_predecessor(old)
                 check_predecessor_process(prior, db, server)
                 extra = [] if old_profile.get("workspace_root") is not None else [

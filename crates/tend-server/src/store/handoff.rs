@@ -467,6 +467,7 @@ mod budget_tests {
             handoff_slots: true,
             codebase_review_comments: false,
             direct_issue_owners: false,
+            dynamic_categories: false,
         };
         store.db.execute(
             "INSERT INTO runners (id, host_id, profile, last_seen, protocol)

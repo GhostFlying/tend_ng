@@ -214,6 +214,7 @@ mod tests {
             operation_id: id.into(),
             assignment_id: "prior".into(),
             run_id: "original-run".into(),
+            admission: None,
             action: WorkAction::RenameIssue {
                 issue_id: "issue".into(),
                 title: title.into(),

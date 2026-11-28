@@ -449,6 +449,7 @@ mod tests {
                 operation_id: "report".into(),
                 assignment_id: "assignment".into(),
                 run_id: "run".into(),
+                admission: None,
                 action: protocol::WorkAction::ReportIssue {
                     summary: "Done".into(),
                     artifact_ids: vec!["file".into()],

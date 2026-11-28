@@ -8,7 +8,7 @@ mod token_usage;
 
 use crate::config::Config;
 use anyhow::{Result, ensure};
-use protocol::{ClaimDecision, ClaimReceipt, RUNNER_SYNC_BATCH, RunnerSyncReply};
+use protocol::{AgentCategory, ClaimDecision, ClaimReceipt, RUNNER_SYNC_BATCH, RunnerSyncReply};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use std::{path::Path, time::Duration};
 
@@ -42,7 +42,10 @@ impl Store {
              CREATE TABLE IF NOT EXISTS local_execution_limit (
                  singleton INTEGER PRIMARY KEY CHECK(singleton = 1), slots INTEGER NOT NULL
              );
-             CREATE TABLE IF NOT EXISTS local_server_features (name TEXT PRIMARY KEY);",
+             CREATE TABLE IF NOT EXISTS local_server_features (name TEXT PRIMARY KEY);
+             CREATE TABLE IF NOT EXISTS local_agent_categories (
+                 singleton INTEGER PRIMARY KEY CHECK(singleton = 1), catalogue TEXT NOT NULL
+             );",
         )?;
         run::create_tables(&tx)?;
         token_usage::create_tables(&tx)?;
@@ -101,12 +104,37 @@ impl Store {
         issue_rename_supported(&self.0)
     }
 
+    pub fn agent_categories(&self) -> Result<Vec<AgentCategory>> {
+        let saved = self.saved_agent_categories()?;
+        saved.map_or_else(
+            || Ok(protocol::default_agent_categories()),
+            |raw| Ok(serde_json::from_str(&raw)?),
+        )
+    }
+
+    fn saved_agent_categories(&self) -> Result<Option<String>> {
+        Ok(self
+            .0
+            .query_row(
+                "SELECT catalogue FROM local_agent_categories WHERE singleton = 1",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?)
+    }
+
     pub fn apply_sync(
         &mut self,
         config: &Config,
         reply: RunnerSyncReply,
         ordered: bool,
     ) -> Result<()> {
+        let category_snapshot = reply
+            .agent_categories
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
+        let categories_changed = ordered && self.saved_agent_categories()? != category_snapshot;
         let issue_rename_changed = ordered && self.issue_rename_supported()? != reply.issue_rename;
         let execution_limit = if let Some(slots) = reply.execution_slot_limit {
             let saved: Option<u32> = self
@@ -132,13 +160,31 @@ impl Store {
             && reply.confirmed_reclaims.is_empty()
             && execution_limit.is_none()
             && !issue_rename_changed
+            && !categories_changed
         {
             return Ok(());
         }
-        let profile = config.profile(self.unfinished()?);
+        let inventory = config.inventory();
+        let mut profile = config.profile_with_inventory(self.unfinished()?, &inventory);
+        // Claim using the same eligibility rules the issuing Server negotiated.
+        profile.dynamic_categories = reply.agent_categories.is_some();
+        let catalogue = reply
+            .agent_categories
+            .unwrap_or_else(protocol::default_agent_categories);
         let tx = self
             .0
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if categories_changed {
+            if let Some(raw) = category_snapshot {
+                tx.execute(
+                    "INSERT INTO local_agent_categories VALUES (1, ?1)
+                     ON CONFLICT(singleton) DO UPDATE SET catalogue = excluded.catalogue",
+                    [raw],
+                )?;
+            } else {
+                tx.execute("DELETE FROM local_agent_categories", [])?;
+            }
+        }
         if issue_rename_changed {
             if reply.issue_rename {
                 tx.execute(
@@ -216,15 +262,36 @@ impl Store {
                 continue;
             }
 
-            let decision = config.decide(&assignment, &profile);
+            let agent = &assignment.placement.agent;
+            let launch = config.versions().launcher(agent)?;
+            let mut contract_profile;
+            let claim_profile = if profile.dynamic_categories
+                && launch.is_some()
+                && !profile.agents.contains(agent)
+            {
+                // This exact version was previously advertised on this Host.
+                // Only this Task's binding may use it; never advertise it for new work.
+                contract_profile = profile.clone();
+                contract_profile
+                    .agents
+                    .retain(|current| current.id != agent.id);
+                contract_profile.agents.push(agent.clone());
+                &contract_profile
+            } else {
+                &profile
+            };
+            let decision = if launch.is_none() {
+                ClaimDecision::Rejected {
+                    reason: format!(
+                        "Host has no saved launcher for Agent {} revision {}",
+                        agent.id, agent.revision
+                    ),
+                }
+            } else {
+                Config::decide(&assignment, claim_profile, &catalogue)
+            };
             let app_server = if decision == ClaimDecision::Accepted {
-                assignment
-                    .placement
-                    .agent
-                    .app_server
-                    .as_ref()
-                    .map(|id| serde_json::to_string(&config.app_servers[id]))
-                    .transpose()?
+                launch.as_ref().map(serde_json::to_string).transpose()?
             } else {
                 None
             };

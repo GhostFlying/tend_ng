@@ -1,7 +1,7 @@
 use crate::store::run::LocalRun;
 use anyhow::{Result, bail, ensure};
 use codex_app::ToolCall;
-use protocol::{AttentionRequest, DispatchIssue, WORK_CATEGORIES, WorkAction};
+use protocol::{AgentRole, AttentionRequest, DispatchIssue, WorkAction};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
@@ -28,7 +28,7 @@ pub fn catalogue(
     stage_attention: bool,
     issue_rename: bool,
 ) -> (&'static str, Vec<Value>) {
-    let category = assignment.placement.agent.category.as_str();
+    let role = assignment.role();
     let post = json!({
         "type":"function", "name":POST,
         "description":"Publish a complete message to the current Issue. When answering a message, use its original ID as reply_to.",
@@ -128,7 +128,7 @@ pub fn catalogue(
             "description":"For a decision that must follow a stage delivery, use the operation ID returned by this Task's tend_report_result. Tend publishes the question only after that report reaches the original Chat."
         });
     }
-    let review_handoff = if category == "review" {
+    let review_handoff = if role == Some(AgentRole::Review) {
         json!({
             "type": "function", "name": DELIVER_REVIEW,
             "description": "Return the conclusion and evidence for this Run's bound request and candidate to the exact author Task. Retries return the original receipt.",
@@ -173,7 +173,7 @@ pub fn catalogue(
                             "required":["title"],"additionalProperties":false}
         }));
     }
-    if category != "issue-router" {
+    if role != Some(AgentRole::Coordinator) {
         catalogue.push(json!({
             "type": "function", "name": SUBMIT,
             "description": "Save an immutable delivery copy of a regular file in this workspace. Returns an operation_id that is also the file ID.",
@@ -195,7 +195,7 @@ pub fn catalogue(
                 "properties": {
                     "title": { "type": "string" },
                     "objective": { "type": "string" },
-                    "category": { "type": "string", "enum": WORK_CATEGORIES },
+                    "category": { "type": "string", "description": "Stable delegated category ID from tend_agent_candidates." },
                     "agent_id": { "type": "string" },
                     "repo_ids": { "type": "array", "items": { "type": "string" } },
                     "required_capabilities": { "type": "array", "items": { "type": "string" } },
@@ -222,12 +222,12 @@ pub fn catalogue(
         });
         let candidates = json!({
             "type":"function", "name":"tend_agent_candidates",
-            "description":"List matching work configurations on this Runner. Omitted repositories use the current Issue requirements.",
+            "description":"With no arguments, read live delegated category IDs, roles and purposes. With a category ID, match configurations on this Runner. Omitted repositories use the current Issue requirements.",
             "inputSchema":{"type":"object","properties":{
-                "category":{"type":"string","enum":WORK_CATEGORIES},
+                "category":{"type":"string"},
                 "repo_ids":{"type":"array","items":{"type":"string"}},
                 "required_capabilities":{"type":"array","items":{"type":"string"}}
-            },"required":["category"],"additionalProperties":false}
+            },"additionalProperties":false}
         });
         let escalate = json!({
             "type": "function",
@@ -273,9 +273,9 @@ pub fn catalogue(
             }));
         }
     }
-    let instructions = match category {
-        "issue-router" => include_str!("../../../docs/roles/issue-agent.md"),
-        "review" => include_str!("../../../docs/roles/review-agent.md"),
+    let instructions = match role {
+        Some(AgentRole::Coordinator) => include_str!("../../../docs/roles/issue-agent.md"),
+        Some(AgentRole::Review) => include_str!("../../../docs/roles/review-agent.md"),
         _ if assignment.owns_root() => concat!(
             include_str!("../../../docs/roles/work-agent.md"),
             "\n",
@@ -370,7 +370,7 @@ pub fn action(
     stage_attention: bool,
 ) -> Result<WorkAction> {
     match call.tool.as_str() {
-        REQUEST_REVIEW if run.assignment.placement.agent.category != "review" => {
+        REQUEST_REVIEW if run.assignment.role() != Some(AgentRole::Review) => {
             let args: ReviewRequest = serde_json::from_value(call.arguments.clone())?;
             let rereview = args.review_task_id.is_some();
             ensure!(
@@ -417,7 +417,7 @@ pub fn action(
             })
         }
         DELIVER_REVIEW
-            if run.assignment.placement.agent.category == "review"
+            if run.assignment.role() == Some(AgentRole::Review)
                 && run.assignment.review.is_some() =>
         {
             let result: protocol::TendReviewConclusion =
@@ -534,10 +534,6 @@ pub fn action(
         DELEGATE if run.assignment.owns_root() => {
             let args: Delegation = serde_json::from_value(call.arguments.clone())?;
             ensure!(
-                WORK_CATEGORIES.contains(&args.category.as_str()),
-                "Unknown work category"
-            );
-            ensure!(
                 !args.title.trim().is_empty()
                     && !args.objective.trim().is_empty()
                     && args.agent_id.as_deref().is_none_or(protocol::valid_id),
@@ -601,7 +597,7 @@ pub fn action(
                 summary: args.summary,
             })
         }
-        SUBMIT if run.assignment.placement.agent.category != "issue-router" => {
+        SUBMIT if run.assignment.role() != Some(AgentRole::Coordinator) => {
             let args: Submission = serde_json::from_value(call.arguments.clone())?;
             crate::artifacts::snapshot(artifacts, cwd, &args.path, operation)
         }

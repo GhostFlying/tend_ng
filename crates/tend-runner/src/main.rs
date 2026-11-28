@@ -3,6 +3,7 @@ mod backfill;
 mod config;
 mod execution;
 mod inspect;
+mod launch_versions;
 mod reconcile;
 mod store;
 mod tools;
@@ -29,7 +30,7 @@ use std::{
 };
 use store::Store;
 
-const USAGE: &str = "Usage: tend-runner --config <json-file> --db <sqlite-file> [--once | --reconcile <task-id>] [--ready-file <path>] [--app-server <program> <args>...]\n       tend-runner --default-workspace-root <sqlite-file>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates Runner sync.";
+const USAGE: &str = "Usage: tend-runner --config <json-file> --db <sqlite-file> [--once | --reconcile <task-id> | --import-predecessor-launches <sqlite-file>] [--ready-file <path>] [--app-server <program> <args>...]\n       tend-runner --default-workspace-root <sqlite-file>\n\nTEND_URL sets the Server address. TEND_TOKEN authenticates Runner sync.";
 
 fn default_workspace_root(database: &Path) -> PathBuf {
     database.with_extension("runs")
@@ -86,6 +87,7 @@ fn main() -> Result<()> {
     let (mut config_path, mut db_path, mut once) = (None, None, false);
     let mut task = None;
     let mut ready_file = None;
+    let mut predecessor = None;
     let mut program = OsString::from("codex");
     let mut app_args = ["app-server", "--listen", "stdio://"]
         .map(OsString::from)
@@ -99,6 +101,12 @@ fn main() -> Result<()> {
                 db_path = Some(PathBuf::from(args.next().context("--db needs a path")?))
             }
             Some("--once") => once = true,
+            Some("--import-predecessor-launches") => {
+                predecessor = Some(PathBuf::from(
+                    args.next()
+                        .context("--import-predecessor-launches needs a path")?,
+                ));
+            }
             Some("--ready-file") => {
                 ready_file = Some(PathBuf::from(
                     args.next().context("--ready-file needs a path")?,
@@ -127,8 +135,36 @@ fn main() -> Result<()> {
     }
     ensure!(!once || task.is_none(), "{USAGE}");
     ensure!(ready_file.is_none() || (!once && task.is_none()), "{USAGE}");
-    let config = Arc::new(Config::load(&config_path.context(USAGE)?)?);
+    ensure!(
+        predecessor.is_none() || (!once && task.is_none() && ready_file.is_none()),
+        "{USAGE}"
+    );
+    let config_path = config_path.context(USAGE)?;
     let db_path = db_path.context(USAGE)?;
+    let default = config::AppServer {
+        program: program
+            .to_str()
+            .context("App Server program is not UTF-8")?
+            .to_owned(),
+        args: app_args
+            .iter()
+            .map(|arg| {
+                arg.to_str()
+                    .map(str::to_owned)
+                    .context("App Server argument is not UTF-8")
+            })
+            .collect::<Result<_>>()?,
+        codex_home: env::var_os("CODEX_HOME").map(PathBuf::from),
+    };
+    let config = Arc::new(Config::load(
+        &config_path,
+        &db_path,
+        default,
+        predecessor.as_deref(),
+    )?);
+    if predecessor.is_some() {
+        return Ok(());
+    }
     let database = canonical_database(&db_path).context("resolve Runner database")?;
     // Forward recovery and upgrade retries can race to launch the same
     // generation. Only one execution scheduler may own a local ledger.
@@ -193,6 +229,8 @@ fn main() -> Result<()> {
             transfer.upload(files)?;
         }
     }
+    let mut inventory_refresh = config::InventoryRefresh::new(config_path)?;
+    let mut inventory_clock = protocol::AgentConfigReload::from_env()?;
     let uploads = transfer.clone().start();
     let reconciliation = reconcile::start(
         Arc::clone(&config),
@@ -235,6 +273,9 @@ fn main() -> Result<()> {
 
     let mut reconnecting = true;
     loop {
+        if inventory_clock.due(std::time::Instant::now()) {
+            inventory_refresh.poll(&config);
+        }
         match sync(&config, &mut store, &server, Some(&mut backfill)) {
             Ok((files, drain_acknowledged)) => {
                 if drain_acknowledged
