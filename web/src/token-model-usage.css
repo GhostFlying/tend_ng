@@ -69,12 +69,17 @@
 .model-usage-cost {
   text-align: end;
 }
-.model-partial {
-  display: inline-block;
-  margin-inline-start: 5px;
-  font-size: 11px;
-  color: var(--label);
-  white-space: nowrap;
+.model-estimate-values {
+  display: inline-flex;
+  max-width: 100%;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 2px 8px;
+}
+.model-unpriced-count {
+  font-size: 12px;
+  font-weight: 400;
 }
 .model-line-fields {
   grid-column: 1 / -1;

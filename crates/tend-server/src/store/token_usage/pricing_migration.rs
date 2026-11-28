@@ -1,5 +1,5 @@
-//! Schema 52 replaces only the derived model cache. Keep the raw ledgers,
-//! run coverage, conflicts, and Issue ownership untouched.
+//! Schemas 52 and 54 replace only the derived model cache (provider semantics,
+//! then exact request coverage). Keep the raw ledgers and ownership untouched.
 use super::{model_with_agent, models::ModelProjection, system};
 use anyhow::Result;
 use protocol::RequestMeter;

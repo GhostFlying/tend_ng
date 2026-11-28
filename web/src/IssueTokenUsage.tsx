@@ -60,9 +60,12 @@ function IssueRows({
             </div>
             <div className="token-issue-value">
               <bdi>{tokens(direct.total_tokens)}</bdi>
-              {direct.estimate && (
+              {direct.estimate && direct.reported_requests > 0 && (
                 <small className="detail-muted">
-                  <EstimateValue estimate={direct.estimate} />
+                  <EstimateValue
+                    estimate={direct.estimate}
+                    requests={direct.reported_requests}
+                  />
                 </small>
               )}
               <small className="detail-muted">

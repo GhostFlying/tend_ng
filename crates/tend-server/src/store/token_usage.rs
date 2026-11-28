@@ -604,7 +604,7 @@ struct Node {
 #[derive(Clone, Serialize)]
 struct Breakdown {
     models: Vec<models::ModelRow>,
-    estimate: models::Estimate,
+    estimate: models::RequestEstimate,
     started_runs: i64,
     observed_runs: i64,
     unobserved_before_collection: i64,

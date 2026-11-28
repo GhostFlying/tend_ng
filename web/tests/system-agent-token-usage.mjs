@@ -68,7 +68,7 @@ try {
         .filter({ hasText: name });
       await model.getByText(total, { exact: true }).waitFor();
       await model.getByText(cost, { exact: true }).waitFor();
-      await model.getByText("部分估算", { exact: true }).waitFor();
+      assert.equal(await model.getByText(/部分估算|请求未计价/).count(), 0);
     }
     const feishu = summaries.filter({ hasText: "飞书研判" });
     await feishu.getByText("无数据", { exact: true }).waitFor();

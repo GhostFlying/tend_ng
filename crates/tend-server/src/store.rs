@@ -93,7 +93,8 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 53;
+const REQUEST_PRICING_COVERAGE_SCHEMA: i64 = 54;
+pub(crate) const SCHEMA_VERSION: i64 = REQUEST_PRICING_COVERAGE_SCHEMA;
 
 pub struct Store {
     db: Connection,
@@ -149,7 +150,7 @@ impl Store {
         );
         // Pin the old ledger before taking the write lock if the request,
         // source and Feishu launch-model tables already exist.
-        let provider_pricing = if version == 51 {
+        let pricing = if (51..REQUEST_PRICING_COVERAGE_SCHEMA).contains(&version) {
             Some(token_usage::pricing_migration::capture(&tx)?)
         } else {
             None
@@ -368,13 +369,14 @@ impl Store {
         if version < 51 {
             agent_metering::migrate_feishu_history(&tx)?;
         }
-        if version < 52 {
-            provider_pricing
-                .map_or_else(|| token_usage::pricing_migration::capture(&tx), Ok)?
-                .publish(&tx)?;
-        }
         if version < 53 {
             maintenance::migrate(&tx)?;
+        }
+        if version < REQUEST_PRICING_COVERAGE_SCHEMA {
+            // The new projection includes the provider pricing from schema 52.
+            pricing
+                .map_or_else(|| token_usage::pricing_migration::capture(&tx), Ok)?
+                .publish(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

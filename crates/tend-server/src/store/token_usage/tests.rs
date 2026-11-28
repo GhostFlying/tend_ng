@@ -207,7 +207,7 @@ fn upgrades_existing_selected_models_and_merges_exact_catalog_aliases() -> Resul
     assert!(expected["models"][1]["estimate"]["usd"].is_null());
     assert_eq!(
         expected["estimate"],
-        json!({"usd":"1.08813", "partial":true})
+        json!({"usd":"1.08813", "partial":true,"unpriced_requests":1})
     );
 
     store.db.execute_batch(
@@ -261,7 +261,7 @@ fn retains_zero_and_provable_long_rate_in_rebuild() -> Result<()> {
     let before = view(&store, "root")?;
     assert_eq!(
         before["direct"]["estimate"],
-        json!({"usd":"0.0545502","partial":true})
+        json!({"usd":"0.0545502","partial":true,"unpriced_requests":1})
     );
     let tiers = &before["direct"]["models"][0]["price"]["tiers"];
     assert_eq!(tiers[0]["tier"], "long");
@@ -759,7 +759,10 @@ fn new_native_backfill_repairs_legacy_placeholders_but_keeps_real_conflicts() ->
             assert_eq!(direct["models"][1]["model"], "gpt-6.2-astra");
             assert_eq!(direct["models"][1]["response_model_requests"], 2);
             assert_eq!(direct["models"][2]["model"], Value::Null);
-            assert_eq!(direct["estimate"], json!({"usd":"0.01804","partial":true}));
+            assert_eq!(
+                direct["estimate"],
+                json!({"usd":"0.01804","partial":true,"unpriced_requests":1})
+            );
         }
     }
     let before = view(&store, "root")?;
@@ -1496,7 +1499,10 @@ fn legacy_optional_zero_prices_stay_partial_through_migration_rebuild_and_replay
         let overview = to_value(s.token_overview(None, None)?)?;
         assert_eq!(overview["total"], direct);
         assert_eq!(overview["sources"][0]["usage"], direct);
-        assert_eq!(direct["estimate"], json!({"usd":"0.0025","partial":true}));
+        assert_eq!(
+            direct["estimate"],
+            json!({"usd":"0.0025","partial":true,"unpriced_requests":0})
+        );
         assert_eq!(direct["cached_input_tokens"]["tokens"], raw_read);
         let tier = &direct["models"][0]["price"]["tiers"][0];
         assert_eq!(tier["components"][1]["priced_requests"], 0);
@@ -1522,7 +1528,10 @@ fn legacy_optional_zero_prices_stay_partial_through_migration_rebuild_and_replay
     record.event_id = "exact-replay".into();
     sync(&mut store, "runner", &[], &[record])?;
     let direct = view(&store, "root")?["direct"].clone();
-    assert_eq!(direct["estimate"], json!({"usd":"0.0025","partial":false}));
+    assert_eq!(
+        direct["estimate"],
+        json!({"usd":"0.0025","partial":false,"unpriced_requests":0})
+    );
     assert_eq!(
         direct["models"][0]["price"]["tiers"][0]["components"][1]["priced_requests"],
         1

@@ -728,6 +728,7 @@ mod tests {
             json!({"tokens":"18","reported_requests":3})
         );
         assert_eq!(first["total"]["reported_requests"], 5);
+        assert_eq!(first["total"]["estimate"]["unpriced_requests"], 5);
         assert_eq!(row(&first, "router")["usage"]["started_runs"], 2);
         assert_eq!(row(&first, "discussion")["shared_turn_attempts"], 1);
         assert_eq!(row(&first, "discussion")["responses_without_usage"], 1);
@@ -747,6 +748,15 @@ mod tests {
         );
         assert_eq!(row(&second, "router")["shared_issue_responses"], 2);
         assert_eq!(second["total"]["reported_requests"], 5);
+        assert_eq!(second["total"]["estimate"], first["total"]["estimate"]);
+        assert_eq!(
+            row(&second, "router")["usage"]["estimate"]["unpriced_requests"],
+            2
+        );
+        assert_eq!(
+            row(&second, "runner")["usage"]["estimate"]["unpriced_requests"],
+            2
+        );
         assert_eq!(second["issues"][0]["direct"]["reported_requests"], 2);
         assert_eq!(
             row(&second, "router")["usage"]["total_tokens"]["tokens"],
@@ -766,6 +776,143 @@ mod tests {
         assert_eq!(root_page(&reopened)?, second);
         reopened.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
         assert_eq!(root_page(&reopened)?, second);
+        Ok(())
+    }
+
+    #[test]
+    fn request_pricing_coverage_fixture() -> Result<()> {
+        let file = Fixture::new()?;
+        let path = file.file();
+        let mut store = Store::initialize(&path)?;
+        base(&store.db)?;
+        issue(&store.db, "pricing-root", None)?;
+        issue(&store.db, "pricing-child", Some("pricing-root"))?;
+        issue(&store.db, "pricing-grandchild", Some("pricing-child"))?;
+        issue(&store.db, "pricing-empty", None)?;
+        store.db.execute_batch(
+            "UPDATE issues SET title = CASE id
+                WHEN 'pricing-root' THEN '52 条 · #131 口径复现'
+                WHEN 'pricing-child' THEN '子级 · 费率档未知'
+                WHEN 'pricing-grandchild' THEN '孙级 · 可计零金额'
+                ELSE '无请求' END;",
+        )?;
+        for issue_id in ["pricing-root", "pricing-child", "pricing-grandchild"] {
+            assignment(&store.db, issue_id, issue_id, "runner")?;
+        }
+        let sol = TokenModel::TurnContext("gpt-6.2-sol".into());
+        let alloc = |sum: i64, i, count| sum / count + i64::from(i < sum % count);
+        // Derived from the read-only #131 aggregate, not actual response data.
+        let root = native_run("root-run", "pricing-root");
+        let requests = (0..52)
+            .map(|i| {
+                let read = (i < 51).then(|| alloc(6_127_872, i, 51));
+                let input = read.unwrap_or_default() + alloc(160_299, i, 52);
+                let output = alloc(16_091, i, 52);
+                let mut req = observation(&root, i, Some(input + output));
+                req.last = TokenCounts::from_fields([
+                    Some(input + output),
+                    Some(input),
+                    read,
+                    None,
+                    Some(output),
+                    (i < 35).then(|| alloc(3_865, i, 35)),
+                ]);
+                req.model = Some(sol.clone());
+                req.provider_counts = true;
+                req
+            })
+            .collect::<Vec<_>>();
+        let child = native_run("child-run", "pricing-child");
+        let grandchild = native_run("grandchild-run", "pricing-grandchild");
+        let mut missing = observation(&child, 0, None);
+        missing.last = TokenCounts::from_fields([None, None, Some(10), None, None, None]);
+        missing.model = Some(sol.clone());
+        missing.provider_counts = true;
+        let mut zero = observation(&grandchild, 0, Some(0));
+        zero.last = TokenCounts::from_fields([Some(0), None, None, None, Some(0), None]);
+        zero.model = Some(sol);
+        zero.provider_counts = true;
+        sync(
+            &mut store,
+            "runner",
+            &[root, child, grandchild],
+            &[missing.clone(), zero],
+        )?;
+        for batch in requests.chunks(protocol::RUNNER_SYNC_BATCH) {
+            sync(&mut store, "runner", &[], batch)?;
+        }
+        for i in 0..4 {
+            let thread = format!("feishu-{i}");
+            attempt(&store, &thread, Source::Feishu, &thread, "turn")?;
+            let input = alloc(28_223, i, 4);
+            let output = alloc(2_354, i, 4);
+            let mut req = response("response", Some(input + output));
+            req.meter.counts = TokenCounts::from_fields([
+                Some(input + output),
+                Some(input),
+                Some(alloc(18_176, i, 4)),
+                None,
+                Some(output),
+                Some(alloc(1_500, i, 4)),
+            ]);
+            req.meter.provider_counts = true;
+            store.record_agent_response(&thread, &thread, "turn", req);
+        }
+        attempt(
+            &store,
+            "router-empty",
+            Source::Router,
+            "router-empty",
+            "turn",
+        )?;
+
+        let check = |usage: &Value, count, usd: Option<&str>, unpriced| {
+            assert_eq!(usage["reported_requests"], count);
+            assert_eq!(usage["estimate"]["usd"], json!(usd));
+            assert_eq!(usage["estimate"]["unpriced_requests"], unpriced);
+        };
+        let root = super::super::tests::view(&store, "pricing-root")?;
+        check(&root["direct"], 52, Some("1.0942952"), 0);
+        check(&root["subtree"], 54, Some("1.0942952"), 1);
+        let child = super::super::tests::view(&store, "pricing-child")?;
+        check(&child["direct"], 1, None, 1);
+        check(&child["subtree"], 2, Some("0"), 1);
+        let page = root_page(&store)?;
+        check(&page["total"], 58, Some("1.0942952"), 5);
+        let feishu = row(&page, "feishu");
+        check(&feishu["usage"], 4, None, 4);
+        assert_eq!(feishu["responses_without_usage"], 0);
+        let router = row(&page, "router");
+        check(&router["usage"], 0, None, 0);
+        assert_eq!(router["usage"]["started_runs"], 1);
+
+        // Late zero output prices the request without knowing the rate tier.
+        // The observed cache read remains an unpriced component, not a request.
+        missing.last.output_tokens = Some(0);
+        missing.event_id = "late-zero".into();
+        sync(&mut store, "runner", &[], &[missing.clone(), missing])?;
+        let final_page = root_page(&store)?;
+        check(&final_page["total"], 58, Some("1.0942952"), 4);
+        check(
+            &row(&final_page, "runner")["usage"],
+            54,
+            Some("1.0942952"),
+            0,
+        );
+        let child = super::super::tests::view(&store, "pricing-child")?;
+        check(&child["direct"], 1, Some("0"), 0);
+        assert_eq!(
+            child["direct"]["models"][0]["price"]["tiers"][0]["components"][1]["priced_requests"],
+            0
+        );
+        store.rebuild_token_usage(&protocol::TokenUsageScope::All)?;
+        assert_eq!(root_page(&store)?, final_page);
+        if let Some(dest) = std::env::var_os("TEND_REQUEST_PRICING_FIXTURE_DB") {
+            store.db.execute(
+                "VACUUM INTO ?1",
+                [std::path::Path::new(&dest).to_str().unwrap()],
+            )?;
+        }
         Ok(())
     }
 
@@ -906,7 +1053,10 @@ mod tests {
         assert_eq!(raw(&store)?, original);
         let page = root_page(&store)?;
         let usage = &row(&page, "feishu")["usage"];
-        assert_eq!(usage["estimate"], json!({"usd":"0.0025","partial":true}));
+        assert_eq!(
+            usage["estimate"],
+            json!({"usd":"0.0025","partial":true,"unpriced_requests":0})
+        );
         assert_eq!(usage["models"][0]["model"], "gpt-6.2-sol");
         assert_eq!(
             usage["models"][0]["price"]["tiers"][0]["baseline_input"]["tokens"],
@@ -922,7 +1072,10 @@ mod tests {
         let usage = &feishu["usage"];
         assert_eq!(feishu["conflicts"], 0);
         assert_eq!(usage["reported_requests"], 1);
-        assert_eq!(usage["estimate"], json!({"usd":"0.00155","partial":false}));
+        assert_eq!(
+            usage["estimate"],
+            json!({"usd":"0.00155","partial":false,"unpriced_requests":0})
+        );
         assert_eq!(
             usage["models"][0]["price"]["tiers"][0]["components"][1]["priced_requests"],
             1

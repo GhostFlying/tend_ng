@@ -432,6 +432,7 @@ export type TokenField = {
 export type TokenEstimate = {
   usd: string | null;
   partial: boolean;
+  unpriced_requests?: number;
 };
 
 export type TokenPriceComponent = TokenField & {

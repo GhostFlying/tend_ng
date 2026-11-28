@@ -36,9 +36,12 @@ function IssueValue({
         {usage.started_runs > 0 &&
           ` · ${format.format(usage.observed_runs)} / ${format.format(usage.started_runs)}`}
       </dd>
-      {usage.estimate && (
+      {usage.estimate && usage.reported_requests > 0 && (
         <dd className="detail-muted">
-          <EstimateValue estimate={usage.estimate} />
+          <EstimateValue
+            estimate={usage.estimate}
+            requests={usage.reported_requests}
+          />
         </dd>
       )}
       {usage.reported_requests > 0 && fieldNote(field, usage) && (
@@ -196,7 +199,10 @@ function SourceRow({ row }: { row: TokenUsageSource }) {
                 </span>
                 {usage.estimate && (
                   <span>
-                    <EstimateValue estimate={usage.estimate} />
+                    <EstimateValue
+                      estimate={usage.estimate}
+                      requests={usage.reported_requests}
+                    />
                   </span>
                 )}
               </>

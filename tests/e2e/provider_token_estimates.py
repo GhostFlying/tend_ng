@@ -24,7 +24,7 @@ def deepseek(usage):
 
 def check(usage, expected, request_count, input_sum, hits, outputs):
     row = deepseek(usage)
-    assert row["estimate"] == {"usd": expected, "partial": False}, row
+    assert row["estimate"] == {"usd": expected, "partial": False, "unpriced_requests": 0}, row
     assert row["reported_requests"] == request_count
     assert row["cache_write_input_tokens"] == {"tokens": None, "reported_requests": 0}
     counts = [input_sum - hits, hits, outputs]
@@ -109,7 +109,7 @@ def run(args, root):
         runner_model = check(runner, "4.501813372", 420, 38_855_868, 10_000_060, 1_000_000)
         assert deepseek(overview["total"]) == runner_model
         gpt = next(row for row in issue["direct"]["models"] if row["model"] == "gpt-6.2-sol")
-        assert gpt["estimate"] == {"usd": "0.340654", "partial": True}, gpt
+        assert gpt["estimate"] == {"usd": "0.340654", "partial": True, "unpriced_requests": 0}, gpt
         standard, long = gpt["price"]["tiers"]
         assert [standard["tier"], long["tier"]] == ["standard", "long"]
         assert standard["baseline_input"]["tokens"] == "1000"

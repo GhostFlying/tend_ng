@@ -27,27 +27,38 @@ const rawFields = [
   ["reasoning_output_tokens", "推理输出"],
 ] as const;
 
-export function EstimateValue({ estimate }: { estimate?: TokenEstimate }) {
-  if (!estimate || estimate.usd === null) return <>费用未知</>;
-  const [whole, fraction] = estimate.usd.split(".");
+function Amount({ usd }: { usd: string }) {
+  const [whole, fraction] = usd.split(".");
   return (
-    <>
-      <bdi className="model-cost">
-        ${format.format(BigInt(whole))}
-        {fraction ? `.${fraction}` : ""}
-      </bdi>
-      {estimate.partial && <small className="model-partial">部分估算</small>}
-    </>
+    <bdi className="model-cost">
+      ${format.format(BigInt(whole))}
+      {fraction ? `.${fraction}` : ""}
+    </bdi>
   );
 }
 
-function modelGap(row: TokenModelRow) {
-  if (row.model === null) return "缺少可归属的模型证据";
-  if (!row.price) return "无匹配的 OpenRouter 公示价";
-  if (row.price.unsupported === "utc_schedule") return "不支持 UTC 时段价";
-  if (row.price.unsupported === "other_conditions") return "不支持该价格条件";
-  if (row.estimate.partial || row.estimate_gap === "incomplete_components")
-    return "部分计量或费率缺失";
+export function EstimateValue({
+  estimate,
+  requests,
+}: {
+  estimate: TokenEstimate;
+  requests: number;
+}) {
+  if (requests === 0) return null;
+  const unpriced = estimate.unpriced_requests ?? 0;
+  return (
+    <span className="model-estimate-values">
+      {estimate.usd !== null && <Amount usd={estimate.usd} />}
+      {unpriced > 0 && (
+        <small className="detail-muted model-unpriced-count">
+          {format.format(unpriced)} 条请求未计价
+        </small>
+      )}
+      {estimate.unpriced_requests === undefined && estimate.usd === null && (
+        <small className="detail-muted">费用未知</small>
+      )}
+    </span>
+  );
 }
 
 function ModelDetails({ row }: { row: TokenModelRow }) {
@@ -186,7 +197,7 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
                       <FeeItem
                         label="未细分输入（基准）"
                         component={tier.baseline_input}
-                        requests={tier.requests}
+                        requests={tier.baseline_input.reported_requests}
                       />
                     )}
                   </dl>
@@ -209,6 +220,13 @@ function FeeItem({
   requests: number;
 }) {
   const priced = component.priced_requests;
+  const missingQuantity = requests - component.reported_requests;
+  const missingPrice = component.reported_requests - (priced ?? 0);
+  const omitted = [
+    missingQuantity > 0 &&
+      `${format.format(missingQuantity)} 条数量缺失或未分拆`,
+    missingPrice > 0 && `${format.format(missingPrice)} 条无适用费率`,
+  ].filter(Boolean);
   return (
     <div>
       <dt>{label}</dt>
@@ -225,11 +243,9 @@ function FeeItem({
           ? `已计 ${format.format(priced)} / ${format.format(requests)} 条`
           : (fieldNote(component, { reported_requests: requests }) ?? "")}
       </dd>
-      {priced === 0 && (
+      {priced !== undefined && omitted.length > 0 && (
         <dd className="detail-muted">
-          {component.reported_requests === 0
-            ? "数量缺失或不可推导"
-            : "已知数量无适用费率"}
+          未计 {format.format(requests - priced)} 条 · {omitted.join(" · ")}
         </dd>
       )}
       {priced !== undefined &&
@@ -237,16 +253,17 @@ function FeeItem({
         component.usd_per_million === null && (
           <dd className="detail-muted">只计已知为零的数量，单价仍未知</dd>
         )}
-      <dd>
-        <EstimateValue estimate={component.estimate} />
-      </dd>
+      {component.estimate.usd !== null && (
+        <dd>
+          <Amount usd={component.estimate.usd} />
+        </dd>
+      )}
     </div>
   );
 }
 
 function ModelRow({ row }: { row: TokenModelRow }) {
   const [open, setOpen] = useState(false);
-  const gap = row.estimate.usd === null ? modelGap(row) : undefined;
   return (
     <details
       className="model-row"
@@ -257,14 +274,16 @@ function ModelRow({ row }: { row: TokenModelRow }) {
           <strong>{row.model ?? "模型未知"}</strong>
           <span className="detail-muted model-evidence">
             {format.format(row.reported_requests)} 条请求
-            {gap && ` · ${gap}`}
           </span>
         </span>
         <span className="model-row-tokens">
           <bdi>{tokens(row.total_tokens)}</bdi> Token
         </span>
         <span className="model-row-estimate">
-          <EstimateValue estimate={row.estimate} />
+          <EstimateValue
+            estimate={row.estimate}
+            requests={row.reported_requests}
+          />
         </span>
         <span className="model-line-fields">
           {lineFields.map(([field, label]) => {
@@ -309,11 +328,14 @@ export function TokenModelUsage({
     >
       <h4>
         <span>{label}</span>
-        <span className="model-usage-cost">
-          {usage.reported_requests > 0 && (
-            <EstimateValue estimate={usage.estimate} />
-          )}
-        </span>
+        {usage.reported_requests > 0 && (
+          <span className="model-usage-cost">
+            <EstimateValue
+              estimate={usage.estimate}
+              requests={usage.reported_requests}
+            />
+          </span>
+        )}
       </h4>
       {!compact && (
         <p className="detail-muted model-method">
