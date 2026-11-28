@@ -177,7 +177,9 @@ def exercise(root, args):
         assert call("chats/archived") == archive_list
         assert read("legacy-a")["messages"] == page and read("legacy-c")["messages"] == queued
         with closing(sqlite3.connect(root / "server.sqlite")) as db:
-            assert db.execute("PRAGMA user_version").fetchone() == (56,)
+            # An unrelated later migration may advance the schema after
+            # the archive migration has run.
+            assert db.execute("PRAGMA user_version").fetchone()[0] >= 56
             assert db.execute("SELECT * FROM chat_messages ORDER BY seq LIMIT ?",
                               (len(original_rows),)).fetchall() == original_rows
             assert db.execute("PRAGMA foreign_key_check").fetchall() == []

@@ -371,3 +371,62 @@
   font-size: 12px;
   color: var(--muted);
 }
+
+.fs-tabs {
+  flex-wrap: wrap;
+}
+
+.fs-row strong.fs-request {
+  display: block;
+}
+
+.fs-row-current {
+  color: var(--label);
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.fs-row-question {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.fs-row-tags {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px 8px;
+}
+
+.fs-source-ref {
+  min-width: 23px;
+  margin-inline: 2px;
+  padding: 1px 5px;
+  border: 0;
+  border-radius: 5px;
+  background: var(--fs-tint);
+  color: var(--fs-blue);
+  cursor: pointer;
+}
+
+.fs-message:focus {
+  outline: 2px solid var(--fs-blue);
+  outline-offset: 2px;
+}
+
+.fs-message small,
+.fs-questions small {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.fs-questions p {
+  margin: 4px 0;
+}
+
+.fs-message > div {
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}

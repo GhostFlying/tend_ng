@@ -1,14 +1,19 @@
 mod agent;
 mod api;
+mod context;
+pub(crate) mod evidence;
+pub(crate) mod locator;
+mod reads;
 
 use crate::store::{
     Store,
-    feishu::{ContextCursor, ContextJob, ContextResult, FeishuMessage, RETENTION},
+    feishu::{FeishuMessage, RETENTION},
 };
 use anyhow::{Context, Result, ensure};
-use protocol::FeishuEvidence;
+use protocol::{FeishuEvidence, FeishuMentionBinding, FeishuPerson, FeishuSource};
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use std::{
     collections::{HashMap, HashSet},
     fs::File,
@@ -16,16 +21,13 @@ use std::{
     process::{Command, Stdio},
     sync::mpsc::{self, RecvTimeoutError, SyncSender},
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tiny_http::Request;
 
 const DAY: i64 = 86_400;
 const OVERLAP: i64 = 15 * 60;
 const SCAN_INTERVAL: Duration = Duration::from_secs(180);
-const CONTEXT_PAGE_BUDGET: usize = 4;
-const CONTEXT_MAX_PAGES: usize = 200;
-const CONTEXT_MAX_IDS: usize = 512;
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -85,7 +87,7 @@ pub fn serve(mut config: Option<Config>, db: &Path) -> Result<SyncSender<Request
     let (owner, assessor) = if let Some(config) = &mut config {
         if let Some(assessment) = config.agent.take() {
             let name = assessment.id.clone();
-            agent::spawn(db, config.owner_open_id.clone(), assessment)?;
+            agent::spawn(db, config.reader(), assessment)?;
             (Some(config.owner_open_id.clone()), Some(name))
         } else {
             (Some(config.owner_open_id.clone()), None)
@@ -97,7 +99,7 @@ pub fn serve(mut config: Option<Config>, db: &Path) -> Result<SyncSender<Request
     api::serve(db, owner, assessor, scan)
 }
 
-fn now() -> i64 {
+pub(crate) fn now() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -124,16 +126,20 @@ fn spawn_scanner(db: &Path, config: Config) -> Result<SyncSender<()>> {
     store.interrupt_feishu_scan(&config.owner_open_id)?;
     thread::spawn(move || {
         loop {
-            if let Err(error) = scan(&mut store, &config, now()) {
-                // Never log provider stdout, stderr, cursors, identities or message bodies.
-                let _ = store.feishu_scan_phase(
-                    &config.owner_open_id,
-                    "failed",
-                    Some(error.category()),
-                );
-            } else if let Err(_error) = refresh_context(&mut store, &config) {
-                // Context is a separately best-effort read, not evidence that discovery failed.
-                eprintln!("Feishu suggestion context could not be recorded");
+            match scan(&mut store, &config.reader(), now()) {
+                Err(error) => {
+                    // Never log provider stdout, stderr, cursors, identities or message bodies.
+                    let _ = store.feishu_scan_phase(
+                        &config.owner_open_id,
+                        "failed",
+                        Some(error.category()),
+                    );
+                }
+                Ok(person) if refresh_context(&mut store, &config.reader(), &person).is_err() => {
+                    // Context is a separately best-effort read, not evidence that discovery failed.
+                    eprintln!("Feishu suggestion context could not be recorded");
+                }
+                Ok(_) => {}
             }
             if rx.recv_timeout(SCAN_INTERVAL) == Err(RecvTimeoutError::Disconnected) {
                 return;
@@ -168,13 +174,42 @@ fn provider_id(value: &str, prefix: &str) -> bool {
     value.starts_with(prefix) && value.len() > prefix.len() && protocol::valid_id(value)
 }
 
+#[derive(Clone)]
+struct Reader {
+    deadline: Option<Instant>,
+    owner_open_id: String,
+    cli: PathBuf,
+    profile: Option<String>,
+}
+
 impl Config {
+    fn reader(&self) -> Reader {
+        Reader {
+            deadline: None,
+            owner_open_id: self.owner_open_id.clone(),
+            cli: self.cli.clone(),
+            profile: self.profile.clone(),
+        }
+    }
+}
+
+impl Reader {
     fn read(&self, args: &[&str]) -> ScanResult<Value> {
         // A healthy Server must be able to leave a hung CLI call and scan again.
         // GNU timeout owns and terminates the command's process group.
+        let (limit, grace) = if let Some(deadline) = self.deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining <= Duration::from_millis(300) {
+                return Err(ScanError::Provider);
+            }
+            ((remaining.as_secs_f64() - 0.25).min(25.0), "0.25s")
+        } else {
+            (25.0, "3s")
+        };
         let mut command = Command::new("timeout");
         command
-            .args(["--kill-after=3s", "25s"])
+            .arg(format!("--kill-after={grace}"))
+            .arg(format!("{limit:.3}s"))
             .arg(&self.cli)
             .args(args);
         if let Some(profile) = &self.profile {
@@ -193,7 +228,7 @@ impl Config {
         serde_json::from_slice(&output.stdout).map_err(|_| ScanError::Coverage)
     }
 
-    fn verify_identity(&self) -> ScanResult<()> {
+    fn verify_identity(&self) -> ScanResult<FeishuPerson> {
         let identity = self.read(&["whoami"]).map_err(|_| ScanError::Identity)?;
         if identity["brand"] != "feishu"
             || identity["identity"] != "user"
@@ -202,7 +237,42 @@ impl Config {
         {
             return Err(ScanError::Identity);
         }
-        Ok(())
+        let person = &identity["onBehalfOf"];
+        Ok(FeishuPerson {
+            id: self.owner_open_id.clone(),
+            name: person["userName"]
+                .as_str()
+                .or_else(|| person["name"].as_str())
+                .or_else(|| person["displayName"].as_str())
+                .unwrap_or_default()
+                .chars()
+                .take(100)
+                .collect(),
+        })
+    }
+
+    // Use the same native endpoints as the CLI shortcuts, without the
+    // formatter that drops parent_id when thread_id is also present.
+    fn message_api(&self, path: &str, params: Value) -> ScanResult<Value> {
+        self.messages(&[
+            "api",
+            "GET",
+            path,
+            "--as",
+            "user",
+            "--params",
+            &params.to_string(),
+        ])
+    }
+
+    fn mget(&self, ids: &[&str]) -> ScanResult<Value> {
+        self.message_api(
+            "/open-apis/im/v1/messages/mget",
+            json!({
+                "message_ids": ids, "with_sender_name": true,
+                "card_msg_content_type": "raw_card_content",
+            }),
+        )
     }
 
     fn messages(&self, args: &[&str]) -> ScanResult<Value> {
@@ -214,12 +284,12 @@ impl Config {
     }
 }
 
-fn scan(store: &mut Store, config: &Config, end: i64) -> ScanResult<()> {
+fn scan(store: &mut Store, config: &Reader, end: i64) -> ScanResult<FeishuPerson> {
     let owner = &config.owner_open_id;
     store
         .feishu_scan_phase(owner, "running", None)
         .map_err(|_| ScanError::Storage)?;
-    config.verify_identity()?;
+    let person = config.verify_identity()?;
     let checkpoint = store
         .feishu_checkpoint(owner)
         .map_err(|_| ScanError::Storage)?;
@@ -239,7 +309,7 @@ fn scan(store: &mut Store, config: &Config, end: i64) -> ScanResult<()> {
             .record_feishu_window(owner, through, now(), through == end, &mut messages)
             .map_err(|_| ScanError::Storage)?;
         if through == end {
-            return Ok(());
+            return Ok(person);
         }
         cursor = through;
     }
@@ -247,7 +317,7 @@ fn scan(store: &mut Store, config: &Config, end: i64) -> ScanResult<()> {
 
 fn search_window(
     store: &Store,
-    config: &Config,
+    config: &Reader,
     from: i64,
     through: i64,
 ) -> ScanResult<Vec<FeishuMessage>> {
@@ -299,33 +369,24 @@ fn search_window(
         if !expected.is_empty() {
             let mut ids: Vec<_> = expected.keys().copied().collect();
             ids.sort_unstable();
-            let details = config.messages(&[
-                "im",
-                "+messages-mget",
-                "--as",
-                "user",
-                "--message-ids",
-                &ids.join(","),
-                "--no-reactions",
-                "--format",
-                "json",
-            ])?;
+            let details = config.mget(&ids)?;
             for raw in rows(&details)? {
                 let id = raw["message_id"].as_str().ok_or(ScanError::Coverage)?;
                 let meta = expected.remove(id).ok_or(ScanError::Coverage)?;
-                let direct = raw["mentions"].as_array().is_some_and(|mentions| {
-                    mentions.iter().any(|mark| {
-                        mark["id"]
-                            .as_str()
-                            .or_else(|| mark["id"]["open_id"].as_str())
-                            == Some(config.owner_open_id.as_str())
-                    })
-                });
-                if raw["deleted"] == true || !direct {
-                    continue;
+                let direct = people(raw)
+                    .iter()
+                    .any(|person| person.id == config.owner_open_id);
+                if direct && raw["deleted"] != true && sender_open_id(raw).is_none() {
+                    return Err(ScanError::Coverage);
                 }
-                let sender = sender_open_id(raw).ok_or(ScanError::Coverage)?;
-                if sender == config.owner_open_id {
+                let is_direct = direct
+                    && raw["deleted"] != true
+                    && sender_open_id(raw) != Some(config.owner_open_id.as_str());
+                if !is_direct
+                    && !store
+                        .feishu_known_mention(&config.owner_open_id, id)
+                        .map_err(|_| ScanError::Storage)?
+                {
                     continue;
                 }
                 let chat = meta["chat_id"].as_str().filter(|id| provider_id(id, "oc_"));
@@ -333,17 +394,26 @@ fn search_window(
                 if chat.is_some_and(|chat| chat != message.chat_id) {
                     return Err(ScanError::Coverage);
                 }
-                let created =
-                    time(store, &meta["create_time"]).unwrap_or(message.evidence.created_at);
-                let updated = time(store, &meta["update_time"])
-                    .unwrap_or(message.evidence.updated_at)
-                    .max(created);
-                message.evidence.created_at = created;
-                message.evidence.updated_at = updated;
-                // Older CLI outputs can round to a minute. Keep the minute
-                // containing the inclusive provider start bound.
-                if created >= from - 59 && created <= through {
-                    matches.push(message);
+                // The native mget row identifies the body and its version.
+                // Search index timestamps can describe a different version.
+                message.direct_mention = is_direct;
+                if message.evidence.created_at >= from && message.evidence.created_at <= through {
+                    if message.evidence.source.edit_time_unknown && is_direct {
+                        // Discover this @ without admitting its current body as
+                        // evidence. A later exact reread can fill the gap.
+                        message.evidence.text = "（编辑时间不明，暂不能核实原文版本）".into();
+                        message.evidence.source.reply_to = None;
+                        message.evidence.source.root_id = None;
+                        message.evidence.source.quote_ids.clear();
+                        message.evidence.source.content_key = None;
+                        message.evidence.source.mention_bindings.clear();
+                        message.evidence.source.truncated = false;
+                        matches.push(message);
+                        continue;
+                    }
+                    if evidence::visible(&message.evidence, now()) {
+                        matches.push(message);
+                    }
                 }
             }
             if !expected.is_empty() {
@@ -373,11 +443,40 @@ fn search_window(
 }
 
 fn rows(page: &Value) -> ScanResult<&[Value]> {
-    page["messages"]
+    page["items"]
         .as_array()
-        .or_else(|| page["items"].as_array())
         .map(Vec::as_slice)
         .ok_or(ScanError::Coverage)
+}
+
+fn people(raw: &Value) -> Vec<FeishuPerson> {
+    let mut people: Vec<_> = raw["mentions"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|mark| {
+            let id = mention_open_id(mark)?;
+            Some(FeishuPerson {
+                id: id.into(),
+                name: mark["name"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(100)
+                    .collect(),
+            })
+        })
+        .collect();
+    people.sort_by(|a, b| a.id.cmp(&b.id));
+    people.dedup_by(|a, b| a.id == b.id);
+    people
+}
+
+fn mention_open_id(mark: &Value) -> Option<&str> {
+    mark["id"]
+        .as_str()
+        .or_else(|| mark["id"]["open_id"].as_str())
+        .filter(|id| provider_id(id, "ou_"))
 }
 
 fn sender_open_id(raw: &Value) -> Option<&str> {
@@ -407,50 +506,99 @@ fn time(store: &Store, value: &Value) -> ScanResult<i64> {
         .ok_or(ScanError::Coverage)
 }
 
-fn applink(value: &str) -> Option<String> {
-    let link = url::Url::parse(value).ok()?;
-    (link.scheme() == "https"
-        && link.host_str() == Some("applink.feishu.cn")
-        && link.port().is_none()
-        && link.username().is_empty()
-        && link.password().is_none()
-        && link.path().starts_with("/client/"))
-    .then(|| link.to_string())
-}
-
 fn parse_message(
     store: &Store,
     raw: &Value,
     expected_chat: Option<&str>,
 ) -> ScanResult<FeishuMessage> {
+    parse_excerpt(store, raw, expected_chat, 1200)
+}
+
+fn parse_excerpt(
+    store: &Store,
+    raw: &Value,
+    expected_chat: Option<&str>,
+    excerpt_limit: usize,
+) -> ScanResult<FeishuMessage> {
     let id = raw["message_id"]
         .as_str()
         .filter(|id| provider_id(id, "om_"))
         .ok_or(ScanError::Coverage)?;
-    let chat = raw["chat_id"]
-        .as_str()
-        .filter(|id| provider_id(id, "oc_"))
-        .or(expected_chat)
-        .ok_or(ScanError::Coverage)?;
+    let chat = match raw["chat_id"].as_str() {
+        Some(id) if provider_id(id, "oc_") => id,
+        Some(_) => return Err(ScanError::Coverage),
+        None => expected_chat.ok_or(ScanError::Coverage)?,
+    };
     let created_at = time(store, &raw["create_time"])?;
-    let updated_at = time(store, &raw["update_time"])
-        .unwrap_or(created_at)
-        .max(created_at);
-    let text = raw["content"]
-        .as_str()
-        .filter(|text| !text.trim().is_empty())
-        .unwrap_or("（非文本或来源未提供可显示的内容）")
-        .chars()
-        .take(1200)
-        .collect::<String>();
-    let href = raw["message_app_link"].as_str().and_then(applink).unwrap_or_else(|| {
-        let position = raw["message_position"].as_i64().filter(|n| *n>=0)
-            .or_else(|| raw["message_position"].as_str()?.parse::<i64>().ok().filter(|n| *n>=0));
-        if let Some(position) = position {
-            format!("https://applink.feishu.cn/client/chat/open?openChatId={chat}&position={position}")
-        } else {
-            format!("https://applink.feishu.cn/client/chat/open?openChatId={chat}")
-        }
+    let edited = time(store, &raw["update_time"])
+        .ok()
+        .filter(|at| *at >= created_at);
+    let updated_at = edited.unwrap_or(created_at);
+    let edit_time_unknown = raw["updated"] == true
+        && (edited.is_none()
+            || timestamp_ms(&raw["create_time"])
+                .zip(timestamp_ms(&raw["update_time"]))
+                .is_some_and(|(created, edited)| edited <= created));
+    let withdrawn = raw["deleted"] == true;
+    let content = message_text(raw).filter(|body| !body.text.trim().is_empty());
+    let display = content.as_ref().map(|body| body.text.as_str());
+    let text = if withdrawn {
+        "（原消息已撤回）".into()
+    } else {
+        display
+            .unwrap_or("（非文本或来源未提供可显示的内容）")
+            .chars()
+            .take(excerpt_limit)
+            .collect()
+    };
+    let id_field = |key: &str, prefix: &str| {
+        raw[key]
+            .as_str()
+            .filter(|id| provider_id(id, prefix))
+            .map(str::to_owned)
+    };
+    let reply_to = id_field("reply_to", "om_").or_else(|| id_field("parent_id", "om_"));
+    // Trust only structured source IDs, never an ID or URL in rendered text.
+    let mut quote_ids: Vec<_> = ["quote_id", "quoted_message_id"]
+        .into_iter()
+        .filter_map(|key| id_field(key, "om_"))
+        .collect();
+    if let Some(quotes) = raw["quoted_message_ids"].as_array() {
+        quote_ids.extend(
+            quotes
+                .iter()
+                .filter_map(Value::as_str)
+                .filter(|id| provider_id(id, "om_"))
+                .map(str::to_owned),
+        );
+    }
+    quote_ids.retain(|quote| quote != id);
+    quote_ids.sort_unstable();
+    quote_ids.dedup();
+    let quote_metadata_reported = ["quote_id", "quoted_message_id", "quoted_message_ids"]
+        .iter()
+        .any(|key| !raw[key].is_null() && !raw[key].as_str().is_some_and(str::is_empty));
+    let mentions = if withdrawn { Vec::new() } else { people(raw) };
+    let content_key = content.as_ref().filter(|_| !withdrawn).map(|body| {
+        // Include structural positions so a literal marker cannot stand
+        // in for an actual @, even when both look alike in normalized text.
+        let (bound, positions) = evidence::bound_text(&body.text, &body.bindings);
+        let key = json!([bound, positions]);
+        format!("{:x}", Sha256::digest(key.to_string()))
+    });
+    let mention_bindings = content
+        .as_ref()
+        .filter(|_| !withdrawn)
+        .into_iter()
+        .flat_map(|body| &body.bindings)
+        .filter(|binding| binding.end <= excerpt_limit)
+        .cloned()
+        .collect();
+    let thread_id = id_field("thread_id", "omt_");
+    let root_id = id_field("root_id", "om_");
+    let (scope_position, href, chat_link_only) = locator::resolve(raw, chat, thread_id.as_deref());
+    let links_unread = display.is_some_and(|s| {
+        s.contains("https://") || s.contains("http://") || s.contains("<a ") || s.contains("www.")
     });
     Ok(FeishuMessage {
         chat_id: chat.to_owned(),
@@ -460,30 +608,53 @@ fn parse_message(
             .chars()
             .take(120)
             .collect(),
-        thread_id: raw["thread_id"]
-            .as_str()
-            .filter(|id| provider_id(id, "omt_"))
-            .map(str::to_owned),
-        root_id: raw["root_id"]
-            .as_str()
-            .filter(|id| provider_id(id, "om_"))
-            .map(str::to_owned),
-        // The official shortcuts expose the parent of an ordinary reply as
-        // reply_to. Accept the raw parent_id too, when present.
-        parent_id: ["reply_to", "parent_id"]
-            .into_iter()
-            .filter_map(|key| raw[key].as_str())
-            .find(|id| provider_id(id, "om_"))
-            .map(str::to_owned),
-        deleted: raw["deleted"] == true,
+        thread_id: thread_id.clone(),
+        direct_mention: false,
         evidence: FeishuEvidence {
             id: id.to_owned(),
             created_at,
             updated_at,
             text,
             href,
-            sender: raw["sender"]["name"]
+            source: FeishuSource {
+                author_id: sender_open_id(raw).map(str::to_owned),
+                mentions,
+                mention_bindings,
+                reply_to,
+                root_id,
+                quote_ids,
+                quote_metadata_reported,
+                thread_id,
+                position: scope_position,
+                withdrawn,
+                truncated: !withdrawn
+                    && display.is_some_and(|text| text.chars().nth(excerpt_limit).is_some()),
+                content_key,
+                non_text: raw["msg_type"]
+                    .as_str()
+                    .is_some_and(|kind| !matches!(kind, "text" | "post"))
+                    || content.is_none(),
+                links_unread: !withdrawn && links_unread,
+                chat_link_only,
+                created_minute_precision: minute_label(&raw["create_time"]),
+                edited_minute_precision: minute_label(&raw["update_time"])
+                    && (updated_at != created_at || raw["updated"] == true),
+                edit_time_unknown,
+                created_subsecond: subsecond(&raw["create_time"]),
+                edited_subsecond: (updated_at != created_at || raw["updated"] == true)
+                    && subsecond(&raw["update_time"]),
+                created_millis: timestamp_ms(&raw["create_time"]),
+                edited_millis: edited
+                    .and_then(|_| timestamp_ms(&raw["update_time"]))
+                    .or_else(|| {
+                        (!edit_time_unknown && updated_at == created_at)
+                            .then(|| timestamp_ms(&raw["create_time"]))
+                            .flatten()
+                    }),
+            },
+            sender: raw["sender"]["sender_name"]
                 .as_str()
+                .or_else(|| raw["sender"]["name"].as_str())
                 .filter(|v| !v.is_empty())
                 .unwrap_or("未知发送者")
                 .chars()
@@ -493,10 +664,163 @@ fn parse_message(
     })
 }
 
-fn refresh_context(store: &mut Store, config: &Config) -> Result<()> {
-    let now = now();
+fn source_position(value: &Value) -> Option<u64> {
+    value.as_u64().or_else(|| value.as_str()?.parse().ok())
+}
+
+fn timestamp_ms(value: &Value) -> Option<i64> {
+    let epoch = value.as_i64().or_else(|| value.as_str()?.parse().ok())?;
+    if epoch > 100_000_000_000 {
+        Some(epoch)
+    } else {
+        epoch.checked_mul(1000)
+    }
+}
+
+fn subsecond(value: &Value) -> bool {
+    timestamp_ms(value).is_some_and(|epoch| epoch % 1000 != 0)
+}
+
+#[derive(Default)]
+struct MessageText {
+    text: String,
+    length: usize,
+    bindings: Vec<FeishuMentionBinding>,
+}
+
+impl MessageText {
+    fn push(&mut self, text: &str) {
+        self.text.push_str(text);
+        self.length += text.chars().count();
+    }
+
+    fn mention(&mut self, name: &str, id: Option<&str>) {
+        let start = self.length;
+        self.push("@");
+        self.push(name);
+        if let Some(id) = id {
+            self.bindings.push(FeishuMentionBinding {
+                start,
+                end: self.length,
+                id: id.into(),
+            });
+        }
+    }
+}
+
+fn message_text(raw: &Value) -> Option<MessageText> {
+    let body: Value = serde_json::from_str(raw["body"]["content"].as_str()?).ok()?;
+    let marks = raw["mentions"].as_array().into_iter().flatten();
+    if raw["msg_type"] == "text" {
+        let mut remaining = body["text"].as_str()?;
+        let mut marks: Vec<_> = marks
+            .filter_map(|m| {
+                Some((
+                    m["key"].as_str()?,
+                    m["name"].as_str().unwrap_or_default(),
+                    mention_open_id(m),
+                ))
+            })
+            .filter(|(key, _, _)| key.starts_with("@_user_"))
+            .collect();
+        marks.sort_by_key(|(key, _, _)| std::cmp::Reverse(key.len()));
+        let mut output = MessageText::default();
+        while let Some(at) = remaining.find('@') {
+            output.push(&remaining[..at]);
+            remaining = &remaining[at..];
+            if let Some((key, name, id)) = marks.iter().find(|(key, _, _)| {
+                remaining
+                    .strip_prefix(key)
+                    .is_some_and(|tail| !tail.as_bytes().first().is_some_and(u8::is_ascii_digit))
+            }) {
+                output.mention(
+                    if name.is_empty() {
+                        id.unwrap_or("未知")
+                    } else {
+                        name
+                    },
+                    *id,
+                );
+                remaining = &remaining[key.len()..];
+            } else {
+                output.push("@");
+                remaining = &remaining[1..];
+            }
+        }
+        output.push(remaining);
+        return Some(output);
+    }
+    if raw["msg_type"] != "post" {
+        return None;
+    }
+    let post = if body["content"].is_array() {
+        &body
+    } else {
+        body.get("zh_cn")
+            .or_else(|| body.get("en_us"))
+            .filter(|post| post["content"].is_array())
+            .or_else(|| {
+                body.as_object()?
+                    .values()
+                    .find(|post| post["content"].is_array())
+            })?
+    };
+    let mut output = MessageText::default();
+    if let Some(title) = post["title"].as_str().filter(|t| !t.is_empty()) {
+        output.push(title);
+        output.push("\n");
+    }
+    for (index, line) in post["content"]
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_array)
+        .enumerate()
+    {
+        if index != 0 {
+            output.push("\n");
+        }
+        for part in line {
+            match part["tag"].as_str() {
+                Some("text" | "md") => output.push(part["text"].as_str().unwrap_or_default()),
+                Some("a") => {
+                    let href = part["href"].as_str().unwrap_or_default();
+                    output.push(
+                        part["text"]
+                            .as_str()
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or(href),
+                    );
+                    if !href.is_empty() {
+                        output.push(&format!(" ({href})"));
+                    }
+                }
+                Some("at") => {
+                    let target = part["user_id"].as_str().unwrap_or_default();
+                    let mark = marks
+                        .clone()
+                        .find(|m| m["key"] == target || mention_open_id(m) == Some(target));
+                    let id = mark
+                        .and_then(mention_open_id)
+                        .or_else(|| provider_id(target, "ou_").then_some(target));
+                    let name = part["user_name"]
+                        .as_str()
+                        .or_else(|| mark.and_then(|m| m["name"].as_str()))
+                        .filter(|name| !name.is_empty())
+                        .or(id)
+                        .unwrap_or("未知");
+                    output.mention(name, id);
+                }
+                _ => output.push("（非文本内容）"),
+            }
+        }
+    }
+    Some(output)
+}
+
+fn refresh_context(store: &mut Store, config: &Reader, person: &FeishuPerson) -> Result<()> {
+    let current = now();
     let mut titles = HashMap::new();
-    for job in store.feishu_context_jobs(&config.owner_open_id, now)? {
+    for job in store.feishu_context_jobs(&config.owner_open_id, current)? {
         let name = if job.evidence.chat_name.is_empty() {
             titles
                 .entry(job.chat_id.clone())
@@ -521,8 +845,15 @@ fn refresh_context(store: &mut Store, config: &Config) -> Result<()> {
         } else {
             None
         };
-        let material = fetch_context(store, config, &job, now).ok();
-        store.record_feishu_context(&config.owner_open_id, &job, name, material, now)?;
+        let material = context::fetch(store, config, &job, now()).ok();
+        store.record_feishu_context(
+            &config.owner_open_id,
+            &job,
+            person,
+            name,
+            material,
+            self::now(),
+        )?;
     }
     Ok(())
 }
@@ -535,249 +866,5 @@ fn minute_label(value: &Value) -> bool {
                 .get(10)
                 .is_some_and(|b| matches!(b, b' ' | b'T'))
             && label.as_bytes().get(13) == Some(&b':')
-    })
-}
-
-fn thread_position(href: &str, expected: &str) -> Option<u64> {
-    let url = url::Url::parse(href).ok()?;
-    if url.path() != "/client/thread/open" {
-        return None;
-    }
-    let mut topic = false;
-    let mut position = None;
-    for (key, value) in url.query_pairs() {
-        match key.as_ref() {
-            "openthreadid" | "open_thread_id" if value == expected => topic = true,
-            "thread_position" => position = value.parse().ok(),
-            _ => {}
-        }
-    }
-    topic.then_some(position).flatten()
-}
-
-fn fetch_context(
-    store: &Store,
-    config: &Config,
-    job: &ContextJob,
-    now: i64,
-) -> ScanResult<ContextResult> {
-    let thread = job
-        .topic
-        .as_deref()
-        .filter(|topic| provider_id(topic, "omt_"));
-    let from = job
-        .cursor
-        .as_ref()
-        .map_or(job.first_at.max(now - RETENTION), |c| c.from);
-    let through = job.cursor.as_ref().map_or(now, |c| c.through);
-    let since = store.feishu_iso(from).map_err(|_| ScanError::Storage)?;
-    let until = store.feishu_iso(through).map_err(|_| ScanError::Storage)?;
-    // Ascending order lets a parent be discovered before a child across a page
-    // or a poll boundary. For ordinary chats the cursor uses the same time bounds.
-    let common = [
-        "--as",
-        "user",
-        "--no-reactions",
-        "--format",
-        "json",
-        "--order",
-        "asc",
-        "--page-size",
-        "50",
-    ];
-    let mut args = if let Some(thread) = thread {
-        vec!["im", "+threads-messages-list", "--thread", thread]
-    } else {
-        vec![
-            "im",
-            "+chat-messages-list",
-            "--chat-id",
-            &job.chat_id,
-            "--start",
-            &since,
-            "--end",
-            &until,
-        ]
-    };
-    args.extend(common);
-    let mut token = job.cursor.as_ref().map(|c| c.token.clone());
-    let mut seen = HashSet::new();
-    let mut complete = job.cursor.as_ref().is_none_or(|c| c.complete);
-    let mut pages = job.cursor.as_ref().map_or(0, |c| c.pages);
-    let mut found = Vec::new();
-    let mut deleted = HashSet::new();
-    let lower = job.first_at.max(now - RETENTION);
-    for _ in 0..CONTEXT_PAGE_BUDGET {
-        let mut query = args.clone();
-        if let Some(token) = &token {
-            seen.insert(token.clone());
-            query.extend(["--page-token", token]);
-        }
-        let page = config.messages(&query)?;
-        pages += 1;
-        for row in rows(&page)? {
-            complete &= row["thread_replies_error"] != true && row["thread_has_more"] != true;
-            let embedded = row["thread_replies"].as_array().into_iter().flatten();
-            for (raw, top_level) in
-                std::iter::once((row, true)).chain(embedded.map(|row| (row, false)))
-            {
-                if raw["deleted"] == true {
-                    if let Some(id) = raw["message_id"].as_str() {
-                        deleted.insert(id.to_owned());
-                    }
-                    continue;
-                }
-                let Ok(message) = parse_message(store, raw, Some(&job.chat_id)) else {
-                    complete = false;
-                    continue;
-                };
-                if message.chat_id != job.chat_id || message.evidence.id == job.evidence.anchor.id {
-                    continue;
-                }
-                let at = message.evidence.created_at;
-                let coarse = minute_label(&raw["create_time"]);
-                if at > through {
-                    continue;
-                }
-                if now > through && thread.is_some() && coarse && at + 59 > through {
-                    complete = false;
-                    continue;
-                }
-                if let Some(thread) = thread
-                    && lower == job.first_at
-                    && at.div_euclid(60) == job.first_at.div_euclid(60)
-                {
-                    // A thread query has no precise start. A tied minute
-                    // needs a provider position even when the stored anchor
-                    // is itself rounded to the beginning of that minute.
-                    match thread_position(&job.evidence.anchor.href, thread)
-                        .zip(thread_position(&message.evidence.href, thread))
-                    {
-                        Some((anchor, reply)) if reply > anchor => {}
-                        Some(_) => continue,
-                        None => {
-                            complete = false;
-                            continue;
-                        }
-                    }
-                } else if at < lower {
-                    if !coarse || at + 59 < lower {
-                        continue;
-                    }
-                    // The chat endpoint filters top-level rows before
-                    // formatting. Its nested expansions do not share the
-                    // precise lower bound.
-                    if thread.is_some() || !top_level || from < lower {
-                        complete = false;
-                        continue;
-                    }
-                }
-                found.push(message);
-            }
-        }
-        token = match page["has_more"].as_bool() {
-            Some(false) => None,
-            Some(true) if pages < CONTEXT_MAX_PAGES => page["page_token"]
-                .as_str()
-                .filter(|next| !next.is_empty() && next.len() <= 4096 && !seen.contains(*next))
-                .map(str::to_owned)
-                .or_else(|| {
-                    complete = false;
-                    None
-                }),
-            _ => {
-                complete = false;
-                None
-            }
-        };
-        if token.is_none() {
-            break;
-        }
-    }
-    let mut seeds: HashSet<String> = job.evidence.mentions.iter().map(|m| m.id.clone()).collect();
-    seeds.insert(job.evidence.anchor.id.clone());
-    if let Some(topic) = job.topic.as_ref().filter(|topic| provider_id(topic, "om_")) {
-        seeds.insert(topic.clone());
-    }
-    let mut known = seeds.clone();
-    if let Some(cursor) = &job.cursor {
-        known.extend(
-            cursor
-                .known
-                .iter()
-                .filter(|id| !deleted.contains(*id))
-                .cloned(),
-        );
-    }
-    let mut replies: HashMap<_, _> = job
-        .evidence
-        .replies
-        .iter()
-        .filter(|e| !deleted.contains(&e.id) && e.created_at >= now - RETENTION)
-        .map(|e| (e.id.clone(), e.clone()))
-        .collect();
-    known.extend(replies.keys().cloned());
-    found.retain(|m| !seeds.contains(&m.evidence.id) && !deleted.contains(&m.evidence.id));
-    let mut proven_edges = Vec::new();
-    loop {
-        let before = known.len();
-        found.retain(|m| {
-            let same_thread =
-                thread.is_some_and(|id| m.thread_id.as_deref().is_none_or(|value| value == id));
-            let mut replied = false;
-            for parent in [m.root_id.as_ref(), m.parent_id.as_ref()]
-                .into_iter()
-                .flatten()
-                .filter(|id| known.contains(*id))
-            {
-                if parent != &m.evidence.id {
-                    replied = true;
-                    proven_edges.push((m.evidence.id.clone(), parent.clone()));
-                }
-            }
-            if same_thread || replied || known.contains(&m.evidence.id) {
-                known.insert(m.evidence.id.clone());
-                if replies
-                    .get(&m.evidence.id)
-                    .is_none_or(|old| old.updated_at <= m.evidence.updated_at)
-                {
-                    replies.insert(m.evidence.id.clone(), m.evidence.clone());
-                }
-                false
-            } else {
-                true
-            }
-        });
-        if known.len() == before || found.is_empty() {
-            break;
-        }
-    }
-    let mut replies: Vec<_> = replies.into_values().collect();
-    replies.sort_by(|a, b| (a.created_at, &a.id).cmp(&(b.created_at, &b.id)));
-    if replies.len() > 12 {
-        replies.drain(..replies.len() - 12);
-        complete = false;
-    }
-    let next = token.map(|token| {
-        let mut known: Vec<_> = known.into_iter().filter(|id| !seeds.contains(id)).collect();
-        known.sort_unstable();
-        if known.len() > CONTEXT_MAX_IDS {
-            known.truncate(CONTEXT_MAX_IDS);
-            complete = false;
-        }
-        ContextCursor {
-            from,
-            through,
-            token,
-            pages,
-            complete,
-            known,
-        }
-    });
-    Ok(ContextResult {
-        replies,
-        proven_edges,
-        complete: complete && next.is_none(),
-        next,
     })
 }

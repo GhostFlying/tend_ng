@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   discussionLink,
   listDiscussions,
@@ -13,7 +13,12 @@ import {
   feishuIgnore,
   feishuSync,
 } from "./feishuApi";
-import type { FeishuCard, FeishuFeed, FeishuMessage } from "./feishuApi";
+import type {
+  FeishuCard,
+  FeishuFeed,
+  FeishuMessage,
+  FeishuRelationship,
+} from "./feishuApi";
 import { navigate, trackPageVisit } from "./navigation";
 import "./feishu-suggestions.css";
 
@@ -33,11 +38,14 @@ const errorText = (error: unknown) =>
 const tabs = [
   ["open", "待查看"],
   ["resolved", "已解决"],
+  ["information", "仅知会"],
   ["ignored", "已忽略"],
 ] as const;
 type Tab = (typeof tabs)[number][0];
 function tabOf(item: FeishuCard): Tab {
   if (item.ignored) return "ignored";
+  if (item.evidence.assessment?.card?.relationship === "for_information")
+    return "information";
   return item.evidence.assessment?.disposition === "resolved"
     ? "resolved"
     : "open";
@@ -45,6 +53,35 @@ function tabOf(item: FeishuCard): Tab {
 
 function titleOf(item: FeishuCard) {
   return item.evidence.assessment?.headline || item.evidence.anchor.text.trim();
+}
+
+const relationships: Record<FeishuRelationship, string> = {
+  requested_of_you: "需要你行动",
+  you_committed: "你已承诺",
+  someone_else: "他人接手",
+  for_information: "仅知会",
+  answered: "已答复",
+  completed: "已完成",
+  withdrawn: "已撤回",
+  unclear: "证据不足",
+};
+
+const evidenceGaps: Record<string, string> = {
+  thread_parent_unreported: "来源未提供可核对的直接回复对象。",
+  direct_reference_unavailable:
+    "直接回复或引用的原文暂不可读，可能不可访问或不在本会话。",
+  direct_reference_outside_observation: "直接引用没有可核实的截止时版本。",
+  external_link_not_read: "链接目标未展开，可在主动讨论中补充。",
+  message_order_unknown: "部分材料的先后顺序无法核实。",
+  pending_pages: "仍有后续分页待查。",
+  source_unavailable: "来源暂不可读。",
+  identity_unavailable: "当前飞书身份无法核实。",
+  version_not_proven_at_cutoff: "部分消息没有可核实的截止时版本。",
+  outside_nearby_window: "尚未核实临近窗口以外的群聊。",
+};
+
+function evidenceGap(code: string) {
+  return evidenceGaps[code] || "部分来源尚未核实。";
 }
 
 const gaps: Record<string, string> = {
@@ -271,6 +308,7 @@ export function FeishuSuggestions({
           </div>
           {filtered.map((card) => {
             const ev = card.evidence;
+            const copy = ev.assessment?.card;
             return (
               <a
                 className="fs-row"
@@ -288,11 +326,27 @@ export function FeishuSuggestions({
                     {stamp(card.updated_at)}
                   </time>
                 </span>
-                <strong>{titleOf(card)}</strong>
+                <strong className={copy ? "fs-request" : undefined}>
+                  {copy?.request || titleOf(card)}
+                </strong>
+                {copy && (
+                  <>
+                    <span className="fs-row-current">{copy.current}</span>
+                    {copy.question && (
+                      <span className="fs-row-question">
+                        待确认 · {copy.question.text}
+                      </span>
+                    )}
+                  </>
+                )}
                 <span className="fs-row-foot">
-                  {ev.replies.length > 0
-                    ? `${ev.replies.length} 条后续回复`
-                    : `由 ${ev.anchor.sender} 提及`}
+                  <span className="fs-row-tags">
+                    <span className="fs-pill neutral">
+                      {copy ? relationships[copy.relationship] : "查看原消息"}
+                    </span>
+                    {!!ev.changed?.length && <span>材料有更新</span>}
+                    {ev.coverage_changed && <span>已补齐读取范围</span>}
+                  </span>
                   {card.discussions.some((item) => item.attached) && (
                     <span>讨论已关联</span>
                   )}
@@ -347,18 +401,60 @@ export function FeishuSuggestions({
   );
 }
 
-function SourceRow({ message }: { message: FeishuMessage }) {
+function compareSources(a: FeishuMessage, b: FeishuMessage) {
+  const minute = Math.floor(a.created_at / 60) - Math.floor(b.created_at / 60);
+  if (minute) return minute;
+  if (
+    a.source?.position != null &&
+    b.source?.position != null &&
+    a.source.thread_id === b.source.thread_id
+  ) {
+    return a.source.position - b.source.position || a.created_at - b.created_at;
+  }
+  return a.created_at - b.created_at;
+}
+
+function SourceRow({
+  message,
+  owner,
+  changed,
+  label,
+  register,
+}: {
+  message: FeishuMessage;
+  owner?: string;
+  changed: boolean;
+  label?: string;
+  register: (node: HTMLLIElement | null) => void;
+}) {
+  const flags = [
+    message.source?.withdrawn && "已撤回",
+    message.source?.truncated && "摘录已截短",
+    message.source?.non_text && !message.source.withdrawn && "非文本",
+    message.source?.links_unread && "链接目标未读",
+  ].filter(Boolean);
   return (
-    <li className="fs-message">
+    <li className="fs-message" ref={register} tabIndex={-1}>
       <div>
-        <strong>{message.sender}</strong>
+        <strong>
+          {label ? `${label} · ` : ""}
+          {message.sender}
+          {owner && message.source?.author_id === owner ? "（你）" : ""}
+        </strong>
         <time dateTime={new Date(message.created_at * 1000).toISOString()}>
           {stamp(message.created_at)}
         </time>
+        {changed && <span className="fs-pill">本次变化</span>}
       </div>
+      {!message.source?.withdrawn &&
+      message.updated_at &&
+      message.updated_at > message.created_at ? (
+        <small>编辑于 {stamp(message.updated_at)}</small>
+      ) : null}
       <p>{message.text}</p>
+      {flags.length > 0 && <small>{flags.join(" · ")} · </small>}
       <a href={message.href} target="_blank" rel="noreferrer">
-        飞书原文 ↗
+        {message.source?.chat_link_only ? "飞书原文所在会话 ↗" : "飞书原文 ↗"}
       </a>
     </li>
   );
@@ -379,7 +475,48 @@ function SuggestionDetail({
   const [choices, setChoices] = useState<Discussion[] | null>(null);
   const [target, setTarget] = useState("");
   const ev = card.evidence;
-  const { id, revision, anchor, replies, assessment } = ev;
+  const { id, revision, anchor, assessment } = ev;
+  const copy = assessment?.card;
+  const observation = ev.assessed_observation ?? ev.observation;
+  const references = ev.assessed_references ?? ev.references ?? [];
+  const unavailableReferences = new Set(
+    references.filter((ref) => ref.status !== "available").map((ref) => ref.id),
+  ).size;
+  const sources = Array.from(
+    new Map(
+      [
+        anchor,
+        ...ev.mentions,
+        ...(ev.direct || []),
+        ...(ev.before || []),
+        ...ev.replies,
+        ...(ev.cited || []).filter((message) =>
+          assessment?.evidence_ids.includes(message.id),
+        ),
+      ].map((message) => [message.id, message]),
+    ).values(),
+  ).sort(compareSources);
+  const sourceNodes = useRef(new Map<string, HTMLLIElement>());
+  function showSource(sourceId: string) {
+    const node = sourceNodes.current.get(sourceId);
+    node?.focus({ preventScroll: true });
+    node?.scrollIntoView({ block: "nearest" });
+  }
+  function citations(ids: string[], label: string) {
+    return ids
+      .filter((sourceId) => sources.some((m) => m.id === sourceId))
+      .map((sourceId, index) => (
+        <button
+          className="fs-source-ref"
+          key={sourceId}
+          type="button"
+          aria-label={`${label} ${index + 1}`}
+          onClick={() => showSource(sourceId)}
+        >
+          {index + 1}
+        </button>
+      ));
+  }
   const handoff = card.handoffs.find(
     (item) => item.suggestion_id === id && item.revision === revision,
   )?.handoff.request;
@@ -440,12 +577,37 @@ function SuggestionDetail({
         <span className="fs-pill">明确 @ 我</span>
         <span>{ev.chat_name || "飞书会话"}</span>
         {card.ignored && <span className="fs-pill neutral">已忽略</span>}
-        {assessment?.disposition === "resolved" && (
+        {copy ? (
+          <span className="fs-pill neutral">
+            {relationships[copy.relationship]}
+          </span>
+        ) : assessment?.disposition === "resolved" ? (
           <span className="fs-pill neutral">已解决</span>
-        )}
+        ) : null}
       </div>
       <h3>{titleOf(card)}</h3>
-      {assessment ? (
+      {copy ? (
+        <>
+          <p className="fs-overview">
+            {copy.request} {citations(copy.request_ids, "请求依据")}
+          </p>
+          <p className="fs-overview">
+            {copy.current} {citations(copy.current_ids, "进展依据")}
+          </p>
+          {copy.question && (
+            <div className="fs-questions">
+              <h4>待确认</h4>
+              <p>
+                {copy.question.text}{" "}
+                {citations([copy.question.basis], "待确认依据")}
+              </p>
+              {!sources.some((m) => m.id === copy.question?.basis) && (
+                <small>{evidenceGap(copy.question.basis)}</small>
+              )}
+            </div>
+          )}
+        </>
+      ) : assessment ? (
         <>
           <p className="fs-overview">{assessment.overview}</p>
           {!!assessment.open_questions.length && (
@@ -639,34 +801,69 @@ function SuggestionDetail({
       )}
       <section className="fs-sources" aria-label="来源与后续">
         <h4>
-          来源与后续{" "}
-          <span>
-            {
-              [
-                anchor,
-                ...ev.mentions.filter((m) => m.id !== anchor.id),
-                ...replies,
-              ].length
-            }{" "}
-            条材料
-          </span>
+          来源与后续 <span>{sources.length} 条材料</span>
         </h4>
-        {ev.context_status === "pending" && (
+        {!!observation?.through && (
+          <p className="fs-coverage">
+            {copy ? "研判观察截至" : "观察截至"} {stamp(observation.through)}
+            {observation.read_from && observation.read_to
+              ? ` · 已读到 ${stamp(observation.read_from)} 至 ${stamp(observation.read_to)}`
+              : ""}
+          </p>
+        )}
+        {ev.context_status === "pending" && !copy && (
           <p className="fs-coverage">尚未读取后续回复。</p>
         )}
-        {ev.context_status === "partial" && (
+        {(observation?.after_status === "partial" ||
+          (!observation?.through && ev.context_status === "partial")) && (
           <p className="fs-coverage">回复仅部分可读，不能据此认定没有后续。</p>
         )}
-        {ev.context_status === "unavailable" && (
+        {(observation?.after_status === "unavailable" ||
+          (!observation?.through && ev.context_status === "unavailable")) && (
           <p className="fs-coverage">暂时无法核实后续回复。</p>
         )}
+        {observation?.after_status === "checked_empty" && (
+          <p className="fs-coverage">在已查范围内未看到相关回复。</p>
+        )}
+        {unavailableReferences > 0 && (
+          <p className="fs-coverage">
+            未能核实 {unavailableReferences} 条直接回复对象或引用的原文。
+          </p>
+        )}
+        {[
+          "thread_parent_unreported",
+          "version_not_proven_at_cutoff",
+          "external_link_not_read",
+        ]
+          .filter((gap) => observation?.gaps.includes(gap))
+          .map((gap) => (
+            <p className="fs-coverage" key={gap}>
+              {evidenceGap(gap)}
+            </p>
+          ))}
         <ul>
-          <SourceRow message={anchor} />
-          {[...ev.mentions.filter((m) => m.id !== anchor.id), ...replies]
-            .sort((a, b) => a.created_at - b.created_at)
-            .map((message) => (
-              <SourceRow key={message.id} message={message} />
-            ))}
+          {sources.map((message) => (
+            <SourceRow
+              key={message.id}
+              message={message}
+              owner={ev.owner?.id}
+              changed={!!ev.changed?.includes(message.id)}
+              label={
+                message.id === anchor.id
+                  ? "原 @"
+                  : references.find((ref) => ref.id === message.id)
+                        ?.relation === "reply_to"
+                    ? "回复对象"
+                    : references.some((ref) => ref.id === message.id)
+                      ? "直接引用"
+                      : undefined
+              }
+              register={(node) => {
+                if (node) sourceNodes.current.set(message.id, node);
+                else sourceNodes.current.delete(message.id);
+              }}
+            />
+          ))}
         </ul>
       </section>
     </article>

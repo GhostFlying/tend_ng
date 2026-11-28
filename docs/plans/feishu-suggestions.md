@@ -1,5 +1,7 @@
 # 飞书建议一期（#130）
 
+本文记录一期的已交付方案；当前产品规则见 [飞书建议与本人关系](../feishu-suggestions.md)。
+
 ## 目标与对照
 
 桌面和移动端保留独立的「飞书建议」入口，CLI 与 Web 共用用户 API。以 LDD 的 `modules/followups/AGENTS.md`、`contracts/openapi.yaml`、`ingestion.go` 和 `integrations/larkmessages/client.go` 的实际契约为参照（devbox 源码版本 `81c91df8260d00d534413eaf25225435ba2d1415`）。候选必须是非本人发送、明确 @ 当前用户的消息，不能以搜索命中或 @全员 代替。按身份和来源消息 ID 去重。优先按会话与 thread 分组，其次用可追溯的回复根，缺少可靠 ID 时按 LDD 的同一会话 30 分钟间隔、两小时上限聚合。不把同群无关话题作为新进展。未显式带入 Tend 的采集材料保留七天，显式引用或转交的快照由对应 Tend 记录保存。

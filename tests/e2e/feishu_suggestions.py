@@ -112,14 +112,23 @@ def run(args, root):
         assert feed()["scan"]["phase"] == "disabled" and not feed()["suggestions"]
         use("sync", error="HTTP 409")
 
+    # Simulate the preceding released schema: chat archives, maintenance
+    # and Issue title history exist, but auxiliary Feishu evidence expiry does not.
+    set_checkpoints("DROP INDEX feishu_suggestions_aux_expiry")
+    set_checkpoints("ALTER TABLE feishu_suggestions DROP COLUMN aux_first_at")
+    set_checkpoints("PRAGMA user_version=56")
     set_state("empty")
     with server(args.server, root, env, **options):
+        assert sql(db, "PRAGMA user_version") == [(57,)]
+        assert sql(db, "SELECT name FROM sqlite_schema WHERE name IN ('archived_chats','maintenance_notes','issue_title_changes','feishu_suggestions_aux_expiry') ORDER BY name") == [
+            ("archived_chats",), ("feishu_suggestions_aux_expiry",), ("issue_title_changes",), ("maintenance_notes",),
+        ]
         initial = wait_scan("idle")["scan"]
         assert initial["last_success_at"] >= at and initial["checkpoint_at"] >= at
         assert not feed()["suggestions"] and not assessor_log.exists()
         assert cli("chat", "read", "main")["messages"] == []
         assert feed()["assessor"] == {"id": "FeishuFixture", "category": "feishu-router"}
-        assert not [c for c in list_calls() if "messages-list" in " ".join(c)]
+        assert not [c for c in list_calls() if c[:3] == ["api", "GET", "/open-apis/im/v1/messages"]]
 
     # Reproduce the LDD failure shape: process restarted, previous attempt still marked running,
     # and the last successful cursor eight days old. Page one succeeds then page two fails.
@@ -146,7 +155,7 @@ def run(args, root):
         failed = wait_scan("failed")
         assert failed["scan"]["gap"] == "incomplete_search" and failed["scan"]["checkpoint_at"] == outage
         assert len(search_calls(missing_start)) == 1
-        assert any("+messages-mget" in args for args in list_calls()[missing_start:])
+        assert any("/open-apis/im/v1/messages/mget" in args for args in list_calls()[missing_start:])
         assert not failed["suggestions"]
 
     set_state("wrong-user")
@@ -195,20 +204,25 @@ def run(args, root):
         hold.unlink()
         qa = judged("om_qa_anchor")
         assert qa["evidence"]["revision"] > before["revision"] and qa["ignored"]
+        assert before["references"] == [{"id": "om_qa_parent", "relation": "reply_to", "status": "unavailable"}]
+        assert qa["evidence"]["assessed_references"] == [{"id": "om_qa_parent", "relation": "reply_to", "status": "available"}]
+        assert "direct_reference_unavailable" not in qa["evidence"]["assessed_observation"]["gaps"]
+        assert qa["evidence"]["assessed_observation"]["read_from"] < before["observation"]["read_from"]
+        assert "om_qa_parent" in qa["evidence"]["assessment"]["card"]["request_ids"]
         use("handoff", before["id"], before["revision"], error="HTTP 409")
         documents = card("om_docs_anchor")["evidence"]["id"]
         resolved = judged("om_docs_anchor")
         release = judged("om_release_anchor")
         rounded_anchor = judged("om_other_topic")
-        assert rounded_anchor["evidence"]["anchor"]["created_at"] % 60 == 0
+        assert not rounded_anchor["evidence"]["anchor"]["source"]["created_minute_precision"]
         assert [m["id"] for m in rounded_anchor["evidence"]["replies"]] == ["om_other_later"]
         assert rounded_anchor["evidence"]["context_status"] == "partial"
         assert [m["id"] for m in qa["evidence"]["replies"]] == ["om_qa_reply"]
         assert qa["evidence"]["anchor"]["created_at"] % 60 == 30
-        assert qa["evidence"]["replies"][0]["created_at"] == qa["evidence"]["anchor"]["created_at"] // 60 * 60
+        assert qa["evidence"]["replies"][0]["created_at"] == qa["evidence"]["anchor"]["created_at"] + 15
         assert qa["evidence"]["context_status"] == "partial"
         assert resolved["evidence"]["anchor"]["created_at"] % 60 == 30
-        assert resolved["evidence"]["replies"][0]["created_at"] == resolved["evidence"]["anchor"]["created_at"] // 60 * 60
+        assert resolved["evidence"]["replies"][0]["created_at"] == resolved["evidence"]["anchor"]["created_at"] + 15
         assert resolved["evidence"]["context_status"] == "ready"
         assert resolved["evidence"]["assessment"]["disposition"] == "resolved"
         assert [m["id"] for m in release["evidence"]["mentions"]] == ["om_release_anchor", "om_release_update"]
@@ -269,7 +283,7 @@ def run(args, root):
         assert len(originals) == 2 and all("om_release_deleted" in evidence for evidence, in originals)
         print("PASS deletion read during fold is absent from current advice but both selected old snapshots remain unchanged", flush=True)
         assert sql(db, "SELECT suggestion_id FROM feishu_mentions WHERE message_id='om_release_final'") == [(release_id,)]
-        print("PASS minute-precision chat and thread evidence; a late-discovered non-mention parent folds its @ child into the original card without rewriting receipts", flush=True)
+        print("PASS native topic parent, verified ordering, and assessed reference convergence; a late-discovered non-mention parent folds its @ child into the original card without rewriting receipts", flush=True)
 
         # The first poll reached its budget. The next scan must reuse the
         # original window and actually request its fifth provider page.
@@ -282,8 +296,8 @@ def run(args, root):
                              and c["evidence"]["assessment"] and len(c["evidence"]["replies"]) == 2)
         assert [m["id"] for m in continued["evidence"]["replies"]] == ["om_docs_reply", "om_docs_followup"]
         assert continued["evidence"]["assessment"]["disposition"] == "resolved"
-        latest_page = next(c for c in list_calls() if "doc-page-5" in c)
-        assert datetime.fromisoformat(latest_page[latest_page.index("--end") + 1]).timestamp() == cursor["through"]
+        latest_page = next(c for c in list_calls() if any("doc-page-5" in arg for arg in c))
+        assert int(json.loads(latest_page[latest_page.index("--params") + 1])["end_time"]) == cursor["through"]
         assert len([line for line in assessor_log.read_text().splitlines() if "om_qa_anchor" in line]) == 2
         print("PASS direct @ filter, topic aggregation, later non-mention reply, resolved suggestion, ignore/restore semantics and no Runner use", flush=True)
 
@@ -350,8 +364,292 @@ def run(args, root):
             raise AssertionError(f"expired assessor {pid} was not stopped and reaped")
         print("PASS a subprocess that stops reading a full pipe expires and the next assessment completes", flush=True)
 
-        release_result = use("read", release_id)
+        release_result = wait_for(lambda: use("read", release_id), lambda c: c["assessment_status"] == "assessed")
         use("ignore", release_id, release_result["evidence"]["revision"])
+
+        # Approved same-group example. Missing first-packet citation is read
+        # by ID, same-name authors remain distinct, and a late judgment may
+        # not become current after the user's reply entered material.
+        old_hold = path / "hold-spec-assessment"
+        new_hold = path / "hold-spec-new-result"
+        old_hold.touch()
+        new_hold.touch()
+        set_state("recover", relationship=True, stage="hold", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_scan SET checkpoint_at=?", at-900)
+        use("sync")
+        wait_for((path / "spec-assessment-has-input").exists, bool)
+        prior = card("om_spec_ask")["evidence"]
+        assert prior["assessment"] is None
+        assert {m["id"] for m in prior["direct"]} == set()
+        assert {r["id"] for r in prior["references"]} == {"om_spec_table", "om_spec_private", "om_spec_unknown_quote"}
+        spec_id = prior["id"]
+        before_threads = len(cli("chat", "read", "main")["messages"])
+        assert use("ignore", spec_id, prior["revision"])["ignored"]
+
+        set_state("recover", relationship=True, stage="answered", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", spec_id)
+        use("sync")
+        replacement = wait_for(lambda: card("om_spec_ask"), lambda c: c["evidence"]["revision"] > prior["revision"])
+        assert not replacement["ignored"] and replacement["evidence"]["assessment"] is None
+        assert {"om_spec_table", "om_spec_owner"} <= set(replacement["evidence"]["changed"])
+        assert [m["id"] for m in replacement["evidence"]["direct"]] == ["om_spec_table"]
+        old_hold.unlink()
+        wait_for((path / "spec-new-result-has-input").exists, bool)
+        assert card("om_spec_ask")["evidence"]["assessment"] is None, "stale completion was published"
+        new_hold.unlink()
+        answered = judged("om_spec_ask")["evidence"]
+        assert answered["assessment"]["card"]["relationship"] == "answered"
+        assert answered["assessment"]["card"]["current_ids"] == ["om_spec_owner", "om_spec_handover"]
+        assert answered["assessed_observation"]["through"] <= answered["observation"]["through"]
+        assert {r["id"]: r["status"] for r in answered["assessed_references"]} == {
+            "om_spec_table": "available", "om_spec_private": "unavailable", "om_spec_unknown_quote": "out_of_window",
+        }
+        assert {"direct_reference_unavailable", "direct_reference_outside_observation",
+                "version_not_proven_at_cutoff"} <= set(answered["assessed_observation"]["gaps"])
+        fyi, demo = judged("om_spec_fyi")["evidence"], judged("om_spec_demo")["evidence"]
+        assert len({fyi["id"], demo["id"], spec_id}) == 3
+        assert fyi["assessment"]["card"]["relationship"] == "for_information"
+        assert demo["assessment"]["card"]["relationship"] == "requested_of_you"
+        assert "不应进入任一研判" not in json.dumps([answered, fyi, demo], ensure_ascii=False)
+        original_chat = use("discuss", spec_id, answered["revision"])["chat_id"]
+        [(snapshot,)] = sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE chat_id=?", original_chat)
+        ignored = use("ignore", spec_id, answered["revision"])
+        assert ignored["ignored"]
+
+        attempts = assessor_log.read_text().count("om_spec_ask")
+        set_state("recover", relationship=True, stage="rename", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_scan SET checkpoint_at=?", at-900)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", spec_id)
+        use("sync")
+        renamed = wait_for(lambda: card("om_spec_ask"), lambda c: c["evidence"]["owner"]["name"] == "林星")
+        assert renamed["ignored"] and renamed["evidence"]["revision"] == answered["revision"]
+        assert assessor_log.read_text().count("om_spec_ask") == attempts
+        assert renamed["evidence"]["anchor"]["source"]["author_id"] == "ou_chen"
+
+        if args.screenshots:
+            subprocess.run(["node", WEB / "tests/feishu-suggestions.mjs"], env={
+                **env, "TEND_SCREENSHOTS": str(args.screenshots),
+                "TEND_FEISHU_RELATIONSHIP": spec_id,
+            }, check=True, timeout=45)
+
+        false_completion = root / "assessor-home" / "fixture-unsupported-completion"
+        false_completion.touch()
+        set_checkpoints("UPDATE feishu_suggestions SET assessment_state='pending',assessed_at=0 WHERE id=?", spec_id)
+        bad_candidate = wait_for(lambda: card("om_spec_ask"), lambda c: c["assessment_status"] == "failed")
+        assert bad_candidate["evidence"]["assessment"]["card"]["relationship"] == "answered"
+        false_completion.unlink()
+
+        set_state("recover", relationship=True, stage="edited", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", spec_id)
+        use("sync")
+        edited = wait_for(lambda: card("om_spec_ask"),
+                          lambda c: c["evidence"]["revision"] > answered["revision"] and c["evidence"]["assessment"])
+        assert not edited["ignored"] and "验收表" in edited["evidence"]["anchor"]["text"]
+        assert "om_spec_ask" in edited["evidence"]["changed"]
+
+        set_state("recover", relationship=True, stage="withdrawn", progress=True, deep_context=True)
+        set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", spec_id)
+        use("sync")
+        withdrawn = wait_for(lambda: card("om_spec_ask"),
+                              lambda c: (c["evidence"]["assessment"] or {}).get("card", {}).get("relationship") == "withdrawn")
+        assert withdrawn["evidence"]["id"] == spec_id
+        assert withdrawn["evidence"]["anchor"]["source"]["withdrawn"]
+        assert "验收表" not in withdrawn["evidence"]["anchor"]["text"]
+        assert use("discuss", spec_id, answered["revision"])["chat_id"] == original_chat
+        assert sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE chat_id=?", original_chat) == [(snapshot,)]
+        assert len(cli("chat", "read", "main")["messages"]) == before_threads
+        retained = [f.read_text() for f in (path / ".codex-ark" / "sessions").glob("rollout-*.jsonl")]
+        assert any("om_spec_ask" in roll and "fixture_tool" in roll and "fixture_answer" in roll for roll in retained)
+        assert all("不应进入任一研判" not in roll for roll in retained)
+        print("PASS separate nearby @s, same-name participant IDs, direct reference deduplication, both tools, fixed cutoff, material edits, withdrawal, no rename rerun, stale-result fence and private retained rollout", flush=True)
+
+        def edge_scan(stage, **overrides):
+            set_state("recover", relationship=True, stage="withdrawn", progress=True,
+                      deep_context=True, edges=stage, **overrides)
+            set_checkpoints("UPDATE feishu_scan SET checkpoint_at=?", at-1200)
+            use("sync")
+
+        edge_scan("initial")
+        transition_cards = {key: judged(f"om_{key}_anchor") for key in ("transition", "scantransition")}
+        old_topic_snapshots = {}
+        for key, pending_thread in transition_cards.items():
+            evidence = pending_thread["evidence"]
+            assert evidence["assessment"]["card"]["relationship"] == "requested_of_you"
+            assert evidence["assessment"]["card"]["current_ids"] == [f"om_{key}_old_group"]
+            old_chat = use("discuss", evidence["id"], evidence["revision"])["chat_id"]
+            [(raw,)] = sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE chat_id=?", old_chat)
+            assert f"om_{key}_old_group" in raw
+            old_topic_snapshots[key] = (old_chat, evidence["revision"], raw)
+            [(topic, cursor)] = sql(db, "SELECT topic,context_cursor FROM feishu_suggestions WHERE id=?", evidence["id"])
+            assert topic == f"om_{key}_anchor" and json.loads(cursor)["token"].startswith("old-chat-")
+            assert json.loads(cursor)["thread"] is None
+        chain = judged("om_chain_anchor")["evidence"]
+        assert len(chain["replies"]) == 5 and len(chain["related_replies"]) == 5
+        assert chain["assessment"]["card"]["current_ids"] == ["om_chain_5"]
+        assert chain["assessment"]["card"]["relationship"] == "completed"
+        promotion = judged("om_promotion_anchor")["evidence"]
+        assert not promotion["replies"] and promotion["assessment"]["card"]["relationship"] == "completed"
+        assert promotion["assessment"]["card"]["current_ids"] == ["om_promotion_5"]
+
+        roles = judged("om_roles_anchor")["evidence"]
+        assert roles["assessment"]["card"]["current"] == "当前轮到你发版。"
+        role_id = roles["id"]
+        assert use("ignore", role_id, roles["revision"])["ignored"]
+
+        def cursor_number(key):
+            row_id = transition_cards[key]["evidence"]["id"]
+            [(raw,)] = sql(db, "SELECT context_cursor FROM feishu_suggestions WHERE id=?", row_id)
+            return int(json.loads(raw)["token"].removeprefix("old-chat-"))
+
+        initial_cursors = {key: cursor_number(key) for key in transition_cards}
+        edge_scan("labels")
+        labels = wait_for(lambda: card("om_roles_anchor"),
+                          lambda row: row and "@林星" in row["evidence"]["anchor"]["text"])
+        assert labels["ignored"] and labels["evidence"]["revision"] == roles["revision"]
+        assert labels["evidence"]["anchor"]["source"]["content_key"] == roles["anchor"]["source"]["content_key"]
+        # The display name updates at search commit, before the refresh
+        # finishes. Settle that pass before asserting the new pass's calls.
+        wait_for(lambda: all(cursor_number(key) > value for key, value in initial_cursors.items()), bool)
+        call_start = len(list_calls())
+        edge_scan("topic_empty")
+        empty_topics = {}
+        for key, former in transition_cards.items():
+            current = wait_for(lambda: card(f"om_{key}_anchor"), lambda row: row and
+                               (row["evidence"]["assessment"] or {}).get("card", {}).get("current") == "此话题还未看到验收回复。")
+            e = current["evidence"]
+            assert e["id"] == former["evidence"]["id"] and e["revision"] > former["evidence"]["revision"]
+            assert e["observation"]["after_status"] == "checked_empty" and not e["replies"]
+            assert e["assessment"]["disposition"] == "open"
+            assert e["assessment"]["card"]["request_ids"] == [f"om_{key}_anchor", f"om_{key}_reference"]
+            assert [m["id"] for m in e["direct"]] == [f"om_{key}_reference"]
+            assert f"om_{key}_old_group" not in json.dumps(use("read", e["id"])["evidence"])
+            assert sql(db, "SELECT suggestion_id FROM feishu_mentions WHERE message_id=?",
+                       f"om_{key}_old_group") == [(e["id"],)]
+            assert sql(db, "SELECT topic,context_cursor FROM feishu_suggestions WHERE id=?",
+                       e["id"]) == [(f"omt_{key}", None)]
+            old_chat, old_revision, old_snapshot = old_topic_snapshots[key]
+            assert use("discuss", e["id"], e["revision"])["chat_id"] == old_chat
+            assert use("discuss", e["id"], old_revision)["chat_id"] == old_chat
+            assert sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE chat_id=? AND revision=?",
+                       old_chat, old_revision) == [(old_snapshot,)]
+            [(now_snapshot,)] = sql(db, "SELECT evidence FROM feishu_discussion_snapshots WHERE chat_id=? AND revision=?",
+                                    old_chat, e["revision"])
+            assert f"om_{key}_old_group" not in now_snapshot and f"om_{key}_reference" in now_snapshot
+            empty_topics[key] = e
+        if args.screenshots:
+            subprocess.run(["node", WEB / "tests/feishu-suggestions.mjs"], env={
+                **env, "TEND_SCREENSHOTS": str(args.screenshots),
+                "TEND_FEISHU_TOPIC": empty_topics["transition"]["id"],
+            }, check=True, timeout=45)
+
+        bad_topic = root / "assessor-home" / "fixture-use-old-topic-citation"
+        bad_topic.touch()
+        for e in empty_topics.values():
+            set_checkpoints("UPDATE feishu_suggestions SET assessment_state='pending',assessed_at=0 WHERE id=?", e["id"])
+        for key in empty_topics:
+            result = wait_for(lambda: card(f"om_{key}_anchor"),
+                              lambda row: row and row["assessment_status"] == "failed")
+            assert result["evidence"]["assessment"]["disposition"] == "open"
+            assert result["evidence"]["revision"] == empty_topics[key]["revision"]
+        bad_topic.unlink()
+
+        edge_scan("oldedit")
+        for key, e in empty_topics.items():
+            def raw_card():
+                return sql(db, "SELECT evidence FROM feishu_suggestions WHERE id=?", e["id"])[0][0]
+            wait_for(raw_card, lambda raw: "旧群聊验收补充了情况" in json.dumps(json.loads(raw), ensure_ascii=False))
+            assert use("read", e["id"])["evidence"]["revision"] == e["revision"]
+        print("PASS both thread cutovers reject ordinary-group mentions for coverage, reads and closure; preserve direct reference, dedup and old snapshot", flush=True)
+
+        for e in empty_topics.values():
+            set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", e["id"])
+        edge_scan("new")
+        for key, former in transition_cards.items():
+            now_thread = wait_for(lambda: card(f"om_{key}_anchor"), lambda row: row and
+                                  (row["evidence"]["assessment"] or {}).get("card", {}).get("relationship") == "completed")
+            assert now_thread["evidence"]["id"] == former["evidence"]["id"]
+            assert now_thread["evidence"]["revision"] > former["evidence"]["revision"]
+            assert now_thread["evidence"]["observation"]["after_status"] == "read"
+            assert now_thread["evidence"]["assessment"]["card"]["current_ids"] == [f"om_{key}_done"]
+            assert sql(db, "SELECT topic,context_cursor FROM feishu_suggestions WHERE id=?",
+                       now_thread["evidence"]["id"]) == [(f"omt_{key}", None)]
+        containers = [json.loads(words[words.index("--params")+1]).get("container_id")
+                      for words in list_calls()[call_start:] if words[:3] == ["api", "GET", "/open-apis/im/v1/messages"]]
+        assert {"omt_transition", "omt_scantransition"} <= set(containers)
+        assert not {"oc_transition", "oc_scantransition"} & set(containers)
+        swapped = wait_for(lambda: card("om_roles_anchor"), lambda row: row and
+                           (row["evidence"]["assessment"] or {}).get("card", {}).get("current") == "当前轮到你审批。")
+        new_role = swapped["evidence"]
+        assert not swapped["ignored"] and new_role["revision"] > roles["revision"]
+        assert new_role["anchor"]["text"] == labels["evidence"]["anchor"]["text"]
+        assert new_role["anchor"]["source"]["content_key"] != roles["anchor"]["source"]["content_key"]
+        assert [binding["id"] for binding in new_role["anchor"]["source"]["mention_bindings"]] == [
+            "ou_same_name", "ou_fixture_owner"]
+        expansions = {}
+        for key in ("expandpos", "expandmeta", "expandreply"):
+            row = judged(f"om_{key}_anchor")
+            evidence = row["evidence"]
+            assert evidence["assessment"]["disposition"] == "resolved"
+            assert evidence["assessment"]["card"]["current_ids"] == [f"om_{key}_done"]
+            assert "version_not_proven_at_cutoff" in evidence["assessed_observation"]["gaps"]
+            cite = next(m for m in evidence["cited"] if m["id"] == f"om_{key}_done")
+            assert cite["created_at"] == evidence["anchor"]["created_at"]
+            assert not cite["source"]["truncated"] and cite["text"].endswith("验收凭据：签字项齐全。")
+            source = cite["source"]
+            assert source["position"] == 9 and source["thread_id"] == f"omt_{key}"
+            assert source["reply_to"] == source["root_id"] == evidence["anchor"]["id"]
+            assert source["quote_ids"] == [evidence["anchor"]["id"]] and not source["chat_link_only"]
+            assert "openthreadid=omt_" + key in cite["href"] and "thread_position=9" in cite["href"]
+            assert "position=356" not in cite["href"]
+            expansions[key] = (evidence, cite)
+            set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", evidence["id"])
+
+        edge_scan("new")
+        for key, (evidence, cite) in expansions.items():
+            wait_for(lambda: sql(db, "SELECT checked_at FROM feishu_suggestions WHERE id=?", evidence["id"])[0][0],
+                     lambda at: at > 1)
+            refreshed = use("read", evidence["id"])["evidence"]
+            assert refreshed["revision"] == evidence["revision"]
+            assert [c for c in refreshed["cited"] if c["id"] == f"om_{key}_done"] == [cite]
+        print("PASS all three sparse exact-read shapes preserve same-second source and closure, reject nine conflicting reads, and keep cited provenance after background refresh", flush=True)
+
+        expansion_anchors = {e["anchor"]["id"] for e, _ in expansions.values()}
+
+        def expansion_attempts():
+            return sum(json.loads(line)[0] in expansion_anchors
+                       for line in assessor_log.read_text().splitlines())
+
+        attempts_before_conflict = expansion_attempts()
+        for evidence, _ in expansions.values():
+            set_checkpoints("UPDATE feishu_suggestions SET checked_at=1 WHERE id=?", evidence["id"])
+        edge_scan("new", conflicting_batch_locator=True)
+        for key, (evidence, cite) in expansions.items():
+            wait_for(lambda: sql(db, "SELECT checked_at FROM feishu_suggestions WHERE id=?", evidence["id"])[0][0],
+                     lambda at: at > 1)
+            refreshed = use("read", evidence["id"])["evidence"]
+            assert refreshed["assessment"] == evidence["assessment"]
+            assert refreshed["revision"] == evidence["revision"]
+            assert [c for c in refreshed["cited"] if c["id"] == f"om_{key}_done"] == [cite]
+            [listed] = [m for m in refreshed["replies"] if m["id"] == f"om_{key}_done"]
+            assert listed["source"]["position"] == 9 and listed["href"] == cite["href"]
+        probes = [json.loads(line) for line in (root / "fixture-batch-locator-probes.jsonl").read_text().splitlines()]
+        assert {probe["id"] for probe in probes} == {cite["id"] for _, cite in expansions.values()}
+        assert all(probe["batch"] > 1 for probe in probes)
+        assert any(probe["id"] == "om_expandpos_done" and probe["position"] == "9" and
+                   "thread_position=999" in probe["href"] for probe in probes)
+        assert expansion_attempts() == attempts_before_conflict
+        print("PASS conflicting batch reply links cannot rewrite published same-version citations, list locations or assessment state", flush=True)
+
+        assert len(cli("chat", "read", "main")["messages"]) == before_threads
+        print("PASS topic changes through exact lookup and discovery discard old cursors; same-name roles swap despite identical display, labels alone do not invalidate; verified five-link closure and body-free promotion across pages", flush=True)
+        if args.screenshots:
+            subprocess.run(["node", WEB / "tests/feishu-suggestions.mjs"], env={
+                **env, "TEND_SCREENSHOTS": str(args.screenshots), "TEND_FEISHU_ROLES": role_id,
+            }, check=True, timeout=45)
+            subprocess.run(["node", WEB / "tests/feishu-suggestions.mjs"], env={
+                **env, "TEND_SCREENSHOTS": str(args.screenshots),
+                "TEND_FEISHU_EXPANDED": expansions["expandpos"][0]["id"],
+            }, check=True, timeout=45)
 
     # Simulate elapsed time while Tend was stopped. Keep an active card with
     # one expired origin as well as a fully expired suggestion whose explicit
@@ -366,6 +664,12 @@ def run(args, root):
         conn.execute("UPDATE feishu_suggestions SET evidence=?,first_at=? WHERE id=?",
                      (json.dumps(evidence), expired, release_id))
         conn.execute("UPDATE feishu_mentions SET created_at=? WHERE message_id='om_release_anchor'", (expired,))
+        raw = conn.execute("SELECT evidence FROM feishu_suggestions WHERE id=?", (spec_id,)).fetchone()[0]
+        evidence = json.loads(raw)
+        [old_quote] = evidence["direct"]
+        old_quote["created_at"] = expired
+        conn.execute("UPDATE feishu_suggestions SET evidence=?,aux_first_at=? WHERE id=?",
+                     (json.dumps(evidence), expired, spec_id))
     set_state("wrong-user")
     with server(args.server, root, env, **options):
         assert wait_scan("failed")["scan"]["gap"] == "identity"
@@ -376,6 +680,12 @@ def run(args, root):
         assert active["evidence"]["anchor"]["id"] == "om_release_update" and active["ignored"]
         assert status(id, updated) == direct
         assert use("discuss", id, before["revision"], existing)["chat_id"] == existing
+        current_spec = use("read", spec_id)["evidence"]
+        assert current_spec["id"] == spec_id and current_spec["direct"] == []
+        [(clean_raw, original_version)] = sql(db, """SELECT e.evidence,s.evidence
+          FROM feishu_suggestions e,feishu_discussion_snapshots s
+          WHERE e.id=? AND s.chat_id=?""", spec_id, original_chat)
+        assert not json.loads(clean_raw)["direct"] and original_version == snapshot
         print("PASS provider-independent retention trims active/expired material but preserves explicit old receipts and snapshots", flush=True)
 
 

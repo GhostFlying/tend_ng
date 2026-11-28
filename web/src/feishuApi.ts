@@ -7,6 +7,35 @@ export type FeishuMessage = {
   text: string;
   created_at: number;
   href: string;
+  updated_at?: number;
+  source?: {
+    author_id?: string | null;
+    position?: number | null;
+    thread_id?: string | null;
+    withdrawn?: boolean;
+    non_text?: boolean;
+    truncated?: boolean;
+    links_unread?: boolean;
+    chat_link_only?: boolean;
+  };
+};
+
+export type FeishuRelationship =
+  | "requested_of_you"
+  | "you_committed"
+  | "someone_else"
+  | "for_information"
+  | "answered"
+  | "completed"
+  | "withdrawn"
+  | "unclear";
+
+type FeishuObservation = {
+  through: number;
+  read_from?: number | null;
+  read_to?: number | null;
+  after_status: string;
+  gaps: string[];
 };
 
 export type FeishuCard = {
@@ -17,13 +46,32 @@ export type FeishuCard = {
     anchor: FeishuMessage;
     mentions: FeishuMessage[];
     replies: FeishuMessage[];
+    before?: FeishuMessage[];
+    direct?: FeishuMessage[];
+    cited?: FeishuMessage[];
+    changed?: string[];
+    coverage_changed?: boolean;
+    owner?: { id: string; name: string } | null;
+    references?: { id: string; relation: string; status: string }[];
     context_status: "pending" | "ready" | "partial" | "unavailable";
+    observation?: FeishuObservation;
+    assessed_observation?: FeishuObservation | null;
+    assessed_references?:
+      { id: string; relation: string; status: string }[] | null;
     assessment: {
       headline: string;
       overview: string;
       open_questions: string[];
       evidence_ids: string[];
       disposition: "open" | "resolved" | "unclear";
+      card?: {
+        request: string;
+        current: string;
+        relationship: FeishuRelationship;
+        request_ids: string[];
+        current_ids: string[];
+        question: { text: string; basis: string } | null;
+      };
     } | null;
   };
   updated_at: number;

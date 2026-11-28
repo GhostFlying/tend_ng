@@ -317,18 +317,19 @@ impl Client {
             .map(|(id, _)| id)
     }
 
-    /// Start a new, persisted, tool-free thread in the restricted service.
+    /// Start a new, persisted analysis thread with caller-owned tools only.
     pub fn start_analysis(
         &mut self,
         cwd: &Path,
         instructions: &str,
         model: &str,
+        tools: &[Value],
     ) -> Result<(String, String)> {
         ensure!(
             self.routing_cwd.is_some(),
             "analysis requires a verified restricted App Server"
         );
-        let (id, selected) = self.start_thread_inner(cwd, instructions, &[], Some(model))?;
+        let (id, selected) = self.start_thread_inner(cwd, instructions, tools, Some(model))?;
         Ok((
             id,
             selected.context("App Server did not confirm the analysis model")?,
