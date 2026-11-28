@@ -166,10 +166,12 @@ impl Store {
         };
         let reports = reports::delivery_reports(&tx, id)?;
         let proposals = super::proposals::overview(&tx, id)?;
+        let source_chat_archived =
+            Self::chat_kind(&tx, &chat_id)? == Some(protocol::ChatKind::Archived);
         let proposal_requires_chat = proposals
             .iter()
             .any(|proposal| proposal.status.decision.is_none())
-            && super::proposals::requires_chat(&tx, id)?;
+            && super::proposals::requires_chat(&tx, id, source_chat_archived)?;
         let mut decisions: Vec<IssueDecision> = {
             let mut query = tx.prepare(&format!(
                 "{TREE}
@@ -217,6 +219,7 @@ impl Store {
             objective,
             repo_ids: card.repo_ids,
             chat_id,
+            source_chat_archived,
             source_message_id,
             children,
             pulls: card.pulls,

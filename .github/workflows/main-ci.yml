@@ -28,6 +28,12 @@ jobs:
         run: cargo build --release --locked
       - name: Check Web session and Bearer boundaries
         run: python3 -B tests/e2e/web_session.py target/release/tend-server target/release/tend target/release/tend-runner
+      - name: Check migration and read-only ordinary Chat archives
+        run: python3 -B tests/e2e/chat_archive.py target/release/tend-server target/release/tend
+      - name: Check exact approval choices in Issues with archived source Chats
+        run: |
+          python3 -B tests/e2e/proposal_approval.py target/release/tend-server target/release/tend target/release/tend-runner --archived-origin --multiple-proposals
+          python3 -B tests/e2e/proposal_approval.py target/release/tend-server target/release/tend target/release/tend-runner --multiple-proposals
       - name: Check direct Issue ownership and delivery endpoints
         run: python3 -B tests/e2e/direct_owner.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check Issue title changes and Runner replay

@@ -182,6 +182,7 @@ export type IssueOverviewData = {
   objective: string;
   repo_ids: string[];
   chat_id: string;
+  source_chat_archived?: boolean;
   source_message_id: string;
   children: IssueReference[];
   pulls: PullLink[];
@@ -263,6 +264,7 @@ export type Page = {
   short_number?: number;
   chat_id?: string;
   awaiting_start?: boolean;
+  chat_kind?: "main" | "discussion" | "archived";
 };
 
 export function chatLink(chat: string, message?: string) {
@@ -296,6 +298,15 @@ export function operationId() {
   );
 }
 
+export class ApiRequestError extends Error {
+  constructor(
+    readonly status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
 async function request(path: string, options?: RequestInit) {
   const response = await sessionFetch(path, options);
   if (!response.ok) {
@@ -303,7 +314,10 @@ async function request(path: string, options?: RequestInit) {
     if (response.status === 409 && path.startsWith("/api/v1/artifacts/")) {
       throw new Error("文件正在同步，请稍后重试");
     }
-    throw new Error(body.error ?? "Tend 无法完成请求");
+    throw new ApiRequestError(
+      response.status,
+      body.error ?? "Tend 无法完成请求",
+    );
   }
   return response;
 }

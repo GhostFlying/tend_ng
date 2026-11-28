@@ -83,6 +83,10 @@ Server 迁移 34 扩展 Issue 时间线。原 `seq`、消息 ID、引用、索�
 
 迁移 50 为普通讨论新增 `discussion_progress`。只保存已核实的自然语言进展，沿 `router_attempts` 的原身份和原生 item ID 去重，不修改 Chat 消息或输入结算。消息页在所选讨论的页范围内批量读取，不因 GET 读取原生历史或写库。 [回合进展与恢复](plans/discussion-turn-progress.md)
 
+## 普通 Chat 历史归档
+
+Server 迁移 56 用原有 `chat_messages.chat_id` 与正式 `discussions` 登记识别非默认普通 Chat，一次性以幂等插入写入 `archived_chats`，与版本号同事务提交。Issue Owner 消息另存于 `issue_messages`，Issue 的来源记录不参与类型识别。迁移不改消息、队列、附件或关联的主键和归属。后续准入与读取只按 Chat ID 查询登记，不扫历史或创建隐式 Chat。
+
 ## Issue 树 Token 用量
 
 Server 迁移 38 为已接受的原生 Run Start 初始化覆盖分母，不回填历史 Token。Runner 将原生逐请求观察和独立同步确认持久保留。Server 校验原 Runner、assignment、Task、Run 和原生回合后，以 SQLite 短事务接收原始键及冲突证据，按受影响的 Run、直属 Issue 与祖先更新持久小计。未核验归属的用量不进入小计。用户读取只访问所选 Issue 的闭包和已保存的直属/子树小计，不读原生原件或逐请求表。具体语义、性能证据及混代边界见 [Issue 树 Token 用量](plans/issue-token-usage.md)。迁移 41 加入按需回溯作业、来源冲突审计和影子投影，不遍历请求或原件；历史回传与显式重建见 [历史 Token 用量回溯与重建](plans/token-usage-backfill.md)。 迁移 49 只在升级时从已保存的请求补齐所选型号的小计，不重扫原件或改计量账本。全局与 Issue API 延用持久汇总和离线价格快照。

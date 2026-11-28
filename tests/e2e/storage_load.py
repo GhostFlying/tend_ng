@@ -15,7 +15,7 @@ import threading
 import time
 import urllib.request
 
-from chat import server, wait_for
+from chat import seed_archived_input, server, wait_for
 from issue_chat import free_port, prepare
 from issue_run import runner
 
@@ -72,7 +72,7 @@ def main():
                     send("main", "storage-issue-a", "Dispatch from Chat.")
                     [first] = wait_for(lambda: observed_issue("main"), bool)
                     wait_for(lambda: status(first["id"]), lambda view: view["status"] == "running")
-                    send("second", "storage-issue-b", "Expire this reservation.")
+                    seed_archived_input(root, "second", "Expire this reservation.")
                     [second] = wait_for(lambda: observed_issue("second"), bool)
                     issues = [status(first["id"]), wait_for(
                         lambda: status(second["id"]), lambda view: view["status"] == "running")]
@@ -114,7 +114,7 @@ def main():
             slow.putheader("Content-Type", "application/json")
             slow.endheaders(partial[:1])
             try:
-                receipt, _ = send("slow-link", "slow-link-probe", "Storage measurement during partial body.")
+                receipt, _ = send("main", "slow-link-probe", "Storage measurement during partial body.")
                 assert receipt["message_id"]
                 assert board()[0] == before
                 receipt, _ = request("/api/v1/runners/load-runner-1/sync",
@@ -131,7 +131,7 @@ def main():
                     barrier.wait(timeout=5)
                 write_times, read_times = [], []
                 for index in range(40):
-                    _, write = send("measurement", f"{label}-{index}", f"Storage measurement {label} {index}.")
+                    _, write = send("main", f"{label}-{index}", f"Storage measurement {label} {index}.")
                     page, read = board()
                     assert [entry["id"] for entry in page["issues"]] == [first["id"]]
                     write_times.append(write)
@@ -162,7 +162,8 @@ def main():
                 assert current["run"]["run_id"] == issue["run"]["run_id"]
             with sqlite3.connect(root / "server.sqlite") as db:
                 assert db.execute("SELECT COUNT(*) FROM runner_run_events").fetchone() == (4,)
-                assert db.execute("SELECT COUNT(*) FROM chat_messages WHERE chat_id = 'measurement' AND operation_id IS NOT NULL").fetchone() == (80,)
+                assert db.execute("SELECT COUNT(*) FROM chat_messages WHERE chat_id = 'main' AND "
+                                  "(operation_id GLOB 'baseline-*' OR operation_id GLOB 'replay-*')").fetchone() == (80,)
                 assert db.execute("PRAGMA journal_mode").fetchone() == ("wal",)
         print(json.dumps({"baseline": baseline, "with_runner_replay": mixed}), flush=True)
         print("PASS bounded API reads and durable receipts during concurrent incremental and full Runner replay")

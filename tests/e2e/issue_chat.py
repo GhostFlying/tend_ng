@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 from child_windows import expire_child_window
-from chat import lose_first_response, server, wait_for
+from chat import lose_first_response, seed_archived_input, server, wait_for
 
 TESTS = Path(__file__).resolve().parents[1]
 WEB = TESTS.parent / "web"
@@ -184,7 +184,7 @@ def main():
                     relay = wait_message(parent, RELAY)
                     assert relay["source_message_id"] == relayed and relay["kind"] == "relay"
                     assert relay["issue_id"] == parent and relay["short_number"] == parent_number
-                    cli("chat", "send", "other", f"Verify cross-chat Issue access #{parent_number}")
+                    seed_archived_input(root, "other", f"Verify cross-chat Issue access #{parent_number}")
                     wait_for(lambda: cli("chat", "read", "other")["messages"],
                              lambda rows: rows[-1]["text"] == "The Issue is outside this Chat.")
                     forwarded = wait_message(child, RELAY)

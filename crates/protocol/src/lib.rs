@@ -103,6 +103,17 @@ pub struct DiscussionProgress {
 pub struct MessagePage {
     pub messages: Vec<Message>,
     pub next_before: Option<i64>,
+    // Older Servers don't report the conversation type.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chat_kind: Option<ChatKind>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatKind {
+    Main,
+    Discussion,
+    Archived,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -182,6 +193,8 @@ impl IssueDetail {
 fn open_issue() -> String {
     "open".to_owned()
 }
+
+pub const ARCHIVED_CHATS_PATH: &str = "/api/v1/chats/archived";
 
 pub fn messages_path(chat_id: &str) -> String {
     format!("/api/v1/chats/{chat_id}/messages")

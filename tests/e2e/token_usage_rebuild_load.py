@@ -80,7 +80,7 @@ def run(args, directory):
     sync_path = "/api/v1/runners/runner/sync"
 
     def chat(n):
-        receipt = call("/api/v1/chats/load-fixture/messages", {
+        receipt = call("/api/v1/chats/main/messages", {
             "operation_id": f"load-chat-{n}", "text": "Is UnregisteredRepo in the list?",
         })
         assert receipt["message_id"]

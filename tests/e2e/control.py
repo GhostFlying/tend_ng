@@ -9,7 +9,7 @@ import subprocess
 import sys
 import tempfile
 
-from chat import server, wait_for
+from chat import seed_archived_input, server, wait_for
 from issue_chat import TESTS, free_port, prepare
 
 
@@ -71,7 +71,7 @@ def main():
                     cli("pr", "link", issue, pr, "link-before-backlog")
                     runner.send_signal(signal.SIGSTOP)
                     try:
-                        cli("chat", "send", "other", f"Reject parking foreign fixture Issue #{number}")
+                        seed_archived_input(root, "other", f"Reject parking foreign fixture Issue #{number}")
                         wait_for(lambda: cli("chat", "read", "other")["messages"],
                                  lambda messages: messages[-1]["text"] == "Cannot park a different Chat's Issue.")
                         cli("chat", "send", "main", f"Park fixture Issue #{number}")

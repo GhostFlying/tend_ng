@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "chat_app_server.py"
 
@@ -139,6 +140,17 @@ def wait_for(read, predicate, *, timeout=12):
     raise AssertionError(f"expected messages did not arrive: {result}")
 
 
+def seed_archived_input(root, chat, text):
+    """Fixture only: emulate a previously accepted ordinary input on its original Chat."""
+    message = uuid.uuid4().hex
+    with sqlite3.connect(root / "server.sqlite") as db:
+        db.execute("INSERT OR IGNORE INTO archived_chats (chat_id) VALUES (?)", (chat,))
+        seq = db.execute("INSERT INTO chat_messages (id, chat_id, text, operation_id) VALUES (?, ?, ?, ?)",
+                         (message, chat, text, uuid.uuid4().hex)).lastrowid
+        db.execute("INSERT INTO router_inputs (chat_id, message_seq) VALUES (?, ?)", (chat, seq))
+    return {"message_id": message}
+
+
 def check_answer(messages, receipt, user_text, answer):
     assert len(messages) == 2, messages
     user, router = messages
@@ -184,7 +196,7 @@ def main():
             check_answer(first, receipt, "Hello, Tend.", "Hello from the Router.")
             error = cli(address, "send", "main", "Different text", operation, accepts=False)
             assert "HTTP 409" in error and operation in error
-            recovered_receipt = cli(address, "send", "recover", "Recover this reply.")
+            recovered_receipt = seed_archived_input(root, "recover", "Recover this reply.")
             recovered = wait_for(
                 lambda: messages(address, "recover"), lambda rows: len(rows) == 2
             )
@@ -202,7 +214,7 @@ def main():
                 lambda rows: rows[-1]["router_state"] == "awaiting_turn",
             )
             following = cli(address, "send", "main", "Next input.")
-            elsewhere = cli(address, "send", "elsewhere", "Another chat.")
+            elsewhere = seed_archived_input(root, "elsewhere", "Another chat.")
             parallel = wait_for(
                 lambda: messages(address, "elsewhere"), lambda rows: len(rows) == 2
             )
@@ -268,7 +280,7 @@ def main():
             )
 
             for text in ("Dispatch from Chat.", "Recover dispatched work."):
-                receipt = cli(address, "send", "dispatch", text)
+                receipt = seed_archived_input(root, "dispatch", text)
                 dispatched = wait_for(
                     lambda: messages(address, "dispatch"),
                     lambda rows: rows[-1]["reply_to"] == receipt["message_id"],

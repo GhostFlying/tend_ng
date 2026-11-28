@@ -90,6 +90,8 @@ target/release/tend chat read main
 target/release/tend --help
 ```
 
+Send new ordinary messages to `main`. Use `tend chat list --archived` to find historical ordinary Chats and `tend chat read <id>` to read them in place. Archived Chats are read-only. Registered Discussions and Issue Owner conversations keep their own send commands and behavior. [Chat routing and archive API](docs/chat-routing.md#默认主-chat-与历史归档)
+
 Register `inspect.listen` and `inspect.url` on a Runner to open its native Run history from the Server. `inspect.url` is the HTTP base address that the Server can reach.
 
 ## Runner 常规升级（默认同机新旧代交接）

@@ -10,7 +10,7 @@ import subprocess
 import tempfile
 from urllib.request import Request, urlopen
 
-from chat import server, wait_for
+from chat import seed_archived_input, server, wait_for
 
 TESTS = Path(__file__).resolve().parents[1]
 WEB = TESTS.parent / "web"
@@ -152,7 +152,7 @@ def exercise(args, root):
             assert sql("SELECT count(*) FROM tasks") == [(1,)]
             ordinary = send("你好")
             assert [row["text"] for row in settled(ordinary)] == ["你好。"]
-            elsewhere = send("其他 Chat 的请求", chat="other")
+            elsewhere = seed_archived_input(root, "other", "其他 Chat 的请求")["message_id"]
             assert [row["text"] for row in settled(elsewhere, "other")] == ["这里不发布主 Chat 进展。"]
             assert sql("SELECT count(*) FROM router_chat_feedback") == [(3,)]
 

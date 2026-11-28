@@ -150,6 +150,9 @@ if scenario == "external-wait":
         role = "child"
 thread_id = f"fixture-{role}-thread"
 turn_id = f"fixture-{role}-turn"
+if role == "proposal-continue" and (root / "both-decisions.jsonl").exists():
+    thread_id += "-next"
+    turn_id += "-next"
 assert Path(start["params"]["cwd"]) == Path.cwd()
 tools = {spec["name"] for spec in start["params"]["dynamicTools"]}
 instructions = start["params"]["developerInstructions"]
@@ -423,7 +426,28 @@ elif role == "stage-decision":
     tool("tend_close_issue", {"summary": "用户已审阅使用说明并确认结案。"}, "close-parent", "parent-close")
 elif scenario == "proposal":
     inputs = json.loads(items[0]["text"].split("\n", 1)[1])["child_inputs"]
-    if role == "proposal-continue":
+    if role == "proposal-continue" and (root / "second-proposal.json").exists():
+        original = json.loads((root / "proposal-v1.json").read_text())
+        revision = json.loads((root / "proposal-v2.json").read_text())
+        second = json.loads((root / "second-proposal.json").read_text())
+        expected = {original["id"]: (2, revision["report_id"]), second["id"]: (1, second["report_id"])}
+        assert assignment["task_id"] == original["task_id"]
+        ledger = root / "both-decisions.jsonl"
+        seen = {json.loads(line)["attention_id"] for line in ledger.read_text().splitlines()} if ledger.exists() else set()
+        assert inputs, inputs
+        for decision in inputs:
+            assert decision["attention_id"] not in seen, (decision, seen)
+            seen.add(decision["attention_id"])
+            version, report_id = expected[decision["attention_id"]]
+            assert decision["kind"] == "attention_answered"
+            assert "user_message_id" not in decision and "user_text" not in decision
+            assert f"v{version}" in decision["answer"] and report_id in decision["answer"]
+        with ledger.open("a") as records:
+            for decision in inputs:
+                records.write(json.dumps(decision) + "\n")
+        if seen == set(expected):
+            tool("tend_close_issue", {"summary": "已处理两个独立方案。"}, "close-parent", "parent-close")
+    elif role == "proposal-continue":
         [decision] = inputs
         original = json.loads((root / "proposal-v1.json").read_text())
         current = json.loads((root / "proposal-v2.json").read_text())
@@ -440,8 +464,13 @@ elif scenario == "proposal":
         if version == 1:
             assert sorted(fact["kind"] for fact in inputs) == ["artifact_available"] * 3 + ["issue_closed"]
             files = {fact["artifact"]["name"]: fact["artifact"]["id"] for fact in inputs if fact["kind"] == "artifact_available"}
-            tool("tend_report_result", {"summary": "独立文案记录，不属于审批版本。", "artifact_ids": [files["wording-notes.md"]]},
-                 "independent", "independent")
+            independent = tool(
+                "tend_report_result",
+                {"summary": "独立文案记录，不属于审批版本。", "artifact_ids": [files["wording-notes.md"]]},
+                "independent", "independent",
+            )
+            if (root / "two-proposals").exists():
+                (root / "independent-report").write_text(independent["operation_id"])
         else:
             [revision] = inputs
             assert revision["message"]["text"] == "请把空结果行为补进同一方案。"
@@ -467,6 +496,20 @@ elif scenario == "proposal":
         if version == 2 and (root / "independent-decision").exists():
             tool("tend_request_attention", {"question": "示例发布说明要使用简体中文还是英文？",
                                            "options": ["简体中文", "英文"]}, "legacy", "legacy")
+        if version == 2 and (root / "two-proposals").exists():
+            separate_report = (root / "independent-report").read_text()
+            independent = tool("tend_propose_approval", {
+                "question": "是否批准独立文案方案？",
+                "version": 1,
+                "report_id": separate_report,
+                "artifact_id": files["wording-notes.md"],
+                "title": "独立文案方案",
+                "highlights": ["只处理示例文案。"],
+                "action": "批准独立文案 v1",
+            }, "second-proposal", "second-proposal")
+            (root / "second-proposal.json").write_text(json.dumps({
+                "id": independent["operation_id"], "report_id": separate_report,
+            }))
         (root / f"proposal-v{version}.json").write_text(json.dumps({
             "id": op["operation_id"], "task_id": assignment["task_id"], "files": files,
             "report_id": report["operation_id"], "run_id": turn["params"]["clientUserMessageId"],

@@ -228,6 +228,7 @@ pub enum Approval {
     Recorded(ApprovalDecision),
     NotFound,
     Conflict,
+    ArchivedChat,
 }
 
 impl Store {
@@ -251,7 +252,13 @@ impl Store {
         if let Some(decision) = status.decision {
             return Ok(Approval::Recorded(decision));
         }
-        if !status.can_approve || request.from_issue && requires_chat(&tx, &attention.issue_id)? {
+        let source_archived = Self::chat_kind(&tx, chat)? == Some(protocol::ChatKind::Archived);
+        if !request.from_issue && source_archived {
+            return Ok(Approval::ArchivedChat);
+        }
+        if !status.can_approve
+            || request.from_issue && requires_chat(&tx, &attention.issue_id, source_archived)?
+        {
             return Ok(Approval::Conflict);
         }
         let input = protocol::new_id();
@@ -293,7 +300,12 @@ fn status_decision(db: &Connection, id: &str) -> Result<ApprovalDecision> {
         .ok_or_else(|| anyhow::anyhow!("missing saved proposal decision"))
 }
 
-pub(super) fn requires_chat(db: &Connection, issue: &str) -> Result<bool> {
+pub(super) fn requires_chat(db: &Connection, issue: &str, source_archived: bool) -> Result<bool> {
+    // Only a writable original Chat can serve as the multi-decision chooser.
+    // With an archived source, the Issue offers each exact proposal instead.
+    if source_archived {
+        return Ok(false);
+    }
     Ok(db.query_row(
         "WITH RECURSIVE tree(id) AS (
              SELECT id FROM issues WHERE id = ?1

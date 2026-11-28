@@ -15,7 +15,7 @@ from urllib.error import HTTPError
 from urllib.request import Request, urlopen
 from uuid import uuid4
 
-from chat import lose_first_response, server, wait_for
+from chat import lose_first_response, seed_archived_input, server, wait_for
 from issue_chat import TESTS, WEB, free_port, prepare
 
 DRAFT_TEXT = "讨论转交 · 上下文摘要。"
@@ -232,7 +232,9 @@ def main():
 
         def say(chat, text, response=None, operation=None, error=None):
             words = ("chat", "send", chat, text, operation) if operation else ("chat", "send", chat, text)
-            message_id = cli(*words)["message_id"]
+            return settled(chat, cli(*words)["message_id"], response, error)
+
+        def settled(chat, message_id, response=None, error=None):
             rows = wait_for(lambda: messages(chat), lambda rows: any(
                 row["id"] == message_id and row["router_state"] in ("completed", "failed") for row in rows))
             user = next(row for row in rows if row["id"] == message_id)
@@ -384,7 +386,7 @@ def main():
             child = wait_for(lambda: cli("issue", "messages", parent_id)["messages"],
                              lambda rows: any(row["text"]=="初稿已整理，接下来核对首次运行步骤。" for row in rows))
             child_id = next(row["issue_id"] for row in child if row["text"].startswith("初稿已整理"))
-            linked = say("other", "Dispatch from Chat.")
+            linked = settled("other", seed_archived_input(root, "other", "Dispatch from Chat.")["message_id"])
             linked_id, = linked["issue_ids"]
             linked_number, = linked["issue_numbers"]
             for issue, name in ((linked_id,"readable-delivery"),(parent_id,"unattached-delivery")):

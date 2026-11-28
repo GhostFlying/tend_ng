@@ -19,12 +19,14 @@ export function ProposalApproval({
   attention,
   status,
   inIssue,
+  readOnly,
   onRefresh,
 }: {
   chat: string;
   attention: string;
   status: ProposalStatus;
   inIssue?: boolean;
+  readOnly?: boolean;
   onRefresh: () => void;
 }) {
   const inFlight = useRef(false);
@@ -68,14 +70,14 @@ export function ProposalApproval({
             </span>
           ) : (
             <>
-              <strong>待你决定</strong>
+              <strong>{readOnly ? "未记录决定" : "待你决定"}</strong>
               <span>{status.question}</span>
             </>
           )}
         </div>
         {decision ? (
           <a href={record}>查看批准记录</a>
-        ) : status.can_approve ? (
+        ) : status.can_approve && !readOnly ? (
           <button
             type="button"
             className="proposal-button"
@@ -116,12 +118,14 @@ export function ChatProposal({
   attention,
   initial,
   historical,
+  readOnly,
   onRefresh,
 }: {
   chat: string;
   attention: string;
   initial: ProposalStatus;
   historical: boolean;
+  readOnly?: boolean;
   onRefresh: () => void;
 }) {
   const [fresh, setFresh] = useState<ProposalStatus>();
@@ -153,6 +157,7 @@ export function ChatProposal({
       chat={chat}
       attention={attention}
       status={status}
+      readOnly={readOnly}
       onRefresh={() => {
         if (historical) setRefresh((value) => value + 1);
         onRefresh();

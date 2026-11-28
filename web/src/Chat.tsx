@@ -8,6 +8,7 @@ import {
 } from "react";
 import type { FormEvent, ReactNode, RefObject } from "react";
 import {
+  ApiRequestError,
   chatLink,
   download,
   issueLink,
@@ -19,7 +20,13 @@ import {
   readRollout,
   sendMessage,
 } from "./api";
-import type { Artifact, AttentionStatus, Message, PendingMessage } from "./api";
+import type {
+  Artifact,
+  AttentionStatus,
+  Message,
+  Page,
+  PendingMessage,
+} from "./api";
 import { ChatProposal, DecisionTime } from "./ProposalApproval";
 import { discussionLink } from "./discussionApi";
 import { DiscussionProgress } from "./DiscussionProgress";
@@ -35,7 +42,7 @@ function OrdinaryChatAttention({
   chat: string;
   initial: AttentionStatus;
   historical: boolean;
-  onReply: () => void;
+  onReply?: () => void;
 }) {
   const [fresh, setFresh] = useState<AttentionStatus>();
   const [visible, setVisible] = useState(false);
@@ -86,9 +93,11 @@ function OrdinaryChatAttention({
               ? issueReply === undefined
                 ? "决定已转交"
                 : "答复已记录"
-              : "待你决定"}
+              : onReply
+                ? "待你决定"
+                : "未记录答复"}
         </span>
-        {state === "awaiting_user" && (
+        {state === "awaiting_user" && onReply && (
           <button className="text-button" type="button" onClick={onReply}>
             回复
           </button>
@@ -272,7 +281,7 @@ function MessageRow({
   showReference: boolean;
   sourceChat: string;
   descendant: boolean;
-  onReply: (message: Message) => void;
+  onReply?: (message: Message) => void;
   onRefresh: () => void;
   historical: boolean;
   discussion: boolean;
@@ -380,7 +389,8 @@ function MessageRow({
           原对话
         </a>
       )}
-      {!message.attention &&
+      {onReply &&
+      !message.attention &&
       (detail ||
         message.author === "maintenance" ||
         message.issue_ids?.length ||
@@ -399,6 +409,7 @@ function MessageRow({
           chat={sourceChat}
           attention={message.attention.id}
           initial={message.attention.proposal}
+          readOnly={!onReply}
           onRefresh={onRefresh}
         />
       ) : (
@@ -407,7 +418,7 @@ function MessageRow({
             historical={historical}
             chat={sourceChat}
             initial={message.attention}
-            onReply={() => onReply(message)}
+            onReply={onReply && (() => onReply(message))}
           />
         )
       )}
@@ -652,6 +663,9 @@ export function Chat({
   const [messages, setMessages] = useState<Message[]>([]);
   const [latestIds, setLatestIds] = useState(() => new Set<string>());
   const [sourceChat, setSourceChat] = useState(chatId);
+  const [chatKind, setChatKind] = useState<Page["chat_kind"] | "missing">();
+  const ordinaryLink = !issue && !standalone && chatId !== "main";
+  const canCompose = !ordinaryLink || chatKind === "discussion";
   const [canonicalIssue, setCanonicalIssue] = useState<string>();
   const issueLoaded = useRef(false);
   const numericRoute = issue !== undefined && /^#?[1-9][0-9]*$/.test(issue);
@@ -724,12 +738,24 @@ export function Chat({
           }
         }
         setSourceChat(page.chat_id || chatId);
+        setChatKind(page.chat_kind);
         setAwaitingStart(page.awaiting_start === true);
         onReachable(true);
       } catch (error) {
         if (!signal.aborted) {
-          setError(errorText(error));
-          onReachable(false);
+          if (
+            ordinaryLink &&
+            error instanceof ApiRequestError &&
+            error.status === 404
+          ) {
+            setChatKind("missing");
+            setError("");
+            onReachable(true);
+            return;
+          } else {
+            setError(errorText(error));
+            onReachable(false);
+          }
         }
       }
       if (!signal.aborted) timer = window.setTimeout(() => void update(), 1500);
@@ -739,7 +765,7 @@ export function Chat({
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [issue, chatId, refresh, detailRefresh, onReachable]);
+  }, [issue, chatId, ordinaryLink, refresh, detailRefresh, onReachable]);
 
   useLayoutEffect(() => {
     const element = timeline.current;
@@ -929,10 +955,14 @@ export function Chat({
         onRefresh={() => setRefresh((value) => value + 1)}
         historical={!latestIds.has(message.id)}
         discussion={!!standalone && !issue}
-        onReply={(question) => {
-          setReplyId(question.id);
-          textarea.current?.focus({ preventScroll: true });
-        }}
+        onReply={
+          canCompose
+            ? (question) => {
+                setReplyId(question.id);
+                textarea.current?.focus({ preventScroll: true });
+              }
+            : undefined
+        }
       />
     );
   });
@@ -981,6 +1011,27 @@ export function Chat({
     </>
   );
 
+  const archived = chatKind === "archived";
+  const accessNotice = (
+    <div className="chat-access" role="status">
+      <div>
+        <strong>
+          {archived
+            ? "此对话已归档"
+            : chatKind === "missing"
+              ? "找不到此对话"
+              : "此链接不能发起新的普通对话"}
+        </strong>
+        <p>
+          {archived
+            ? "此处仅供查看历史。原有回报仍会送达这里。"
+            : "新的普通消息请在默认主对话发送。"}
+        </p>
+      </div>
+      <a href={chatLink("main")}>返回默认主对话</a>
+    </div>
+  );
+
   return (
     <>
       <main
@@ -1012,10 +1063,19 @@ export function Chat({
             )}
           </div>
         ) : (
-          <div className="lane chat">{discussion}</div>
+          <div className="lane chat">
+            {!canCompose && !archived && accessNotice}
+            {discussion}
+          </div>
         )}
       </main>
-      {awaitingStart ? (
+      {!canCompose ? (
+        archived && (
+          <footer className="dock">
+            <div className="lane">{accessNotice}</div>
+          </footer>
+        )
+      ) : awaitingStart ? (
         <footer className="dock">
           <p className="lane board-empty">
             暂无 Issue Owner。可在<a href={chatLink(sourceChat)}>原对话</a>

@@ -10,7 +10,7 @@ import sqlite3
 import subprocess
 import tempfile
 
-from chat import check_answer, server, wait_for
+from chat import check_answer, seed_archived_input, server, wait_for
 
 
 REVIEW = "review Lynx MR !75573"
@@ -50,7 +50,8 @@ def exercise(args, root, env):
             assert response.status == 200, (response.status, body)
 
     def exchange(address, chat, text, answer, *options):
-        receipt = cli(address, "chat", "send", chat, text, *options)
+        receipt = (cli(address, "chat", "send", chat, text, *options) if chat == "main"
+                   else seed_archived_input(root, chat, text))
         rows = wait_for(
             lambda: cli(address, "chat", "read", chat)["messages"],
             lambda messages: messages and messages[-1]["text"] == answer,

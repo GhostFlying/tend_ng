@@ -930,6 +930,7 @@ fn handle(
         return Ok(match store.approve_proposal(&chat, &attention, &input)? {
             Approval::Recorded(decision) => (200, serde_json::to_value(decision)?),
             Approval::NotFound => api_error(404, "structured proposal not found in this Chat"),
+            Approval::ArchivedChat => archived_chat_error(),
             Approval::Conflict => api_error(
                 409,
                 "proposal changed or is not available for approval; reload it before deciding",
@@ -978,6 +979,12 @@ fn handle(
             serde_json::to_value(store.notifications(chat_id, before)?)?,
         ));
     }
+    if path == protocol::ARCHIVED_CHATS_PATH {
+        if request.method() != &Method::Get {
+            return Ok(api_error(405, "method not allowed"));
+        }
+        return Ok((200, json!({"chat_ids": store.archived_chats()?})));
+    }
     let target = path
         .strip_suffix("/messages")
         .and_then(|path| {
@@ -1001,7 +1008,10 @@ fn handle(
                     None => api_error(404, "Issue not found"),
                 });
             }
-            Ok((200, serde_json::to_value(store.messages(id, before)?)?))
+            Ok(match store.messages(id, before)? {
+                Some(page) => (200, serde_json::to_value(page)?),
+                None => unknown_chat_error(),
+            })
         }
         Method::Post => {
             let id = id.to_owned();
@@ -1042,10 +1052,23 @@ fn handle(
                     404,
                     "Quoted message not found in this conversation",
                 )),
+                Accepted::UnknownChat => Ok(unknown_chat_error()),
+                Accepted::ArchivedChat => Ok(archived_chat_error()),
             }
         }
         _ => Ok(api_error(405, "method not allowed")),
     }
+}
+
+fn unknown_chat_error() -> (u16, Value) {
+    api_error(404, "Chat not found; use main for new ordinary messages")
+}
+
+fn archived_chat_error() -> (u16, Value) {
+    api_error(
+        403,
+        "Chat is archived and read-only; use main for new ordinary messages",
+    )
 }
 
 fn request_control(

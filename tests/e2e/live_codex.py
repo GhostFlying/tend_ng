@@ -118,7 +118,7 @@ def main():
                         "请让 Work Agent 在开始选择写法前用 Tend 的 Attention 工具询问我要简版还是详版，需把问题沿原 Issue 送回我。"
                         "收到实际答复后使用所选写法生成一句结论，Issue Agent 把结果汇报到本对话。不需要改仓库和访问外部服务。")
             if args.image:
-                graphic = cli("chat", "send", "image-smoke",
+                graphic = cli("chat", "send", "main",
                               "请新建一次只在本机隔离仓库 example 执行的 Issue，并要求 image_gen capability。"
                               "请委派给具备 image_gen 的 implementation Work Agent，由它调用 Codex 原生 image_gen 一次，"
                               "生成只有两片简单绿色叶子的方形图标。保存为 sample.png，调用原文件交付工具，"
@@ -147,7 +147,7 @@ def main():
                 raise AssertionError("original chat report misses quickstart.txt")
             print("PASS actual Codex artifact returned and downloaded in the original Chat", flush=True)
             if graphic is not None:
-                rows = wait(lambda: cli("chat", "read", "image-smoke")["messages"],
+                rows = wait(lambda: cli("chat", "read", "main")["messages"],
                             lambda messages: any(x.get("artifacts") and x.get("reply_to") == graphic["message_id"]
                                                  for x in messages), 200)
                 png_ids = [item["id"] for row in rows if row.get("reply_to") == graphic["message_id"]

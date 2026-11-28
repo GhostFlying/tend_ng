@@ -226,11 +226,13 @@ function ProposalReport({
   proposal,
   chat,
   selected,
+  inlineApproval,
   onRefresh,
 }: {
   proposal: IssueProposal;
   chat: string;
   selected: boolean;
+  inlineApproval: boolean;
   onRefresh: () => void;
 }) {
   const [current, ...history] = proposal.versions;
@@ -244,8 +246,9 @@ function ProposalReport({
         </span>
       </div>
       <CandidateReport key={current.version} candidate={current} chat={chat} />
-      {!selected && proposal.status.decision && (
+      {(inlineApproval || (!selected && proposal.status.decision)) && (
         <ProposalApproval
+          key={current.version}
           chat={chat}
           attention={proposal.attention_id}
           status={proposal.status}
@@ -404,6 +407,7 @@ function IssueSummary({
           </ul>
         </div>
       ) : (
+        !data.source_chat_archived &&
         current && (
           <ProposalApproval
             key={`${current.attention_id}-${current.status.version}`}
@@ -421,6 +425,7 @@ function IssueSummary({
           proposal={proposal}
           chat={data.chat_id}
           selected={proposal === current}
+          inlineApproval={data.source_chat_archived === true}
           onRefresh={onRefresh}
         />
       ))}

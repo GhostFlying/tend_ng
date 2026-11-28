@@ -6,6 +6,18 @@ Router 的个人助理职责、主 Chat 与 Issue Chat 的对话边界、Attenti
 
 **已确认。** 用户在主 Chat 始终与同一个助手对话。Router Agent 接收全部用户消息、追问和 Attention 答复，并以同一助手身份在原话题送回答复、交付和需要用户处理的问题。用户可以留在原对话继续交流，需要时按引用查看工作详情。主动在 Issue Chat 发言时，可以直接和对应 Owner 对话。Web 和 CLI 使用同一套对话规则，消息与工作的关联可跨 session 恢复。
 
+### 默认主 Chat 与历史归档
+
+普通 Chat 只有默认 `main` 接受新用户消息。其他普通 ID 不能通过读取或第一次发信建立会话，Server 不会改投 `main`。升级时已有非默认普通 Chat 归档，仅供读取，不提供恢复为可发信普通 Chat 的入口。原 URL、消息锚点、引用、附件和 Issue 来源保持可读。原有队列、报告和回执沿原 Chat 收尾，完全匹配的历史收件操作可只读重放原回执，不再写入或入队。需要发新的普通消息时，从旧页显式返回默认主 Chat。
+
+- `GET /api/v1/chats/<id>/messages`（`tend chat read <id> [before]`）返回历史及 `chat_kind`，其值为 `main`、`discussion` 或 `archived`。未知 Chat 返回 404，不创建记录。
+- `GET /api/v1/chats/archived`（`tend chat list --archived`）返回 `{"chat_ids":[…]}`，仅列普通 Chat 历史归档，不包含独立归档的 Discussion。
+- `POST /api/v1/chats/<id>/messages`（`tend chat send <id> ...`）新发到未知 Chat 返回 404，新发或引用回复到历史归档返回 403。旧归档不接受从原 Chat 新提交的结构化批准。
+
+正式 Discussion 仍按显式登记身份收件和转交，独立归档只影响列表。Issue Owner 消息仍通过 Issue 入口收件，不取决于来源 Chat 是否归档。 [实施及验收计划](plans/default-chat-and-legacy-archive.md)
+
+### 收件与回复
+
 发送消息后，Server 持久收件，Chat 显示已收到。Router 在 Server 本地提交派发并取得操作 ID。主 Chat 在同一事务中保存一条回复原输入的受理消息，并附目标 Issue 链接。新派发和向已有 Issue 入队补充都不等 Router 的最终回复或 Runner 领取。仅保存待办、读取回执或派发失败不会生成受理消息。缺少合格 Runner 时，原派发记录显示待分配原因。Owner 开工、处理完成和结果送回 Chat 分别有实际证据。 [Agent 工具与本地受理](agent-tools.md)
 
 需要读仓库或多步核验的项目调查优先派给 `investigation` Agent，已有匹配 Issue 则复用。Router 自行承担耗时工作时，在开始多步工具作业前用 `tend_publish_progress` 给原输入发布一句具体进展。进展和派发回执是完整消息，由正常轮询在当前回合读到。普通直接回答不发进展，原生 commentary 不投递到 Chat。 [验证计划](plans/main-chat-router-feedback.md)
@@ -126,7 +138,7 @@ Issue 详情也可逐项回答已在原 Chat 发布、仍待用户回答且原 T
 
 ## 结构化方案批准
 
-正式上报的报告可以由原 Issue Owner 显式登记为版本化方案。原 Chat 发布对应 Attention，Issue 和原 Chat 共用一个按精确版本提交的批准入口。多个独立待决事项并存时，结构化方案在原 Chat 逐项批准，不在 Issue 流里默选。自由文本不会批准任何结构化方案。结构化批准由 Server 持久记录并直接交给原 Task，不写用户留言或触发 Router。 [实现计划](plans/inline-proposal-approval.md)
+正式上报的报告可以由原 Issue Owner 显式登记为版本化方案。原 Chat 发布对应 Attention，Issue 和原 Chat 共用一个按精确版本提交的批准入口。多个独立待决事项并存时，在可写的原 Chat 逐项批准，不在 Issue 流里默选。若原 Chat 已归档，批准入口随各份方案报告显示在原 Issue，仍必须指定对应的 Attention 和精确版本。CLI 可用 `tend attention approve <chat-id> <attention-id> <version> --from-issue`，API 使用原批准接口的 `from_issue: true`。自由文本不会批准任何结构化方案。结构化批准由 Server 持久记录并直接交给原 Task，不写用户留言或触发 Router。 [实现计划](plans/inline-proposal-approval.md)
 
 ## 只读通知
 
@@ -138,7 +150,7 @@ Issue 详情也可逐项回答已在原 Chat 发布、仍待用户回答且原 T
 
 ## 独立讨论与显式转交
 
-Web 的「讨论」入口打开 `/discussions`，单个讨论使用 `/discussions?chat=<id>`。普通站内导航留在同一文档，保留 URL、浏览器后退和前进、消息深链及新标签打开。切换页面不会重新提交还在等待回执的消息。Web 从讨论导航或目录创建空白讨论，主 Chat 消息和 Issue 详情标题区不提供快捷创建。需要背景时可在讨论页主动搜索和附加资料，例如 Issue 引用。已有讨论的来源回链及 CLI/API 的来源创建能力保留。标题及来源属于讨论，历史、原生 thread 和输入回执独立绑定该 Chat ID。现有普通 Chat 和 Issue Chat 的历史、收件及派发范围不变。
+Web 的「讨论」入口打开 `/discussions`，单个讨论使用 `/discussions?chat=<id>`。普通站内导航留在同一文档，保留 URL、浏览器后退和前进、消息深链及新标签打开。切换页面不会重新提交还在等待回执的消息。Web 从讨论导航或目录创建空白讨论，主 Chat 消息和 Issue 详情标题区不提供快捷创建。需要背景时可在讨论页主动搜索和附加资料，例如 Issue 引用。已有讨论的来源回链及 CLI/API 的来源创建能力保留。标题及来源属于讨论，历史、原生 thread 和输入回执独立绑定该 Chat ID。Discussion 的归档与普通 Chat 的只读历史归档是不同契约。
 
 完整桌面侧栏在「讨论」导航右侧提供独立的「新建讨论」加号。窄窗和移动端从讨论首页新建。仅当前未归档会话在侧栏最近讨论中标记选中。讨论首页可切换到「已归档」列表（`/discussions?archived=true`）。未指定标题时显示「未命名讨论」。首条成功接受的普通用户输入在同一事务内设置自动标题，首尾空白去除、连续 Unicode 空白折叠为一个空格，完整值保留在 SQLite，页面和列表仅在渲染时截断并保留完整文本。引用、来源、原生答复、内部草稿和转交回执不能生成标题。显式创建标题或改名始终按手动标题保存，包括手动改为「未命名讨论」。
 

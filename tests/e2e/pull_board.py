@@ -10,7 +10,7 @@ import sys
 import tempfile
 
 from child_windows import expire_child_window
-from chat import server, wait_for
+from chat import seed_archived_input, server, wait_for
 from issue_chat import free_port, prepare, REQUEST, TESTS, WEB
 
 PULL = "https://github.com/example/guide/pull/73"
@@ -106,7 +106,7 @@ def main():
                 assert observed["observed_at"] == latest["observed_at"]
                 assert links(parent)[PULL] == observed
                 assert calls().count("73") == 2
-                cli("chat", "send", "another-chat", "顺带准备另一个仓库的发布记录。")
+                seed_archived_input(root, "another-chat", "顺带准备另一个仓库的发布记录。")
                 [other] = wait_for(lambda: cli("issue", "list", "another-chat")["issues"], bool)
                 assert other["title"] == "整理发布记录"
                 assert other["task_state"] == "awaiting_assignment"
@@ -115,7 +115,7 @@ def main():
                 assert all_issues["next_before"] is None
                 assert {item["id"] for item in cli("issue", "list", "main")["issues"]} == {parent, child}
                 assert cli("issue", "list", "--all")["issues"] == []
-                cli("chat", "send", "record-chat", "先记下稍后整理发布说明。")
+                seed_archived_input(root, "record-chat", "先记下稍后整理发布说明。")
                 [record] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"], bool)
                 assert record["stage"] == "backlog"
                 recorded = cli("issue", "read", f"#{record['short_number']}")
@@ -146,7 +146,7 @@ def main():
                                    "TEND_BOARD_CHILD_NUMBER": str(next(card["short_number"] for card in cards
                                                                        if card["id"] == child))}
                     subprocess.run(["node", WEB / "tests/pull-board.mjs"], check=True, timeout=45, env=browser_env)
-                cli("chat", "send", "record-chat", "开始刚才记下的发布说明。")
+                seed_archived_input(root, "record-chat", "开始刚才记下的发布说明。")
                 [started] = wait_for(lambda: cli("issue", "list", "record-chat")["issues"],
                                      lambda rows: len(rows) == 1 and rows[0]["stage"] == "todo")
                 assert started["id"] == record["id"]

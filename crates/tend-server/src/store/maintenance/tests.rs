@@ -341,8 +341,8 @@ fn task_recovery_is_run_proof_not_status_edit_and_material_replays_are_stable() 
     let count: i64 =
         s.db.query_row("SELECT COUNT(*) FROM router_inputs", [], |r| r.get(0))?;
     assert_eq!(count, 0);
-    assert_eq!(s.messages("main", i64::MAX)?.messages.len(), 2);
-    assert_eq!(s.messages(new_id, i64::MAX)?.messages.len(), 1);
+    assert_eq!(s.messages("main", i64::MAX)?.unwrap().messages.len(), 2);
+    assert_eq!(s.messages(new_id, i64::MAX)?.unwrap().messages.len(), 1);
 
     s.db.execute("UPDATE issues SET state='closed' WHERE id='issue'", [])?;
     s.maintenance_probe_tasks(&mut cursors, NOW + 1)?;
@@ -381,6 +381,6 @@ fn task_recovery_is_run_proof_not_status_edit_and_material_replays_are_stable() 
             .known
             .contains("后续 Run recovered")
     );
-    assert_eq!(s.messages("main", i64::MAX)?.messages.len(), 2);
+    assert_eq!(s.messages("main", i64::MAX)?.unwrap().messages.len(), 2);
     Ok(())
 }

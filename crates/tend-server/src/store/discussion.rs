@@ -1115,7 +1115,9 @@ mod tests {
         })?;
         assert_eq!(received[0], received[2]);
         assert_ne!(received[0], received[1]);
-        let page = store.messages(&chat, i64::MAX)?;
+        let page = store
+            .messages(&chat, i64::MAX)?
+            .expect("registered discussion");
         assert_eq!(page.messages.len(), 2);
         assert_eq!(title(&store, &chat)?, page.messages[0].text);
         Ok(())

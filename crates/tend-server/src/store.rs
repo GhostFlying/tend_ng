@@ -88,14 +88,15 @@ pub(crate) fn remove_token_usage_schema(db: &Connection) -> Result<()> {
 
 use anyhow::{Context, Result, ensure};
 use codex_app::{Answer, ProcessIdentity};
-use protocol::{Author, Message, MessagePage, Receipt, RouterState, SendMessage};
+use protocol::{Author, ChatKind, Message, MessagePage, Receipt, RouterState, SendMessage};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
 const REQUEST_PRICING_COVERAGE_SCHEMA: i64 = 54;
-pub(crate) const SCHEMA_VERSION: i64 = 55;
+const ARCHIVED_CHATS_SCHEMA: i64 = 56;
+pub(crate) const SCHEMA_VERSION: i64 = ARCHIVED_CHATS_SCHEMA;
 
 pub struct Store {
     db: Connection,
@@ -137,6 +138,8 @@ pub enum Accepted {
     Received(Receipt),
     Conflict,
     InvalidReply,
+    UnknownChat,
+    ArchivedChat,
 }
 
 impl Store {
@@ -382,6 +385,17 @@ impl Store {
         if version < 55 {
             issue_title::migrate(&tx)?;
         }
+        if version < ARCHIVED_CHATS_SCHEMA {
+            // Issue Owner conversations use issue_messages. An Issue's
+            // source_seq points to a Chat message, not to its own conversation.
+            tx.execute_batch(
+                "CREATE TABLE IF NOT EXISTS archived_chats (chat_id TEXT PRIMARY KEY NOT NULL);
+                 INSERT OR IGNORE INTO archived_chats (chat_id)
+                 SELECT DISTINCT m.chat_id FROM chat_messages m
+                 WHERE m.chat_id <> 'main'
+                   AND NOT EXISTS (SELECT 1 FROM discussions d WHERE d.chat_id = m.chat_id);",
+            )?;
+        }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         }
@@ -430,8 +444,39 @@ impl Store {
         )?)
     }
 
+    fn chat_kind(db: &Connection, chat_id: &str) -> Result<Option<ChatKind>> {
+        if chat_id == "main" {
+            return Ok(Some(ChatKind::Main));
+        }
+        let (discussion, archived) = db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM discussions WHERE chat_id = ?1),
+                    EXISTS(SELECT 1 FROM archived_chats WHERE chat_id = ?1)",
+            [chat_id],
+            |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?)),
+        )?;
+        Ok(if discussion {
+            Some(ChatKind::Discussion)
+        } else if archived {
+            Some(ChatKind::Archived)
+        } else {
+            None
+        })
+    }
+
+    pub fn archived_chats(&self) -> Result<Vec<String>> {
+        let mut statement = self
+            .db
+            .prepare("SELECT chat_id FROM archived_chats ORDER BY chat_id")?;
+        Ok(statement
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?)
+    }
+
     pub fn accept(&mut self, chat_id: &str, request: &SendMessage) -> Result<Accepted> {
         let (tx, timing) = timing::begin(&mut self.db, "chat_accept")?;
+        let Some(kind) = Self::chat_kind(&tx, chat_id)? else {
+            return Ok(Accepted::UnknownChat);
+        };
         let existing: Option<(String, String, String, Option<String>)> = tx
             .query_row(
                 "SELECT id, chat_id, text, reply_to FROM chat_messages WHERE operation_id = ?1",
@@ -447,10 +492,15 @@ impl Store {
                     && original_reply == request.reply_to
                 {
                     Accepted::Received(Receipt { message_id })
+                } else if kind == ChatKind::Archived {
+                    Accepted::ArchivedChat
                 } else {
                     Accepted::Conflict
                 },
             );
+        }
+        if kind == ChatKind::Archived {
+            return Ok(Accepted::ArchivedChat);
         }
         if Self::reserved_chat_operation(&tx, &request.operation_id)? {
             return Ok(Accepted::Conflict);
@@ -472,8 +522,11 @@ impl Store {
         Ok(Accepted::Received(receipt))
     }
 
-    pub fn messages(&self, chat_id: &str, before: i64) -> Result<MessagePage> {
-        let discussion = self.is_discussion(chat_id)?;
+    pub fn messages(&self, chat_id: &str, before: i64) -> Result<Option<MessagePage>> {
+        let Some(kind) = Self::chat_kind(&self.db, chat_id)? else {
+            return Ok(None);
+        };
+        let discussion = kind == ChatKind::Discussion;
         let mut statement = self.db.prepare(
             "SELECT m.seq, m.id, m.text, m.created_at, m.reply_to, i.seq,
                     i.outcome, i.error, a.id, h.chat_id, f.issue_id, n.number,
@@ -572,10 +625,11 @@ impl Store {
             }
         }
         let messages = page.into_iter().rev().map(|(_, message)| message).collect();
-        Ok(MessagePage {
+        Ok(Some(MessagePage {
             messages,
             next_before,
-        })
+            chat_kind: Some(kind),
+        }))
     }
 
     // Report operations can be synced before the bytes of the same Owner's

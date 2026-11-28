@@ -7,7 +7,7 @@ import sqlite3
 import subprocess
 import tempfile
 
-from chat import lose_first_response, server, wait_for
+from chat import lose_first_response, seed_archived_input, server, wait_for
 
 
 def main():
@@ -128,7 +128,7 @@ def main():
                 assert ledger.execute("SELECT COUNT(*) FROM runners").fetchone() == (3,)
 
             sync(address, "backup")
-            execute(address, args.cli, "chat", "send", "other", "Expire this reservation.")
+            seed_archived_input(root, "other", "Expire this reservation.")
             timeline = wait_for(
                 lambda: execute(address, args.cli, "chat", "read", "other")["messages"],
                 lambda messages: len(messages) == 2,

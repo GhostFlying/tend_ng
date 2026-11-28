@@ -283,6 +283,8 @@ pub struct IssueOverview {
     pub objective: String,
     pub repo_ids: Vec<String>,
     pub chat_id: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub source_chat_archived: bool,
     pub source_message_id: String,
     pub children: Vec<IssueOverviewChild>,
     pub pulls: Vec<PullLink>,

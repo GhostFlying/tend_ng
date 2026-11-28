@@ -14,7 +14,7 @@ import tempfile
 import threading
 
 from child_windows import expire_child_window
-from chat import server, wait_for
+from chat import seed_archived_input, server, wait_for
 
 FIXTURE = Path(__file__).resolve().parents[1] / "fixtures" / "coordination_app_server.py"
 WEB_ROOT = Path(__file__).resolve().parents[2] / "web"
@@ -180,7 +180,7 @@ def main():
                 assert work["artifacts"] == [{"id": file_id, "name": "guide.txt", "bytes": len(CONTENTS),
                                               "available": False}]
                 assert cli("artifact", "download", file_id).returncode != 0
-                read("chat", "send", "other", "Hello, Tend.")
+                seed_archived_input(root, "other", "Hello, Tend.")
                 wait_for(lambda: read("chat", "read", "other")["messages"], lambda rows: len(rows) == 2)
                 expire_child_window(root, "issue_closed")
                 wait_for(lambda: read("issue", "read", parent)["status"], lambda status: status == "completed")

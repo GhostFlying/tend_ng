@@ -9,7 +9,7 @@ import sys
 import tempfile
 import urllib.request
 
-from chat import lose_first_response, server, wait_for
+from chat import lose_first_response, seed_archived_input, server, wait_for
 from issue_chat import REQUEST, WEB, free_port, prepare
 
 OLD_REQUEST = "先记下稍后整理发布说明。"
@@ -49,7 +49,9 @@ def main():
                 return db.execute(statement, params).fetchall()
 
         def dispatch(text, chat="main"):
-            original = cli("chat", "send", chat, text)["message_id"]
+            receipt = (cli("chat", "send", chat, text) if chat == "main"
+                       else seed_archived_input(root, chat, text))
+            original = receipt["message_id"]
 
             def source():
                 return next(row for row in cli("chat", "read", chat)["messages"]
