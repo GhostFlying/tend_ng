@@ -109,6 +109,8 @@ def run(args, root):
     options = dict(listen=address, feishu_config=feishu, discussion_config=discussion,
                    web_dir=WEB / "dist" if args.screenshots else None)
     with server(args.server, root, env, listen=address):
+        [(current_schema,)] = sql(db, "PRAGMA user_version")
+        assert current_schema >= 57
         assert feed()["scan"]["phase"] == "disabled" and not feed()["suggestions"]
         use("sync", error="HTTP 409")
 
@@ -119,7 +121,7 @@ def run(args, root):
     set_checkpoints("PRAGMA user_version=56")
     set_state("empty")
     with server(args.server, root, env, **options):
-        assert sql(db, "PRAGMA user_version") == [(57,)]
+        assert sql(db, "PRAGMA user_version") == [(current_schema,)]
         assert sql(db, "SELECT name FROM sqlite_schema WHERE name IN ('archived_chats','maintenance_notes','issue_title_changes','feishu_suggestions_aux_expiry') ORDER BY name") == [
             ("archived_chats",), ("feishu_suggestions_aux_expiry",), ("issue_title_changes",), ("maintenance_notes",),
         ]

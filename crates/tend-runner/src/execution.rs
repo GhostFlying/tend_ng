@@ -3,16 +3,18 @@ use crate::{
     store::{Store, run::LocalRun},
 };
 use crate::{tools, workspace};
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use codex_app::{
     Client, ToolCall, ToolOutput, Turn, TurnHandler, TurnInput, TurnStatus, WorkThreadResume,
 };
-use protocol::{ControlAction, ControlState, RunOutcome, TOKEN_ENV};
+use protocol::{ControlAction, ControlState, NativeExecutionStamp, RunOutcome, TOKEN_ENV};
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{
     collections::HashMap,
     ffi::OsString,
     hash::{DefaultHasher, Hash, Hasher},
+    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -99,6 +101,13 @@ fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config)
             false,
         );
     }
+    if let Some(process) = &run.process
+        && run.thread_id.is_none()
+    {
+        // The scheduler confirmed the exact allocation process has exited.
+        // This phase could never submit a turn, including before a restart.
+        return store.release_empty_thread(&run.id, process);
+    }
     if run.process.is_some() {
         let result = if run.assignment.review.is_some() {
             workspace::existing_author_directory(&runtime.root, run)
@@ -106,6 +115,13 @@ fn advance(mut store: Store, runtime: &Runtime, run: &LocalRun, config: &Config)
         } else {
             recover(runtime, run, &cwd)
         };
+        if let Err(error) = &result
+            && run.native_execution.is_some()
+            && !store.has_stop(&run.assignment.placement.assignment_id)?
+        {
+            eprintln!("Native turn for Run {} still unresolved: {error:#}", run.id);
+            return store.retry_native_turn(&run.id);
+        }
         settle(&mut store, run, &cwd, result, true)?;
     } else {
         launch(&mut store, runtime, run, config)?;
@@ -149,6 +165,19 @@ fn configured_home<'a>(runtime: &'a Runtime, configured: Option<&'a Path>) -> Re
 }
 
 fn recover(runtime: &Runtime, run: &LocalRun, cwd: &Path) -> Result<Turn> {
+    if let Some(stamp) = &run.native_execution {
+        let home = configured_home(
+            runtime,
+            run.app_server
+                .as_ref()
+                .and_then(|app| app.codex_home.as_deref()),
+        )?;
+        anyhow::ensure!(
+            workspace::stamp(&cwd.canonicalize()?)? == stamp.workspace
+                && workspace::stamp(&codex_app::validate_home(home)?)? == stamp.codex_home,
+            "original native Run workspace or home is not available"
+        );
+    }
     let mut app = client(runtime, cwd, run.app_server.as_ref())?;
     let thread = run
         .thread_id
@@ -268,9 +297,75 @@ fn native_context(
     Ok(format!("{:016x}", hash.finish()))
 }
 
+fn execution_stamp(
+    run: &LocalRun,
+    agent: &protocol::AgentProfile,
+    launch: &AppServer,
+    cwd: &Path,
+    instructions: &str,
+    tools: &[serde_json::Value],
+) -> Result<NativeExecutionStamp> {
+    let home = launch
+        .codex_home
+        .as_deref()
+        .context("missing effective Codex home")?;
+    let executable = Path::new(&launch.program).canonicalize()?;
+    let binary = executable.metadata()?;
+    let home_config = match std::fs::read(home.join("config.toml")) {
+        Ok(bytes) => Some(format!("{:x}", Sha256::digest(bytes))),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(error).context("read effective Codex home configuration"),
+    };
+    let compatibility = serde_json::to_vec(&json!({
+        "agent": agent,
+        "agent_role": run.assignment.role(),
+        "workspace": run.assignment.workspace_path(),
+        "repositories": run.repos,
+        "program": launch.program,
+        "executable": executable,
+        "binary": (binary.dev(), binary.ino(), binary.len(), binary.modified()?),
+        "args": launch.args,
+        "home_config": home_config,
+        "instructions": instructions,
+        "tools": tools,
+    }))?;
+    Ok(NativeExecutionStamp {
+        host_id: run.assignment.placement.host_id.clone(),
+        workspace: workspace::stamp(cwd)?,
+        codex_home: workspace::stamp(home)?,
+        compatibility: format!("v1:{:x}", Sha256::digest(compatibility)),
+    })
+}
+
+fn incompatible_handoff(
+    origin: &NativeExecutionStamp,
+    current: &NativeExecutionStamp,
+) -> Option<&'static str> {
+    if origin.host_id != current.host_id {
+        Some("host changed")
+    } else if origin.workspace != current.workspace {
+        Some("workspace identity changed")
+    } else if origin.codex_home != current.codex_home {
+        Some("isolated Codex home identity changed")
+    } else if origin.compatibility != current.compatibility {
+        Some("named Agent or effective execution context changed")
+    } else {
+        None
+    }
+}
+
+fn log_handoff_fallback(run: &LocalRun, original_run: &str, reason: &str) {
+    eprintln!(
+        "Native thread handoff fallback for Task {}, Run {} (original Run {original_run}): {reason}",
+        run.assignment.task_id, run.id,
+    );
+}
+
 fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config) -> Result<()> {
     let planned_cwd = workspace::directory(&runtime.root, run);
     let is_review = run.assignment.review.is_some();
+    let handoff = store.incoming_thread(run)?;
+    let incoming = handoff.is_some();
     let started = (|| {
         let agent = &run.assignment.placement.agent;
         let app_server = run.app_server.as_ref();
@@ -304,6 +399,10 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
             if let Some(thread) = &run.resume_guard {
                 return store.defer_active_resume(&run.id, thread);
             }
+            if handoff.is_some() {
+                eprintln!("Retry preparation for handed-off Run {}: {error:#}", run.id);
+                return store.retry_resume(&run.id);
+            }
             return settle(store, run, &planned_cwd, Err(error), false);
         }
     };
@@ -316,38 +415,77 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     );
     let native_context =
         native_context(runtime, run, agent, app_server, &cwd, instructions, &tools)?;
-    let previous = store.reusable_thread(run, &native_context)?;
+    let local = store.reusable_thread(run, &native_context)?;
+    let launch = frozen_launch(runtime, app_server, &cwd).and_then(|launch| {
+        let execution = execution_stamp(run, agent, &launch, &cwd, instructions, &tools)?;
+        Ok((launch, execution))
+    });
+    let (launch, execution) = match launch {
+        Ok(pair) => pair,
+        Err(error)
+            if handoff.is_some()
+                || (is_review && local.is_some())
+                || run.resume_guard.is_some() =>
+        {
+            eprintln!(
+                "Retry native launch preparation for Run {}: {error:#}",
+                run.id
+            );
+            return store.retry_resume(&run.id);
+        }
+        Err(error) => return settle(store, run, &cwd, Err(error), false),
+    };
+    let handoff = handoff.filter(|binding| {
+        if let Some(reason) = incompatible_handoff(&binding.execution, &execution) {
+            if run.resume_guard.is_none() {
+                log_handoff_fallback(run, &binding.run_id, reason);
+            }
+            false
+        } else {
+            true
+        }
+    });
+    let previous = handoff.map(|binding| binding.thread_id.clone()).or(local);
     if let Some(guarded) = &run.resume_guard
         && previous.as_ref() != Some(guarded)
     {
         // Configuration drift cannot clear an unresolved active-thread fence.
         return store.defer_active_resume(&run.id, guarded);
     }
-    let started = frozen_launch(runtime, app_server, &cwd).and_then(|launch| {
-        let app = client(runtime, &cwd, Some(&launch))?;
-        Ok((app, launch))
-    });
-    let (mut app, launch) = match started {
-        Ok(pair) => pair,
-        Err(error) if is_review && previous.is_some() => {
-            eprintln!(
-                "Retry native App Server for Review Task {}: {error:#}",
-                run.assignment.task_id
-            );
+    let app_server = Some(&launch);
+    let mut app = match client(runtime, &cwd, app_server) {
+        Ok(app) => app,
+        Err(error)
+            if incoming || (is_review && previous.is_some()) || run.resume_guard.is_some() =>
+        {
+            eprintln!("Retry native App Server for Run {}: {error:#}", run.id);
             return store.retry_resume(&run.id);
         }
         Err(error) => return settle(store, run, &cwd, Err(error), false),
     };
-    let app_server = Some(&launch);
     let reused = if let Some(thread) = &previous {
         match app.resume_work_thread(
             thread,
             &cwd,
             agent.model.as_deref(),
             run.resume_guard.is_some(),
-            is_review,
+            is_review || handoff.is_some(),
         ) {
-            Ok(WorkThreadResume::Ready) => true,
+            Ok(WorkThreadResume::Ready) => {
+                if let Some(binding) = handoff
+                    && let Err(error) = app.confirm_work_frontier(thread, &binding.turn_id)
+                {
+                    app.stop()?;
+                    eprintln!(
+                        "Retry native frontier for handed-off Run {}: {error:#}",
+                        run.id
+                    );
+                    // The exact thread was verified idle. An unreadable
+                    // frontier fences new turns, not a pre-launch Stop.
+                    return store.retry_idle_frontier(&run.id, thread);
+                }
+                true
+            }
             Ok(WorkThreadResume::Active) => {
                 store.defer_active_resume(&run.id, thread)?;
                 app.stop()?;
@@ -365,11 +503,34 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 app.stop()?;
                 return store.defer_active_resume(&run.id, thread);
             }
-            Ok(WorkThreadResume::Unavailable) => false,
-            Err(error) if is_review => {
+            Ok(WorkThreadResume::Unavailable) => {
+                if let Some(binding) = handoff {
+                    // A negative lookup with a surviving original (or an
+                    // unreadable store) is not evidence of permanent loss.
+                    match codex_app::usage::rollout_index(&execution.codex_home.path) {
+                        Ok(rollouts) if !rollouts.contains_key(thread) => {
+                            log_handoff_fallback(
+                                run,
+                                &binding.run_id,
+                                "original native thread no longer exists",
+                            );
+                        }
+                        _ => {
+                            app.stop()?;
+                            eprintln!(
+                                "Native lookup for Run {} disagrees with the original rollout store",
+                                run.id
+                            );
+                            return store.retry_resume(&run.id);
+                        }
+                    }
+                }
+                false
+            }
+            Err(error) if is_review || handoff.is_some() => {
                 app.stop()?;
                 eprintln!(
-                    "Retry native thread for Review Task {}: {error:#}",
+                    "Retry original native thread for Task {}: {error:#}",
                     run.assignment.task_id
                 );
                 return store.retry_resume(&run.id);
@@ -393,24 +554,31 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
     } else {
         false
     };
+    let mut may_have_started = false;
+    let mut empty_thread_process = None;
     let result = (|| {
         if store.has_stop(&run.assignment.placement.assignment_id)? {
-            bail!("Task cancelled before launch");
+            return Err(StopRequested(None).into());
+        }
+        let process = app.process_identity()?;
+        if !reused && incoming {
+            store.begin_empty_thread(&run.id, &process)?;
+            empty_thread_process = Some(process);
         }
         let thread_id = if reused {
             previous.expect("reused thread was selected")
         } else {
             app.start_thread(&cwd, instructions, &tools, agent.model.as_deref())?
         };
-        store.attach_process(
-            &run.id,
-            &thread_id,
-            &app.process_identity()?,
-            &native_context,
-            app_server,
-            &workspace::stamp(&cwd)?,
-        )?;
-        let input = serde_json::to_string(&run.assignment)?;
+        let mut input = serde_json::to_value(&run.assignment)?;
+        // Native provenance authorizes execution, not a model-facing action.
+        if let Some(handoff) = input
+            .get_mut("handoff")
+            .and_then(serde_json::Value::as_object_mut)
+        {
+            handoff.remove("native_thread");
+        }
+        let input = serde_json::to_string(&input)?;
         let context = store.coordination_context(run, reused, artifact.as_deref())?;
         let collector = app.work_rollout(&thread_id).and_then(|path| {
             match crate::usage::Collector::new(path, &thread_id, reused) {
@@ -421,6 +589,24 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
                 }
             }
         });
+        // Persist the exact process and thread before sending a turn/start.
+        // Subsequent failures are reconciled by Run ID, never resubmitted.
+        anyhow::ensure!(
+            execution_stamp(run, agent, &launch, &cwd, instructions, &tools)? == execution,
+            "native execution context changed before turn submission"
+        );
+        if store.has_stop(&run.assignment.placement.assignment_id)? {
+            return Err(StopRequested(None).into());
+        }
+        store.attach_process(
+            &run.id,
+            &thread_id,
+            &app.process_identity()?,
+            &native_context,
+            app_server,
+            &execution,
+        )?;
+        may_have_started = true;
         let mut handler = Handler {
             store,
             run,
@@ -445,11 +631,34 @@ fn launch(store: &mut Store, runtime: &Runtime, run: &LocalRun, config: &Config)
             &mut handler,
         );
         handler.flush_usage(&thread_id);
-        result
+        let turn = result?;
+        anyhow::ensure!(
+            turn.status != TurnStatus::InProgress,
+            "native turn is not terminal"
+        );
+        Ok(turn)
     })();
     // A terminal notification alone does not prove the managed process has
     // exited. Leave the active record intact if stop cannot be verified.
     app.stop()?;
+    if !may_have_started && let Some(process) = &empty_thread_process {
+        store.release_empty_thread(&run.id, process)?;
+    }
+    if let Err(error) = &result
+        && !error.is::<StopRequested>()
+    {
+        if may_have_started && !codex_app::rejected_turn_start(error) {
+            eprintln!(
+                "Reconciling original native turn for Run {}: {error:#}",
+                run.id
+            );
+            return store.retry_native_turn(&run.id);
+        }
+        if !may_have_started && incoming {
+            eprintln!("Retry preparation for handed-off Run {}: {error:#}", run.id);
+            return store.retry_resume(&run.id);
+        }
+    }
     settle(store, run, &cwd, result, false)
 }
 
@@ -471,7 +680,7 @@ fn settle(
                     None,
                     observed,
                     &branches,
-                    &turn.items,
+                    Some(&turn.items),
                 )
             } else {
                 let reason = turn.error.map_or_else(
@@ -484,7 +693,7 @@ fn settle(
                     Some(reason),
                     observed,
                     &branches,
-                    &turn.items,
+                    Some(&turn.items),
                 )
             }
         }
@@ -494,10 +703,24 @@ fn settle(
             Some(format!("{error:#}")),
             None,
             &branches,
-            &[],
+            None,
         ),
     }
 }
+
+#[derive(Debug)]
+struct StopRequested(Option<String>);
+
+impl std::fmt::Display for StopRequested {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(control) => write!(f, "Task cancelled by stop control {control}"),
+            None => f.write_str("Task cancelled before launch"),
+        }
+    }
+}
+
+impl std::error::Error for StopRequested {}
 
 struct Handler<'a> {
     store: &'a mut Store,
@@ -615,7 +838,7 @@ impl TurnHandler for Handler<'_> {
             match &control.action {
                 ControlAction::Stop => {
                     let _ = client.interrupt(thread, turn);
-                    bail!("Task cancelled by stop control {}", control.id);
+                    return Err(StopRequested(Some(control.id)).into());
                 }
                 ControlAction::Steer { text } => {
                     if let Ok(delivered) = client.steer(thread, turn, &control.id, text) {

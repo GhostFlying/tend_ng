@@ -612,7 +612,10 @@ for line in sys.stdin:
                     schema = next(tool["inputSchema"] for tool in json.loads(catalogue)
                                   if tool["name"] == "tend_dispatch_issue")
                     category_schema = schema["properties"]["category"]
-                    assert category_schema["type"] == "string" and "enum" not in category_schema
+                    if Path(sys.argv[1]).with_name("legacy-categories").exists():
+                        assert category in category_schema["enum"]
+                    else:
+                        assert category_schema["type"] == "string" and "enum" not in category_schema
                     for rule in ("one person can deliver the outcome", "verified remote main SHA",
                                  "only when the user explicitly asks for that endpoint",
                                  "one responsible Agent observe"):

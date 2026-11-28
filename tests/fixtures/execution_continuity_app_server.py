@@ -86,6 +86,10 @@ if not reused:
 assert Path(cwd) == Path.cwd()
 
 turn = read()
+if reused and turn["method"] == "thread/turns/list":
+    history = json.loads((root / f"{thread}.history.json").read_text())
+    respond(turn, {"data": [history], "nextCursor": None})
+    turn = read()
 assert turn["method"] == "turn/start", turn
 assert turn["params"]["threadId"] == thread
 turn_id = str(uuid.uuid4())
@@ -241,9 +245,9 @@ else:
                 assert turn["params"]["effort"] == "low"
             assert any(op["action"]["kind"] == "request_review"
                        for op in context["recovery"]["prior_receipts_recent_first"])
-        elif mode in {"replacement", "artifact-replacement"}:
-            assert not reused and assignment["placement"]["runner_id"] == "next-runner"
         else:
+            # Author continuity is independent from the fresh thread for a
+            # Reviewer given an explicit new round on another Runner.
             assert reused
         guide.write_text("Revised candidate with example\n")
         tool("tend_post_issue_message", {"text": "Revised original candidate in place."}, "post")
@@ -261,8 +265,8 @@ else:
         else:
             tool("tend_close_issue", {"summary": "Revised guide complete."}, "close")
 
-send({"method": "turn/completed", "params": {"threadId": thread, "turn": {
-    "id": turn_id, "status": "completed", "items": [
-        {"type": "userMessage", "clientId": turn["params"]["clientUserMessageId"]},
-    ],
-}}})
+terminal = {"id": turn_id, "status": "completed", "items": [
+    {"type": "userMessage", "clientId": turn["params"]["clientUserMessageId"]},
+]}
+save(f"{thread}.history.json", terminal)
+send({"method": "turn/completed", "params": {"threadId": thread, "turn": terminal}})

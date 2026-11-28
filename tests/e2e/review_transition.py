@@ -229,8 +229,15 @@ def exercise(args, root):
             print("PASS same-host review and incremental/full file restoration after its producer retires")
             return
 
+        queued_on_predecessor = args.scenario == "replacement-queued"
         with runner(path, "runner", address, "replacement") as predecessor:
             author, reviewer, review_issue, _ = first_result()
+            if queued_on_predecessor:
+                mark("allow-review-stop-1")
+                gate("author-continued-2")
+                assert local("runner", author) == [("active",)]
+                wait_for(lambda: local("runner", reviewer), lambda rows: rows == [("queued",)])
+                assert [row[0] for row in runs("runner", reviewer)] == ["stopped"]
             new = {**settings, "runner_id": "next-runner", "standby": True}
             new.pop("inspect")
             successor_cfg = root / "next.json"
@@ -239,48 +246,61 @@ def exercise(args, root):
                 wait_for(lambda: cli("runner", "list"), lambda rows: len(rows) == 2)
                 cli("runner", "replace", "demo-runner", "next-runner")
                 wait_for(lambda: sql("runner", "SELECT successor FROM local_drain"), bool)
-                assert local("runner", reviewer) == [("active",)]
                 assert runs("next", author) == runs("next", reviewer) == []
-                mark("allow-review-stop-1")
-                gate("author-continued-2")
-                wait_for(lambda: local("next", reviewer), lambda rows: rows == [("queued",)])
-                assert local("next", author) == [("active",)] and runs("next", reviewer) == []
+                if queued_on_predecessor:
+                    assert not (root / "review-running-2").exists()
+                    mark("allow-author-stop-2")
+                else:
+                    assert local("runner", reviewer) == [("active",)]
+                    mark("allow-review-stop-1")
+                    gate("author-continued-2")
+                    wait_for(lambda: local("next", reviewer), lambda rows: rows == [("queued",)])
+                    assert local("next", author) == [("active",)] and runs("next", reviewer) == []
+                    assert runs("next", author)[0][1] == runs("runner", author)[0][1]
+                    mark("allow-author-stop-2")
+                gate("review-running-2")
                 assert local("runner", reviewer) == [("handed_off",)]
-                assert sql("server", "SELECT count(*) FROM runner_handoff_proofs "
-                                     "WHERE predecessor = 'demo-runner' AND json_extract(proof, '$.task_id') = ? "
-                                     "AND json_extract(proof, '$.context.phase') = 'finished'", reviewer) == [(1,)]
+                assert sql("server", "SELECT json_extract(proof, '$.context.phase') FROM runner_handoff_proofs "
+                                     "WHERE predecessor = 'demo-runner' AND json_extract(proof, '$.task_id') = ?",
+                           reviewer) == [("queued" if queued_on_predecessor else "finished",)]
                 assert sql("server", "SELECT review_task_id, review_issue_id FROM tend_reviews ORDER BY rowid") == [
                     (reviewer, review_issue), (reviewer, review_issue)]
                 assert sql("server", "SELECT runner_id, json_extract(contract, '$.placement.agent.id') "
                                      "FROM runner_assignments WHERE task_id = ? ORDER BY rowid", reviewer) == [
                     ("demo-runner", "reviewer"), ("next-runner", "reviewer")]
-                mark("allow-author-stop-2")
-                gate("review-running-2")
-                assert runs("next", author)[0][0] == "stopped"
-                assert runs("next", author)[0][2] < runs("next", reviewer)[0][2]
+                if queued_on_predecessor:
+                    assert runs("next", author) == []
+                    assert runs("runner", author)[-1][0] == "stopped"
+                else:
+                    assert runs("next", author)[0][0] == "stopped"
+                    assert runs("next", author)[0][2] < runs("next", reviewer)[0][2]
                 assert runs("runner", reviewer)[0][1] != runs("next", reviewer)[0][1]
+                assert sql("next", "SELECT json_extract(contract, '$.handoff.native_thread') "
+                                   "FROM received_assignments WHERE task_id = ?", reviewer) == [(None,)]
                 mark("deliver-review-2")
                 gate("result-2")
                 wait_for(lambda: local("next", author), lambda rows: rows == [("queued",)])
-                assert local("next", reviewer) == [("active",)] and len(runs("next", author)) == 1
+                assert local("next", reviewer) == [("active",)]
+                assert len(runs("next", author)) == (0 if queued_on_predecessor else 1)
                 mark("allow-review-stop-2")
                 for task in (author, reviewer):
                     wait_for(lambda: sql("server", "SELECT status FROM tasks WHERE id = ?", task),
                              lambda rows: rows == [("completed",)])
                 assert runs("next", reviewer)[0][0] == "stopped"
-                assert runs("next", reviewer)[0][2] < runs("next", author)[1][2]
+                assert runs("next", reviewer)[0][2] < runs("next", author)[-1][2]
+                assert runs("next", author)[-1][1] == runs("runner", author)[-1][1]
                 assert predecessor.wait(timeout=10) == 0
                 assert sql("server", "SELECT i.task_id, json_extract(i.payload, '$.result.conclusion') "
                                      "FROM tend_reviews v JOIN issue_inputs i ON i.id = v.result_input_id ORDER BY v.rowid") == [
                     (author, "Request a revision"), (author, "Accepted")]
-    print("PASS replacement: same Review Issue, Task and named owner, with a new thread and durable history on the proven successor")
+    print(f"PASS {args.scenario}: same Review Issue, Task and named owner, with a new thread and durable history on the proven successor")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for binary in ("server", "cli", "runner"):
         parser.add_argument(binary, type=lambda value: Path(value).resolve())
-    parser.add_argument("--scenario", choices=("cancel", "cancel-reopen", "replacement", "artifact-replacement"), required=True)
+    parser.add_argument("--scenario", choices=("cancel", "cancel-reopen", "replacement", "replacement-queued", "artifact-replacement"), required=True)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tend-review-transition-") as directory:
         root = Path(directory)

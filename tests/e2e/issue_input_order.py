@@ -39,13 +39,21 @@ def exercise(root, address, token, baseline):
         source = db.execute("INSERT INTO chat_messages (id, chat_id, text) "
                             "VALUES ('source', 'main', 'Synthetic work')").lastrowid
         for issue, parent in [("parent", None), ("child", "parent")]:
+            category = "issue-router" if parent is None else "implementation"
             db.execute("INSERT INTO issues (id, source_seq, title, objective, parent_issue_id) "
                        "VALUES (?, ?, ?, 'Synthetic work', ?)", (issue, source, issue, parent))
             db.execute("INSERT INTO tasks (id, issue_id, category, status, repo_ids, required_capabilities) "
-                       "VALUES (?, ?, 'fixture', 'accepted', '[]', '[]')", (f"{issue}-task", issue))
+                       "VALUES (?, ?, ?, 'accepted', '[]', '[]')", (f"{issue}-task", issue, category))
+            contract = {
+                "placement": {"assignment_id": f"{issue}-claim", "runner_id": "fixture",
+                              "host_id": "fixture-host", "agent": {"id": issue, "category": category, "revision": "1"}},
+                "task_id": f"{issue}-task", "issue_id": issue, "parent_issue_id": parent,
+                "source_message_id": "source", "chat_id": "main",
+                "work": {"title": issue, "objective": "Synthetic work"},
+            }
             db.execute("INSERT INTO runner_assignments (id, task_id, runner_id, contract, state, expires_at) "
                        "VALUES (?, ?, 'fixture', ?, 'accepted', 0)",
-                       (f"{issue}-claim", f"{issue}-task", json.dumps({"placement": {"agent": {"id": issue}}})))
+                       (f"{issue}-claim", f"{issue}-task", json.dumps(contract)))
             db.execute("UPDATE tasks SET current_assignment = ? WHERE id = ?",
                        (f"{issue}-claim", f"{issue}-task"))
 

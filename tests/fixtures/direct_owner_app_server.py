@@ -48,7 +48,8 @@ respond(line(), {})
 assert line()["method"] == "initialized"
 start = line()
 if start["method"] == "thread/resume":
-    send(id=start["id"], error={"code": -32600, "message": "no rollout found for thread id"})
+    thread = start["params"]["threadId"]
+    send(id=start["id"], error={"code": -32600, "message": f"no rollout found for thread id {thread}"})
     start = line()
 assert start["method"] == "thread/start", start
 tools = {entry["name"]: entry for entry in start["params"]["dynamicTools"]}

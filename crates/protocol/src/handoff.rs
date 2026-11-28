@@ -15,6 +15,27 @@ pub struct HandoffContext {
     pub operations: Vec<crate::WorkOperation>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_stamp: Option<WorkspaceStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_thread: Option<NativeThreadBinding>,
+}
+
+/// Provenance of a stopped native turn. The receiving Runner checks the
+/// execution stamp against its own launch; these paths never select a launch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeThreadBinding {
+    pub run_id: String,
+    pub thread_id: String,
+    pub turn_id: String,
+    pub execution: NativeExecutionStamp,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NativeExecutionStamp {
+    pub host_id: String,
+    pub workspace: WorkspaceStamp,
+    pub codex_home: WorkspaceStamp,
+    /// Versioned digest of the named Agent and effective execution context.
+    pub compatibility: String,
 }
 
 /// Identity of the directory a Runner actually launched in. Used only for

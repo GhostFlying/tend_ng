@@ -50,11 +50,11 @@ for line in sys.stdin:
         case "thread/start":
             respond(call, {"thread": {"id": str(uuid.uuid4())}})
         case "thread/resume":
-            respond(call, {"thread": {"id": params["threadId"]}})
+            respond(call, {"thread": {"id": params["threadId"], "status": {"type": "idle"}}})
         case "thread/turns/list":
             history = root / f"{params['threadId']}.json"
-            respond(call, {"data": [json.loads(history.read_text())] if history.exists() else [],
-                           "nextCursor": None})
+            turns = json.loads(history.read_text()) if history.exists() else []
+            respond(call, {"data": turns[:params.get("limit", len(turns))], "nextCursor": None})
         case "turn/start":
             thread = params["threadId"]
             turn = str(uuid.uuid4())
@@ -94,7 +94,9 @@ for line in sys.stdin:
                 {"type": "agentMessage", "id": f"{turn}-answer", "phase": "final_answer",
                  "text": "Fixture turn completed."},
             ]}
-            (root / f"{thread}.json").write_text(json.dumps(history))
+            saved = root / f"{thread}.json"
+            previous = json.loads(saved.read_text()) if saved.exists() else []
+            saved.write_text(json.dumps([history, *previous]))
             send({"method": "turn/completed", "params": {"threadId": thread, "turn": history}})
             if not router:
                 break

@@ -5,7 +5,7 @@
 - 在 Linux main-build 中提供可重试的本机升级入口。由正在运行的前驱配置派生 standby 后继，保留 Host、workspace、repo、Agent 和启动环境，独立分配 Runner 身份及 SQLite 库。
 - 复用 replace、同步、drain 和 retire。只等待实际 Run 自然停妥，不发 stop、不杀前驱、不复制数据库，也不为验证向实际部署派发探针任务。
 - Server 保存接替时前驱的 slot 预算。初始保守地保留全部 slot，直到前驱确认已封住新 Run 准入，再按仍占用的本地活跃 slot 逐步释放给后继。后继在实际 Run 准入处执行 Server 发放的上限。
-- 保留 v1/v2 的兼容窗口。不能报告安全余量的前驱按满额处理至 drain，不能执行动态上限的后继等前驱 drain。保留原 Task、待处理输入、workspace、旧 Run 身份及交接后的新原生 session 语义。
+- 保留 v1/v2 的兼容窗口。不能报告安全余量的前驱按满额处理至 drain，不能执行动态上限的后继等前驱 drain。保留原 Task、待处理输入、workspace、旧 Run 身份及缺少可验证绑定时的新原生 session 语义。后续同机 native 续接见[独立计划](runner-native-thread-handoff.md)。
 - 仅交付产品代码、文档和隔离验收；不触碰生产配置、进程或数据库。
 
 ## 实施

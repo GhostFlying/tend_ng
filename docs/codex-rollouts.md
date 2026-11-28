@@ -7,7 +7,13 @@ Tend 托管的每个新会话都向 Codex App Server 请求持久化的原生 th
 | 主 Chat Router，含使用原用户证据的受限转交 | Server 的绝对 `CODEX_HOME` | 按原输入和 attempt 查原 thread、turn。已有正常 Router thread 的接续不换 home。 |
 | 普通讨论、草稿、快速转交总结、旧式隔离接收 | Discussion 配置的 `codex_home` | 普通讨论复用兼容 thread。总结使用登记的有界前沿或另起 thread。旧式隔离接收使用独立 thread，不写入普通 Router 的绑定。 |
 | 飞书研判 | 研判配置的 `home/.codex-ark` | 每个研判 attempt 使用一个新 thread，且只进行隔离研判。排障从保存的原 attempt 读回，业务重试不在旧 thread 再跑。 |
-| Runner 的 Issue、Work、Review Agent 和其原生子 Agent | 该 Run 的 launcher 使用的 `app_servers.<name>.codex_home` 或 Runner 的绝对 `CODEX_HOME` | 原 Run 恢复及按需读取使用原 launch 绑定。同 Task 的兼容且已停妥 thread 按原规则复用。同机替换继续保留原 home 与查找索引。 |
+| Runner 的 Issue、Work、Review Agent 和其原生子 Agent | 该 Run 的 launcher 使用的 `app_servers.<name>.codex_home` 或 Runner 的绝对 `CODEX_HOME` | 原 Run 恢复及按需读取使用原 launch 绑定。同 Task 的兼容且已停妥 thread 按原规则复用。同机替换继续保留原 home 与查找索引，有经验证的交接 binding 时按原 thread 续接。 |
+
+## 同机换代续接
+
+交接 binding 是可选执行证据，不是目录选择或新派发授权。前驱在已证明原 turn 终止、App Server 退出并完成同步后移交。后继分别核对 workspace 与服务 home 的规范路径、device/inode、具名 Agent 及执行上下文兼容键，并在 native 历史核对原停妥 turn，再用新 Run ID 开始新 turn。绝对路径相同、thread ID 相同或已收到了 terminal 通知都不足以证明可安全写入。未开始执行的中间代只能转交 Server 已验证的原 binding。
+
+缺少证据的旧合同正常走原业务接续。已证实的配置不兼容或原 thread 不存在允许回退，并记录原因。启动、传输、resume 应答或 native 状态暂时未知时不放弃原业务 thread。已验证 idle 但无法读取前沿时，保留原 Run 重试且允许 Stop 停妥尚未提交的后继 Run。仅在已允许 fallback 后，若只发出 thread/start 而不知是否分配了空 thread，确认原分配进程退出且从未提交 turn 后可用同一准备 Run 再分配。若新 turn 有可能已提交，按该 Run client ID 或已确认 turn ID 查证，不重发 turn/start，不把原 turn 或已落盘工具操作当作新执行。无法证明时保留原 Run 与独占权供继续查证。跨代的显式复审沿已有新轮次契约，从原审阅历史和新候选开工。
 
 ## 配置与保留
 

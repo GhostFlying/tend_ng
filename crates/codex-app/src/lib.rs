@@ -205,6 +205,30 @@ fn missing_thread(error: &anyhow::Error, thread_id: &str) -> bool {
     })
 }
 
+/// Newer App Servers can still have an index entry after the corresponding
+/// file was removed. The caller must also check the original home before
+/// treating either kind of negative lookup as unrecoverable.
+fn missing_work_rollout(error: &anyhow::Error, thread_id: &str) -> bool {
+    missing_thread(error, thread_id)
+        || error.downcast_ref::<RpcError>().is_some_and(|error| {
+            error.method == "thread/resume"
+                && matches!(error.code, -32600 | -32603)
+                && error
+                    .message
+                    .strip_prefix("failed to resolve rollout path `")
+                    .and_then(|message| message.strip_suffix("`: file does not exist"))
+                    .is_some_and(|path| path.ends_with(&format!("-{thread_id}.jsonl")))
+        })
+}
+
+/// These JSON-RPC errors reject the method or its parameters before a turn
+/// can be accepted. Other errors (including an absent response) are not proof.
+pub fn rejected_turn_start(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<RpcError>()
+        .is_some_and(|error| error.method == "turn/start" && matches!(error.code, -32601 | -32602))
+}
+
 impl Turn {
     pub fn answers(&self) -> Result<Vec<Answer<'_>>> {
         let mut final_answers = Vec::new();
@@ -633,7 +657,7 @@ impl Client {
         ) {
             Ok(response) => response,
             Err(error)
-                if missing_thread(&error, thread_id)
+                if missing_work_rollout(&error, thread_id)
                     || (!confirmed_unavailable_only
                         && error.downcast_ref::<RpcError>().is_some()) =>
             {
@@ -665,6 +689,24 @@ impl Client {
         } else {
             Ok(WorkThreadResume::Unavailable)
         }
+    }
+
+    /// A resumed writer must be at the exact transferred terminal frontier.
+    pub fn confirm_work_frontier(&mut self, thread: &str, turn: &str) -> Result<()> {
+        let response = self.call(
+            "thread/turns/list",
+            json!({"threadId":thread,"itemsView":"full","limit":1}),
+        )?;
+        let tail = response["data"]
+            .as_array()
+            .and_then(|turns| turns.first())
+            .context("App Server did not confirm the transferred native turn")?;
+        let tail: Turn = serde_json::from_value(tail.clone())?;
+        ensure!(
+            tail.id == turn && tail.status != TurnStatus::InProgress,
+            "App Server did not confirm the transferred terminal frontier"
+        );
+        Ok(())
     }
 
     pub fn find_turn(

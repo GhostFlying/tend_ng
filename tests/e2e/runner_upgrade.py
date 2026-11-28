@@ -331,7 +331,11 @@ def main():
         continued = json.loads(evidence("continued"))
         assert continued["task"] == old_run["task"] == original["task_id"]
         assert continued["runner"] == successor and old_run["runner"] == "demo-runner"
-        assert continued["thread"] != old_run["thread"] and continued["run"] != old_run["run"]
+        assert continued["run"] != old_run["run"] and continued["turn"] != old_run["turn"]
+        if args.predecessor:
+            assert continued["thread"] != old_run["thread"], "old runners do not provide a binding"
+        else:
+            assert continued["thread"] == old_run["thread"]
         assert continued["cwd"] == old_run["cwd"] and Path(continued["cwd"]).is_relative_to(root)
         for name, task in [("original", original), *overlap.items()]:
             [(model, launch_args)] = SQL(next_db, """

@@ -20,6 +20,7 @@ TOKEN = "stop-races-fixture"
 GITHUB = "https://github.com/fixture/project/pull/1"
 CODEBASE = "https://code.byted.org/fixture/project/merge_requests/1"
 AGENT = {"id": "owner", "category": "issue-router", "revision": "1", "model": "fixture"}
+CHILD_AGENT = {**AGENT, "id": "worker", "category": "implementation"}
 
 
 @contextmanager
@@ -62,9 +63,10 @@ def task(db, issue, status, parent=None):
     name, assignment = f"{issue}-task", f"{issue}-claim"
     db.execute("INSERT INTO issues(id,source_seq,title,objective,parent_issue_id) VALUES(?,1,?,'Fixture',?)",
                (issue, issue, parent))
+    agent = AGENT if parent is None else CHILD_AGENT
     db.execute("INSERT INTO tasks(id,issue_id,category,status,repo_ids,required_capabilities) "
-               "VALUES(?,?,'issue-router',?,'[]','[]')", (name, issue, status))
-    contract = {"placement": {"assignment_id": assignment, "agent": AGENT, "host_id": HOST, "runner_id": RUNNER},
+               "VALUES(?,?,?,?,'[]','[]')", (name, issue, agent["category"], status))
+    contract = {"placement": {"assignment_id": assignment, "agent": agent, "host_id": HOST, "runner_id": RUNNER},
                 "task_id": name, "issue_id": issue, "parent_issue_id": parent, "source_message_id": "source",
                 "chat_id": "main", "work": {"title": issue, "objective": "Fixture"}}
     state = "reserved" if status == "reserved" else "accepted"
@@ -112,7 +114,7 @@ def issued_pair(server_bin, runner_bin):
                 task(db, f"earlier-{i:02}", "waiting", "root")
             name, assignment = task(db, "lost", "reserved", "root")
         config = root / "runner.json"
-        config.write_text(json.dumps({"runner_id": RUNNER, "host_id": HOST, "slot_limit": 1, "repos": [], "agents": [AGENT]}))
+        config.write_text(json.dumps({"runner_id": RUNNER, "host_id": HOST, "slot_limit": 1, "repos": [], "agents": [AGENT, CHILD_AGENT]}))
         probe = root / "unexpected-app-server"
         command = [runner_bin, "--config", config, "--db", root / "runner.sqlite",
                    "--app-server", sys.executable, "-c",

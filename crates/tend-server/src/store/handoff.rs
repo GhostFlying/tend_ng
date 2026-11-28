@@ -163,7 +163,51 @@ mod review_tests {
     }
 }
 
-pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool> {
+#[derive(Debug, PartialEq, Eq)]
+pub enum ProofReceipt {
+    Accepted,
+    AwaitingOriginals,
+    Rejected,
+}
+
+fn verified_native_thread(db: &Connection, proof: &HandoffProof, contract: &str) -> Result<bool> {
+    let Some(native) = proof.context.native_thread.as_ref() else {
+        return Ok(false);
+    };
+    let assignment: protocol::TaskAssignment = serde_json::from_str(contract)?;
+    if assignment.placement.host_id != native.execution.host_id
+        || proof.context.workspace_stamp.as_ref() != Some(&native.execution.workspace)
+        || native.thread_id.is_empty()
+        || native.turn_id.is_empty()
+    {
+        return Ok(false);
+    }
+    let latest = db
+        .query_row(
+            "SELECT observation FROM task_runs WHERE task_id = ?1 AND assignment_id = ?2
+         ORDER BY rowid DESC LIMIT 1",
+            params![proof.task_id, proof.assignment_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?;
+    let Some(latest) = latest else {
+        // An intermediate generation which never launched can relay exactly
+        // what the Server already placed in its accepted assignment.
+        return Ok(assignment
+            .handoff
+            .as_ref()
+            .and_then(|handoff| handoff.native_thread.as_ref())
+            == Some(native));
+    };
+    let latest: protocol::RunObservation = serde_json::from_str(&latest)?;
+    Ok(matches!(latest.phase, protocol::RunPhase::Stopped { .. })
+        && latest.run_id == native.run_id
+        && latest.thread_id.as_ref() == Some(&native.thread_id)
+        && latest.turn_id.as_ref() == Some(&native.turn_id))
+}
+
+pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<ProofReceipt> {
+    use ProofReceipt::*;
     let raw = serde_json::to_string(proof)?;
     let prior = db
         .query_row(
@@ -173,25 +217,74 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
         )
         .optional()?;
     if let Some((predecessor, saved)) = prior {
-        return Ok(predecessor == runner && saved == raw);
+        if predecessor != runner {
+            return Ok(Rejected);
+        }
+        if saved == raw {
+            return Ok(Accepted);
+        }
+        // An older Server may have applied this exact proof but ignored the
+        // optional native field. ACK it after an upgrade without upgrading
+        // the already applied transfer or changing its successor.
+        let saved: HandoffProof = serde_json::from_str(&saved)?;
+        let mut comparable: HandoffProof = serde_json::from_str(&raw)?;
+        if saved.context.native_thread.is_none() {
+            comparable.context.native_thread = None;
+        }
+        return Ok(if saved == comparable {
+            Accepted
+        } else {
+            Rejected
+        });
     }
     if drain_target(db, runner)?.as_ref() != Some(&proof.successor) {
-        return Ok(false);
+        return Ok(Rejected);
     }
     let original = db.query_row(
         "SELECT coalesce(i.parent_issue_id, i.id), t.status, t.current_assignment,
-                json_extract(a.contract, '$.placement.agent.id')
+                json_extract(a.contract, '$.placement.agent.id'), a.contract
            FROM runner_assignments a JOIN tasks t ON t.id = a.task_id JOIN issues i ON i.id = t.issue_id
            WHERE a.id = ?1 AND a.runner_id = ?2 AND a.task_id = ?3 AND a.state = 'accepted'",
         params![proof.assignment_id, runner, proof.task_id],
         |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?,
-                  row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?)),
+                  row.get::<_, Option<String>>(2)?, row.get::<_, String>(3)?, row.get::<_, String>(4)?)),
     ).optional()?;
-    let Some((root, status, current, owner)) = original else {
-        return Ok(false);
+    let Some((root, status, current, owner, contract)) = original else {
+        return Ok(Rejected);
     };
-    if status == "running" && current.as_deref() == Some(&proof.assignment_id) {
-        return Ok(false);
+    let is_current = current.as_deref() == Some(&proof.assignment_id);
+    if status == "running" && is_current {
+        return Ok(Rejected);
+    }
+    let next_review_round = is_current
+        && (proof.context.phase == HandoffPhase::Finished || proof.context.native_thread.is_some())
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
+                        AND json_extract(payload, '$.kind') = 'review_requested')",
+            [&proof.task_id],
+            |row| row.get::<_, bool>(0),
+        )?;
+    let requeue_finished_review =
+        proof.context.phase == HandoffPhase::Finished && status == "waiting" && next_review_round;
+    let transfer = is_current
+        && !matches!(status.as_str(), "completed" | "failed" | "cancelled")
+        && (proof.context.phase != HandoffPhase::Finished || requeue_finished_review);
+    // An explicit next review round keeps the original Task and history,
+    // but the cross-generation review contract does not carry its thread.
+    let native_verified =
+        transfer && !next_review_round && verified_native_thread(db, proof, &contract)?;
+    let stopping = super::control::settle_proven_stops(db, runner, &proof.assignment_id)?;
+    if !stopping
+        && native_verified
+        && db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM artifacts WHERE task_id = ?1 AND available = 0)",
+            [&proof.task_id],
+            |row| row.get::<_, bool>(0),
+        )?
+    {
+        // Do not ACK the handoff or issue a new assignment. Still return the
+        // upload requests in this sync so the original instance can finish.
+        return Ok(AwaitingOriginals);
     }
     db.execute(
         "INSERT INTO handoff_roots VALUES (?1, ?2)
@@ -199,24 +292,27 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
            WHERE handoff_roots.runner_id = ?3",
         params![root, proof.successor, runner],
     )?;
-    let pending_review = proof.context.phase == HandoffPhase::Finished
-        && status == "waiting"
-        && db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM issue_inputs WHERE task_id = ?1 AND run_id IS NULL
-                        AND json_extract(payload, '$.kind') = 'review_requested')",
-            [&proof.task_id],
-            |row| row.get::<_, bool>(0),
-        )?;
-    let stopping = super::control::settle_proven_stops(db, runner, &proof.assignment_id)?;
-    if !stopping
-        && (proof.context.phase != HandoffPhase::Finished || pending_review)
-        && current.as_deref() == Some(&proof.assignment_id)
-    {
+    if !stopping && transfer {
         let mut context = serde_json::to_value(&proof.context)?;
-        if pending_review {
+        if requeue_finished_review {
             // The Server has a new round, but the predecessor had not yet
             // received its input when it stopped. The queued input follows.
             context["phase"] = json!(HandoffPhase::Queued);
+        }
+        if !native_verified && proof.context.native_thread.is_some() {
+            context
+                .as_object_mut()
+                .expect("handoff context object")
+                .remove("native_thread");
+            let reason = if next_review_round {
+                "explicit new review round"
+            } else {
+                "unverified origin"
+            };
+            eprintln!(
+                "Omitting native thread binding for Task {} from assignment {}: {reason}",
+                proof.task_id, proof.assignment_id
+            );
         }
         db.execute(
             "UPDATE tasks SET current_assignment = NULL, status = 'awaiting_assignment', pinned_runner_id = ?2,
@@ -229,7 +325,113 @@ pub fn apply(db: &Connection, runner: &str, proof: &HandoffProof) -> Result<bool
         "INSERT INTO runner_handoff_proofs VALUES (?1, ?2, ?3)",
         params![proof.id, runner, raw],
     )?;
-    Ok(true)
+    Ok(Accepted)
+}
+
+#[cfg(test)]
+mod native_tests {
+    use super::*;
+
+    fn proof() -> Result<HandoffProof> {
+        let workspace = json!({"path": "/workspace", "device": 1, "inode": 2});
+        Ok(serde_json::from_value(json!({
+            "id":"proof", "assignment_id":"original", "task_id":"task", "successor":"next",
+            "context":{
+                "phase":"waiting_external", "operations":[], "workspace_stamp":workspace,
+                "native_thread":{
+                    "run_id":"run", "thread_id":"thread", "turn_id":"turn",
+                    "execution":{"host_id":"host", "workspace":workspace,
+                        "codex_home":{"path":"/home", "device":1, "inode":3}, "compatibility":"v1:test"}
+                }
+            }
+        }))?)
+    }
+
+    fn evidence() -> Result<Connection> {
+        let db = Connection::open_in_memory()?;
+        db.execute_batch(
+            "CREATE TABLE task_runs (assignment_id TEXT, task_id TEXT, observation TEXT);
+             CREATE TABLE runner_handoff_proofs (id TEXT, predecessor TEXT, proof TEXT);",
+        )?;
+        Ok(db)
+    }
+
+    #[test]
+    fn only_latest_stopped_origin_or_exact_inherited_binding_can_transfer() -> Result<()> {
+        let db = evidence()?;
+        let proof = proof()?;
+        let mut contract = json!({
+            "placement":{"assignment_id":"original", "runner_id":"old", "host_id":"host",
+                         "agent":{"id":"named", "category":"implementation", "revision":"1"}},
+            "task_id":"task", "issue_id":"issue", "source_message_id":"source", "chat_id":"main",
+            "work":{"title":"Fixture", "objective":"Fixture"}
+        });
+        assert!(!verified_native_thread(&db, &proof, &contract.to_string())?);
+        contract["handoff"] = serde_json::to_value(&proof.context)?;
+        assert!(verified_native_thread(&db, &proof, &contract.to_string())?);
+        contract["handoff"]["native_thread"]["turn_id"] = json!("different");
+        assert!(!verified_native_thread(&db, &proof, &contract.to_string())?);
+        let mut observation = json!({
+            "event_id":"event","assignment_id":"original","task_id":"task",
+            "run_id":"run","thread_id":"thread","turn_id":"turn","phase":{"state":"started"}
+        });
+        let save = |raw: &Value| {
+            db.execute(
+                "INSERT INTO task_runs VALUES ('original', 'task', ?1)",
+                [raw.to_string()],
+            )
+        };
+        save(&observation)?;
+        assert!(!verified_native_thread(&db, &proof, &contract.to_string())?);
+        observation["phase"] = json!({"state":"stopped", "outcome":"completed"});
+        save(&observation)?;
+        assert!(verified_native_thread(&db, &proof, &contract.to_string())?);
+        let mut wrong = proof;
+        wrong
+            .context
+            .native_thread
+            .as_mut()
+            .unwrap()
+            .execution
+            .host_id = "other".into();
+        assert!(!verified_native_thread(&db, &wrong, &contract.to_string())?);
+        wrong
+            .context
+            .native_thread
+            .as_mut()
+            .unwrap()
+            .execution
+            .host_id = "host".into();
+        observation["run_id"] = json!("newer");
+        save(&observation)?;
+        assert!(!verified_native_thread(&db, &wrong, &contract.to_string())?);
+        Ok(())
+    }
+
+    #[test]
+    fn lost_legacy_ack_is_accepted_without_mutating_the_original_proof() -> Result<()> {
+        let db = evidence()?;
+        let mut old = proof()?;
+        old.context.native_thread = None;
+        let saved = serde_json::to_string(&old)?;
+        db.execute(
+            "INSERT INTO runner_handoff_proofs VALUES ('proof', 'old', ?1)",
+            [&saved],
+        )?;
+        let mut replay = proof()?;
+        assert_eq!(apply(&db, "old", &replay)?, ProofReceipt::Accepted);
+        assert_eq!(apply(&db, "other", &replay)?, ProofReceipt::Rejected);
+        replay.successor = "different".into();
+        assert_eq!(apply(&db, "old", &replay)?, ProofReceipt::Rejected);
+        assert_eq!(
+            db.query_row("SELECT proof FROM runner_handoff_proofs", [], |row| row
+                .get::<_, String>(
+                0
+            ))?,
+            saved
+        );
+        Ok(())
+    }
 }
 
 impl Store {

@@ -673,9 +673,13 @@ fn category_disable_preserves_reserved_issued_and_same_host_handoff() -> Result<
             phase: protocol::HandoffPhase::Queued,
             operations: vec![],
             workspace_stamp: None,
+            native_thread: None,
         },
     };
-    assert!(crate::store::handoff::apply(&store.db, "new", &proof)?);
+    assert_eq!(
+        crate::store::handoff::apply(&store.db, "new", &proof)?,
+        crate::store::handoff::ProofReceipt::Accepted
+    );
     crate::store::handoff::note_drain_slots(&store.db, "new", 0)?;
     store.schedule_assignments(&mut 0)?;
     let next = beat(&mut store, successor, 2, vec![])?.assignments;

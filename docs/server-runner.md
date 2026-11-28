@@ -84,7 +84,7 @@ Server 应用顶层 Issue 的原领取回执时，同一次持久提交 Owner �
 
 已启动的 Run 由前驱执行到停妥。已领取的 Task 需要继续时，前驱在确认本次执行停妥或尚未启动后，持久交出后续执行权，经普通同步提交给 Server。接续记录携带原 Owner、目录绑定、待处理输入、等待条件及开工所需的回执。后继持久领取后接续原 Task 的待执行或等待状态，实际启动时使用新 Run 和已有的 workspace。处于 `waitfor` 的 Task 可以在条件命中前完成交接，目录持续由原 Task 独占。 [命中事件与续跑](task-lifecycle.md#命中事件与续跑)
 
-交接期间到达的用户输入或等待命中沿原 Task 持久保存。接续生效后，后继按原身份消费仍待处理的输入。指定旧 Run 的控制、历史和回执沿原执行查证，原文件和回执仍由前驱独立回传。本次实现仅在原 Runner 的原分配中复用 thread。换 Runner 后沿原 Issue、Task、待处理输入和交接回执开新 session，不把原生会话转移作为接续前提。 [原生接续调研](design-questions.md#run-边界更换-runner-的调研)
+交接期间到达的用户输入或等待命中沿原 Task 持久保存。接续生效后，后继按原身份消费仍待处理的输入。指定旧 Run 的控制、历史和回执沿原执行查证，原文件和回执仍由前驱独立回传。同机接替可以随已停妥并同步的原 Run、操作回执和原件移交可核验的 native thread binding。Server 先确认原 assignment 的停止与交接权，后继仅在原 Task、同 Host、兼容具名 Agent 及执行配置、同 workspace 和专用 Codex home 下 resume。原 Run 和 turn 不变，后继获得新的 Run 和 turn。旧协议、无 binding 或已证实不可恢复时，沿原 Issue、Task、待处理输入和回执开新 session。暂时错误和状态未知不作为新开 thread 的依据。 [Codex 原生会话](codex-rollouts.md)
 
 已结算的绑定审阅不会因交接自动开工。作者显式提交新候选后，若原 Reviewer Assignment 属于前驱，Server 等精确 Assignment 的停妥交接证据，才向作者当前 Runner 分配原 Review Task 和具名 Reviewer。后继保留原 Task 与新轮次输入，另获先前审阅记录作为历史，而非重复收件。
 

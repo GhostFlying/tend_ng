@@ -19,6 +19,7 @@ pub struct LocalRun {
     pub app_server: Option<AppServer>,
     pub resume_guard: Option<String>,
     pub resume_retry_at: i64,
+    pub native_execution: Option<protocol::NativeExecutionStamp>,
     pub review_workspace: Option<String>,
     pub author_workspace_stamp: Option<protocol::WorkspaceStamp>,
 }
@@ -26,7 +27,7 @@ pub struct LocalRun {
 pub(super) fn create_tables(db: &Connection) -> Result<()> {
     let version: i64 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     ensure!(
-        version <= 8,
+        version <= 9,
         "unsupported Runner database version {version}"
     );
     if version >= 1 {
@@ -50,6 +51,9 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
         }
         if version < 8 {
             migrate_shared_reviews(db)?;
+        }
+        if version < 9 {
+            migrate_native_handoff(db)?;
         }
         return Ok(());
     }
@@ -112,6 +116,16 @@ pub(super) fn create_tables(db: &Connection) -> Result<()> {
     migrate_app_servers(db)?;
     migrate_native_context(db)?;
     migrate_shared_reviews(db)?;
+    migrate_native_handoff(db)?;
+    Ok(())
+}
+
+fn migrate_native_handoff(db: &Connection) -> Result<()> {
+    db.execute_batch(
+        "ALTER TABLE local_runs ADD COLUMN native_execution TEXT;
+         ALTER TABLE local_runs ADD COLUMN native_terminal INTEGER NOT NULL DEFAULT 0;",
+    )?;
+    db.pragma_update(None, "user_version", 9)?;
     Ok(())
 }
 
@@ -294,10 +308,11 @@ impl Store {
     }
 
     pub fn load_run(&self, id: &str) -> Result<LocalRun> {
-        let (contract, repositories, thread_id, turn_id, process, app, resume_guard, resume_retry_at) = self.0.query_row(
+        let (contract, repositories, thread_id, turn_id, process, app, resume_guard, resume_retry_at,
+            native_execution) = self.0.query_row(
             "SELECT a.contract, a.repositories, r.thread_id, r.turn_id, r.process_pid, r.process_start,
                     CASE WHEN r.native_context IS NULL THEN a.app_server ELSE r.app_server END,
-                    r.resume_guard, r.resume_retry_at
+                    r.resume_guard, r.resume_retry_at, r.native_execution
              FROM local_runs r JOIN received_assignments a ON a.id = r.assignment_id
              WHERE r.id = ?1", [id],
             |row| {
@@ -306,7 +321,8 @@ impl Store {
                     None => None,
                 };
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get(2)?, row.get(3)?, process,
-                    row.get::<_, Option<String>>(6)?, row.get(7)?, row.get(8)?))
+                    row.get::<_, Option<String>>(6)?, row.get(7)?, row.get(8)?,
+                    row.get::<_, Option<String>>(9)?))
             },
         )?;
         let mut assignment: TaskAssignment = serde_json::from_str(&contract)?;
@@ -363,6 +379,10 @@ impl Store {
             inputs: coordination::run_inputs(&self.0, id)?,
             resume_guard,
             resume_retry_at,
+            native_execution: native_execution
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()?,
             review_workspace,
             author_workspace_stamp: stamp.as_deref().map(serde_json::from_str).transpose()?,
         })
@@ -399,6 +419,41 @@ impl Store {
         }))
     }
 
+    /// Never resurrect a transfer's older thread after a local Run selected
+    /// a different one.
+    pub fn incoming_thread<'a>(
+        &self,
+        run: &'a LocalRun,
+    ) -> Result<Option<&'a protocol::NativeThreadBinding>> {
+        let binding = run
+            .assignment
+            .handoff
+            .as_ref()
+            .and_then(|handoff| handoff.native_thread.as_ref());
+        if binding.is_none() {
+            return Ok(None);
+        }
+        let earlier: bool = self.0.query_row(
+            "SELECT EXISTS(SELECT 1 FROM local_runs WHERE assignment_id = ?1 AND id != ?2)",
+            params![run.assignment.placement.assignment_id, run.id],
+            |row| row.get(0),
+        )?;
+        Ok(binding.filter(|_| !earlier))
+    }
+
+    pub fn retry_native_turn(&self, run_id: &str) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET resume_retry_at = unixepoch() + 2
+                 WHERE id = ?1 AND state IN ('prepared','running')
+                   AND process_pid IS NOT NULL AND native_execution IS NOT NULL",
+                [run_id],
+            )? == 1,
+            "cannot reconcile the original native Run"
+        );
+        Ok(())
+    }
+
     pub fn defer_active_resume(&self, run_id: &str, thread: &str) -> Result<()> {
         ensure!(
             self.0.execute(
@@ -424,6 +479,47 @@ impl Store {
         Ok(())
     }
 
+    pub fn retry_idle_frontier(&self, run_id: &str, thread: &str) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET resume_guard = NULL, resume_retry_at = unixepoch() + 2
+                 WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL
+                   AND (resume_guard IS NULL OR resume_guard = ?2)",
+                params![run_id, thread],
+            )? == 1,
+            "cannot retry the original idle frontier"
+        );
+        Ok(())
+    }
+
+    /// A process with no thread recorded may only allocate an empty thread.
+    /// Recording it before the RPC fences a retry even across Runner restart.
+    pub fn begin_empty_thread(&self, run_id: &str, process: &ProcessIdentity) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET process_pid = ?2, process_start = ?3
+                 WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL
+                   AND thread_id IS NULL AND resume_guard IS NULL",
+                params![run_id, process.pid, process.started_at],
+            )? == 1,
+            "cannot reserve the App Server for empty thread allocation"
+        );
+        Ok(())
+    }
+
+    pub fn release_empty_thread(&self, run_id: &str, process: &ProcessIdentity) -> Result<()> {
+        ensure!(
+            self.0.execute(
+                "UPDATE local_runs SET process_pid = NULL, process_start = NULL
+                 WHERE id = ?1 AND state = 'prepared' AND process_pid = ?2 AND process_start = ?3
+                   AND thread_id IS NULL AND turn_id IS NULL",
+                params![run_id, process.pid, process.started_at],
+            )? == 1,
+            "cannot release the stopped empty thread allocation process"
+        );
+        Ok(())
+    }
+
     pub fn attach_process(
         &self,
         run_id: &str,
@@ -431,14 +527,16 @@ impl Store {
         process: &ProcessIdentity,
         native_context: &str,
         app_server: Option<&AppServer>,
-        workspace_stamp: &protocol::WorkspaceStamp,
+        execution: &protocol::NativeExecutionStamp,
     ) -> Result<()> {
         ensure!(
             self.0.execute(
-                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4, native_context = ?5, app_server = ?6, workspace_stamp = ?7, resume_guard = NULL, resume_retry_at = 0
-             WHERE id = ?1 AND state = 'prepared' AND process_pid IS NULL",
+                "UPDATE local_runs SET thread_id = ?2, process_pid = ?3, process_start = ?4, native_context = ?5, app_server = ?6, workspace_stamp = ?7, native_execution = ?8, resume_guard = NULL, resume_retry_at = 0
+             WHERE id = ?1 AND state = 'prepared' AND thread_id IS NULL
+               AND (process_pid IS NULL OR (process_pid = ?3 AND process_start = ?4))",
                 params![run_id, thread_id, process.pid, process.started_at, native_context,
-                    app_server.map(serde_json::to_string).transpose()?, serde_json::to_string(workspace_stamp)?],
+                    app_server.map(serde_json::to_string).transpose()?, serde_json::to_string(&execution.workspace)?,
+                    serde_json::to_string(execution)?],
             )? == 1,
             "original Run is already attached"
         );
@@ -475,7 +573,7 @@ impl Store {
         error: Option<String>,
         recovered_turn: Option<&str>,
         branches: &[protocol::WorkBranch],
-        native_items: &[serde_json::Value],
+        native_items: Option<&[serde_json::Value]>,
     ) -> Result<()> {
         let tx = self
             .0
@@ -493,15 +591,19 @@ impl Store {
         }
         ensure!(
             tx.execute(
-                "UPDATE local_runs SET state = 'stopped'
+                "UPDATE local_runs SET state = 'stopped', native_terminal = ?2
              WHERE id = ?1 AND state IN ('prepared', 'running')",
-                [&run.id],
+                params![run.id, native_items.is_some()],
             )? == 1,
             "cannot settle the original Run"
         );
         let assignment_id = &run.assignment.placement.assignment_id;
-        let (cancelled, commands) =
-            super::control::stopped(&tx, assignment_id, &run.id, native_items)?;
+        let (cancelled, commands) = super::control::stopped(
+            &tx,
+            assignment_id,
+            &run.id,
+            native_items.unwrap_or_default(),
+        )?;
         let outcome = if cancelled {
             RunOutcome::Cancelled
         } else {

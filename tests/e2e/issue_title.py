@@ -40,16 +40,17 @@ class Fixture:
                       web_dir=WEB / "dist" if self.args.web else None,
                       router_fixture=FIXTURE, router_name="Tend")
 
-    def command(self, binary=None):
+    def command(self, *flags, binary=None):
+        # Registration and execution must freeze the same fixture launcher.
         return [binary or self.args.runner, "--config", self.root / "runner.json",
-                "--db", self.root / "runner.sqlite"]
+                "--db", self.root / "runner.sqlite", *flags,
+                "--app-server", sys.executable, FIXTURE, self.root]
 
     @contextmanager
     def run(self, proxy=None, binary=None):
         env = {**self.env, "TEND_URL": f"http://{proxy or self.address}"}
         with (self.root / "runner.log").open("w+") as log:
-            child = subprocess.Popen([*self.command(binary), "--app-server", sys.executable,
-                                      FIXTURE, self.root], env=env, stderr=log)
+            child = subprocess.Popen(self.command(binary=binary), env=env, stderr=log)
             try:
                 yield
             except BaseException:
@@ -116,7 +117,7 @@ class Fixture:
         return wait_for(lambda: self.cli("runner", "list"), bool)
 
     def reconcile(self, task, address=None):
-        subprocess.run([*self.command(), "--reconcile", task], check=True, timeout=15,
+        subprocess.run(self.command("--reconcile", task), check=True, timeout=15,
                        env={**self.env, "TEND_URL": f"http://{address or self.address}"})
 
     def unchanged_by_rename(self):
@@ -145,7 +146,7 @@ def exercise(fixture):
         assert f.read("recorded-replayed.json")["title"] == recorded["title"]
         f.settled_router(source_recorded)
 
-        subprocess.run([*f.command(), "--once"], check=True, timeout=10, env=f.env)
+        subprocess.run(f.command("--once"), check=True, timeout=10, env=f.env)
         [runner] = f.owners_ready()
         profile = runner["profile"]
         assert runner["protocol"] == 2

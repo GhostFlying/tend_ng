@@ -1,6 +1,6 @@
 use super::Store;
 use anyhow::Result;
-use protocol::{HandoffContext, HandoffPhase, HandoffProof};
+use protocol::{HandoffContext, HandoffPhase, HandoffProof, NativeThreadBinding};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 
 pub fn migrate(db: &Connection) -> Result<()> {
@@ -95,6 +95,7 @@ impl Store {
                    ORDER BY rowid DESC LIMIT 1), json_extract(a.contract, '$.handoff.workspace_stamp'))
                    FROM received_assignments a WHERE a.id = ?1", [&id], |row| row.get(0),
             )?;
+            let native_thread = stopped_thread(&tx, &id)?;
             let operations = if phase == HandoffPhase::Finished {
                 Vec::new()
             } else {
@@ -152,6 +153,7 @@ impl Store {
                     phase,
                     operations,
                     workspace_stamp: stamp.as_deref().map(serde_json::from_str).transpose()?,
+                    native_thread,
                 },
             };
             tx.execute("UPDATE received_assignments SET execution_state = 'handed_off', retains_workspace = 0 WHERE id = ?1", [&id])?;
@@ -162,5 +164,49 @@ impl Store {
         }
         tx.commit()?;
         Ok(())
+    }
+}
+
+fn stopped_thread(db: &Connection, assignment: &str) -> Result<Option<NativeThreadBinding>> {
+    let latest = db
+        .query_row(
+            "SELECT id, thread_id, turn_id, native_execution,
+                state = 'stopped' AND native_terminal = 1
+           FROM local_runs WHERE assignment_id = ?1 ORDER BY rowid DESC LIMIT 1",
+            [assignment],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, bool>(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    match latest {
+        Some((run_id, Some(thread_id), Some(turn_id), Some(execution), true)) => {
+            Ok(Some(NativeThreadBinding {
+                run_id,
+                thread_id,
+                turn_id,
+                execution: serde_json::from_str(&execution)?,
+            }))
+        }
+        Some(_) => Ok(None),
+        None => {
+            let inherited: Option<String> = db.query_row(
+                "SELECT json_extract(contract, '$.handoff.native_thread')
+                   FROM received_assignments WHERE id = ?1",
+                [assignment],
+                |row| row.get(0),
+            )?;
+            inherited
+                .as_deref()
+                .map(serde_json::from_str)
+                .transpose()
+                .map_err(Into::into)
+        }
     }
 }

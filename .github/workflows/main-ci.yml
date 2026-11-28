@@ -62,8 +62,11 @@ jobs:
           printf '%s\n' "$GITHUB_SHA" > "$bundle/REVISION"
           python3 -B tests/e2e/runner_upgrade.py "$bundle"
           python3 -B tests/e2e/runner_upgrade.py "$bundle" --trailing-dot-db
-      - name: Check first queued artifact review across Runner replacement
-        run: python3 -B tests/e2e/review_transition.py target/release/tend-server target/release/tend target/release/tend-runner --scenario artifact-replacement
+      - name: Check native author continuity and fresh explicit reviews across Runner replacement
+        run: |
+          for scenario in artifact-replacement replacement replacement-queued; do
+            python3 -B tests/e2e/review_transition.py target/release/tend-server target/release/tend target/release/tend-runner --scenario "$scenario"
+          done
       - name: Check Issue token usage and Runner replay
         run: python3 -B tests/e2e/issue_token_usage.py target/release/tend-server target/release/tend target/release/tend-runner
       - name: Check historical token usage backfill and rebuild

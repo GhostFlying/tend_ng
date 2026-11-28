@@ -916,10 +916,12 @@ impl Store {
                     observations.push(observation);
                 }
                 RunnerRecord::Handoff(proof) => {
-                    if !super::handoff::apply(&tx, &profile.runner_id, &proof)? {
-                        return Ok(None);
+                    use super::handoff::ProofReceipt;
+                    match super::handoff::apply(&tx, &profile.runner_id, &proof)? {
+                        ProofReceipt::Accepted => confirmed_operations.push(proof.id),
+                        ProofReceipt::AwaitingOriginals => {}
+                        ProofReceipt::Rejected => return Ok(None),
                     }
-                    confirmed_operations.push(proof.id);
                 }
                 RunnerRecord::Control(ack) => {
                     if !super::control::acknowledge(&tx, &profile.runner_id, &ack)? {
