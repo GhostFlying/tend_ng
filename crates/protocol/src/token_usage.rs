@@ -8,6 +8,13 @@ pub struct TokenCounts {
     pub cache_write_input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub reasoning_output_tokens: Option<i64>,
+    /// Explicit provider-reported miss, not a derived uncached quantity.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        alias = "prompt_cache_miss_tokens"
+    )]
+    pub cache_miss_input_tokens: Option<i64>,
 }
 
 impl TokenCounts {
@@ -38,6 +45,7 @@ impl TokenCounts {
             cache_write_input_tokens,
             output_tokens,
             reasoning_output_tokens,
+            cache_miss_input_tokens: None,
         }
     }
 
@@ -49,18 +57,33 @@ impl TokenCounts {
             }
             *left = left.or(right);
         }
-        Some(Self::from_fields(fields))
+        if self.cache_miss_input_tokens.is_some()
+            && other.cache_miss_input_tokens.is_some()
+            && self.cache_miss_input_tokens != other.cache_miss_input_tokens
+        {
+            return None;
+        }
+        Some(Self {
+            cache_miss_input_tokens: self
+                .cache_miss_input_tokens
+                .or(other.cache_miss_input_tokens),
+            ..Self::from_fields(fields)
+        })
     }
 
     /// Exact provider usage takes precedence over compatible normalized
     /// copies. A runtime default must not fill an omitted provider field.
     pub fn merge_reported(self, self_exact: bool, other: Self, other_exact: bool) -> Option<Self> {
         let merged = self.merge_known(other)?;
-        Some(match (self_exact, other_exact) {
+        let mut counts = match (self_exact, other_exact) {
             (true, false) => self,
             (false, true) => other,
             _ => merged,
-        })
+        };
+        // The optional miss has no synthesized runtime default, so a legacy
+        // observation without this field cannot mask direct miss evidence.
+        counts.cache_miss_input_tokens = merged.cache_miss_input_tokens;
+        Some(counts)
     }
 
     /// Legacy Codex fills omitted optional provider details with zero.
@@ -78,12 +101,17 @@ impl TokenCounts {
     }
 
     pub fn missing(self) -> bool {
-        self.fields().iter().all(Option::is_none)
+        self.cache_miss_input_tokens.is_none() && self.fields().iter().all(Option::is_none)
     }
 
     pub fn valid(self) -> bool {
-        let fields = self.fields();
-        fields.iter().any(Option::is_some) && fields.into_iter().flatten().all(|n| n >= 0)
+        !self.missing()
+            && self
+                .fields()
+                .into_iter()
+                .flatten()
+                .chain(self.cache_miss_input_tokens)
+                .all(|n| n >= 0)
     }
 }
 

@@ -92,7 +92,7 @@ use serde_json::json;
 use std::{collections::HashMap, path::Path, time::Duration};
 
 const PAGE_SIZE: usize = 50;
-pub(crate) const SCHEMA_VERSION: i64 = 51;
+pub(crate) const SCHEMA_VERSION: i64 = 52;
 
 pub struct Store {
     db: Connection,
@@ -146,13 +146,10 @@ impl Store {
             version <= SCHEMA_VERSION,
             "unsupported Server database version {version}"
         );
-        // Read and partition the existing meters before acquiring the write
-        // lock. The deferred transaction pins the inputs through publication.
-        let selected_models = if (45..49).contains(&version) {
-            Some(token_usage::selected_migration::capture(
-                &tx,
-                version >= 48,
-            )?)
+        // Pin the old ledger before taking the write lock if the request,
+        // source and Feishu launch-model tables already exist.
+        let provider_pricing = if version == 51 {
+            Some(token_usage::pricing_migration::capture(&tx)?)
         } else {
             None
         };
@@ -364,14 +361,16 @@ impl Store {
         if version < 48 {
             agent_metering::migrate(&tx)?;
         }
-        if let Some(selected_models) = selected_models {
-            selected_models.publish(&tx)?;
-        }
         if version < 50 {
             discussion::progress::migrate(&tx)?;
         }
         if version < 51 {
             agent_metering::migrate_feishu_history(&tx)?;
+        }
+        if version < 52 {
+            provider_pricing
+                .map_or_else(|| token_usage::pricing_migration::capture(&tx), Ok)?
+                .publish(&tx)?;
         }
         if version < SCHEMA_VERSION {
             tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;

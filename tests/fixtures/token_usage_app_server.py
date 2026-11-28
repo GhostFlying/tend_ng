@@ -4,6 +4,7 @@ from pathlib import Path
 import re
 import sys
 import time
+from provider_pricing import GROUPS as PRICING_GROUPS, samples as pricing_samples
 
 
 def read(method):
@@ -88,7 +89,19 @@ if stop_case:
     # Stop does not need a terminal notification to settle the stopped child.
     sys.exit(0)
 
-if role == "issue-router":
+if title in PRICING_GROUPS:
+    for index, (model, metadata) in enumerate(pricing_samples(title)):
+        params = {
+            "threadId": thread, "turnId": turn, "responseId": f"pricing-{index}",
+            "responseModel": model, "usageMetadata": {"metadata": metadata},
+        }
+        send({"method": "rawResponse/completed", "params": params})
+        if index == 0:
+            # A gateway adds a conflicting alias to the same native request,
+            # without changing its authoritative Responses cache detail.
+            metadata["prompt_cache_hit_tokens"] = 0
+            send({"method": "rawResponse/completed", "params": params})
+elif role == "issue-router":
     native_line("turn_context", {"turn_id": turn, "model": "gpt-6.2-sol"})
     usage(24_800, first)
     # This ordered round trip proves the Runner processed the notices while

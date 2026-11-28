@@ -13,9 +13,18 @@ struct Catalog {
 pub struct Price {
     pub id: &'static str,
     pub canonical_slug: &'static str,
+    pub input_billing: InputBilling,
     pub standard: Rates,
     pub long: Option<Rates>,
     pub unsupported: Option<UnsupportedPrice>,
+}
+
+#[derive(Clone, Copy, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InputBilling {
+    HitMiss,
+    IncludedWrite,
+    SeparateWrite,
 }
 
 #[derive(Clone, Copy, Deserialize, Serialize)]

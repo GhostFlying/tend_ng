@@ -759,12 +759,58 @@ fn new_native_backfill_repairs_legacy_placeholders_but_keeps_real_conflicts() ->
             assert_eq!(direct["models"][1]["model"], "gpt-6.2-astra");
             assert_eq!(direct["models"][1]["response_model_requests"], 2);
             assert_eq!(direct["models"][2]["model"], Value::Null);
-            assert_eq!(direct["estimate"], json!({"usd":"0.003718","partial":true}));
+            assert_eq!(direct["estimate"], json!({"usd":"0.01804","partial":true}));
         }
     }
     let before = view(&store, "root")?;
     store.rebuild_token_usage(&All)?;
     assert_eq!(view(&store, "root")?, before);
+    Ok(())
+}
+
+#[test]
+fn explicit_cache_miss_enriches_legacy_backfill_without_erasing_or_ignoring_conflicts() -> Result<()>
+{
+    use protocol::{TokenBackfillContent, TokenConflictPolicy::Quarantine, TokenUsageScope::All};
+    let fixture = Fixture::new()?;
+    let mut store = Store::initialize(&fixture.file())?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "job", "root", "runner")?;
+    let run = native_run("run", "job");
+    sync(&mut store, "runner", &[run], &[])?;
+    let direct = |s: &Store| Ok::<Value, anyhow::Error>(view(s, "root")?["direct"].clone());
+    let mut after_explicit = Value::Null;
+    for (job, miss) in [
+        ("legacy", None),
+        ("explicit", Some(15)),
+        ("old-reader-again", None),
+        ("real-conflict", Some(16)),
+    ] {
+        backfill_job(&mut store, job, All, Quarantine)?;
+        let work = backfill::pending(&store.db, "runner")?.unwrap();
+        let mut reply = page(work.item, 0, &[(1, 120)], true);
+        let TokenBackfillContent::Records { records, .. } = &mut reply.content else {
+            unreachable!()
+        };
+        records[0].model = Some(TokenModel::Response("deepseek-v4.1-flash".into()));
+        records[0].counts = Some(TokenCounts {
+            cache_miss_input_tokens: miss,
+            ..TokenCounts::from_fields([Some(120), Some(100), Some(70), None, Some(20), None])
+        });
+        deliver(&mut store, "runner", &reply)?;
+        let now = direct(&store)?;
+        match job {
+            "legacy" => assert_eq!(now["models"][0]["uncached_input_tokens"]["tokens"], "30"),
+            "explicit" => {
+                assert_eq!(now["models"][0]["uncached_input_tokens"]["tokens"], "15");
+                after_explicit = now;
+            }
+            "old-reader-again" => assert_eq!(now, after_explicit),
+            "real-conflict" => assert_eq!(now["estimate"]["usd"], Value::Null),
+            _ => unreachable!(),
+        }
+    }
     Ok(())
 }
 
@@ -787,7 +833,7 @@ fn runner_replay_with_an_exact_catalog_alias_keeps_the_request_price() -> Result
     ));
     sync(&mut store, "runner", &[], std::slice::from_ref(&live))?;
     assert_eq!(view(&store, "root")?, before);
-    assert_eq!(before["direct"]["estimate"]["usd"], "0.000338");
+    assert_eq!(before["direct"]["estimate"]["usd"], "0.00164");
     live.event_id = "different-model".into();
     live.model = Some(TokenModel::RequestSelection("gpt-6.2-astra".into()));
     sync(&mut store, "runner", &[], &[live])?;
@@ -1414,6 +1460,75 @@ fn legacy_root_page_is_partial_and_child_audit_uses_native_keys() -> Result<()> 
         assert_eq!(row["root_thread_id"], root.thread_id);
         assert_eq!(row["root_turn_id"], root.turn_id);
     }
+    Ok(())
+}
+
+#[test]
+fn legacy_optional_zero_prices_stay_partial_through_migration_rebuild_and_replay() -> Result<()> {
+    use protocol::TokenUsageScope::All;
+    let fixture = Fixture::new()?;
+    let path = fixture.file();
+    let mut store = Store::initialize(&path)?;
+    base(&store.db)?;
+    issue(&store.db, "root", None)?;
+    assignment(&store.db, "job", "root", "runner")?;
+    let run = native_run("run", "job");
+    let mut record = observation(&run, 0, Some(1050));
+    record.last = TokenCounts::from_fields([1050, 1000, 0, 0, 50, 0].map(Some));
+    record.model = Some(TokenModel::Response("gpt-6.2-sol".into()));
+    record.provider_counts = true;
+    sync(&mut store, "runner", &[run], std::slice::from_ref(&record))?;
+
+    // Recreate an old writer's ledger and raw coverage (same values, without
+    // provider provenance). Neither migration nor rebuild may edit its bytes.
+    store.db.execute_batch(
+        "UPDATE token_requests SET last=json_remove(last,'$.provider_counts');
+         PRAGMA user_version=51;",
+    )?;
+    let raw = |s: &Store| -> Result<String> {
+        Ok(s.db.query_row("SELECT last FROM token_requests", [], |r| r.get(0))?)
+    };
+    let original = raw(&store)?;
+    drop(store);
+    let mut store = Store::initialize(&path)?;
+    let verify = |s: &Store, raw_read: Value| -> Result<()> {
+        let direct = view(s, "root")?["direct"].clone();
+        let overview = to_value(s.token_overview(None, None)?)?;
+        assert_eq!(overview["total"], direct);
+        assert_eq!(overview["sources"][0]["usage"], direct);
+        assert_eq!(direct["estimate"], json!({"usd":"0.0025","partial":true}));
+        assert_eq!(direct["cached_input_tokens"]["tokens"], raw_read);
+        let tier = &direct["models"][0]["price"]["tiers"][0];
+        assert_eq!(tier["components"][1]["priced_requests"], 0);
+        assert_eq!(tier["components"][2]["priced_requests"], 0);
+        assert_eq!(tier["baseline_input"]["tokens"], "1000");
+        assert_eq!(
+            tier["notes"],
+            json!({"read_discount_unobserved":1, "write_adjustment_unobserved":1})
+        );
+        Ok(())
+    };
+    verify(&store, json!("0"))?;
+    store.rebuild_token_usage(&All)?;
+    verify(&store, json!("0"))?;
+    assert_eq!(raw(&store)?, original);
+
+    record.provider_counts = false;
+    record.event_id = "legacy-replay".into();
+    sync(&mut store, "runner", &[], std::slice::from_ref(&record))?;
+    verify(&store, Value::Null)?;
+
+    record.provider_counts = true;
+    record.event_id = "exact-replay".into();
+    sync(&mut store, "runner", &[], &[record])?;
+    let direct = view(&store, "root")?["direct"].clone();
+    assert_eq!(direct["estimate"], json!({"usd":"0.0025","partial":false}));
+    assert_eq!(
+        direct["models"][0]["price"]["tiers"][0]["components"][1]["priced_requests"],
+        1
+    );
+    store.rebuild_token_usage(&All)?;
+    assert_eq!(view(&store, "root")?["direct"], direct);
     Ok(())
 }
 

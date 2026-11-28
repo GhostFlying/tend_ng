@@ -434,6 +434,12 @@ export type TokenEstimate = {
   partial: boolean;
 };
 
+export type TokenPriceComponent = TokenField & {
+  usd_per_million: string | null;
+  priced_requests?: number;
+  estimate: TokenEstimate;
+};
+
 export type TokenModelRow = {
   model: string | null;
   response_model_requests: number;
@@ -460,13 +466,21 @@ export type TokenModelRow = {
     snapshot_date: string;
     long_input_above: number | null;
     unsupported: "utc_schedule" | "other_conditions" | null;
+    input_billing?: "hit_miss" | "included_write" | "separate_write";
     tiers: {
       tier: "standard" | "long" | "unknown" | "unsupported";
       requests: number;
-      components: (TokenField & {
-        usd_per_million: string | null;
-        estimate: TokenEstimate;
-      })[];
+      components: TokenPriceComponent[];
+      baseline_input?: TokenPriceComponent | null;
+      notes?: Partial<
+        Record<
+          | "read_discount_unobserved"
+          | "write_adjustment_unobserved"
+          | "conflicting_input"
+          | "unexpected_write",
+          number
+        >
+      >;
     }[];
   } | null;
 };

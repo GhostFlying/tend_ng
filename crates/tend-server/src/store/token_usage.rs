@@ -1,8 +1,8 @@
 pub(super) mod backfill;
 mod models;
 pub(super) mod overview;
+pub(super) mod pricing_migration;
 pub(super) mod rebuild;
-pub(super) mod selected_migration;
 pub(crate) mod system;
 
 use super::Store;

@@ -52,7 +52,7 @@ try {
     }
     const router = summaries.filter({ hasText: "主 Chat Router" });
     await router.getByText("1,727 Token", { exact: true }).waitFor();
-    await router.getByText("$0.00169", { exact: true }).waitFor();
+    await router.getByText("$0.008202", { exact: true }).waitFor();
     await router.click();
     const models = sources.getByRole("region", {
       name: "主 Chat Router · 模型明细",
@@ -60,8 +60,8 @@ try {
     await models.waitFor();
     assert.equal(await models.locator(".model-row").count(), 2);
     for (const [name, total, cost] of [
-      ["gpt-6.2-sol", "864 Token", "$0.000338"],
-      ["gpt-6.2-astra", "863 Token", "$0.001352"],
+      ["gpt-6.2-sol", "864 Token", "$0.001642"],
+      ["gpt-6.2-astra", "863 Token", "$0.00656"],
     ]) {
       const model = models
         .locator(".model-row > summary")

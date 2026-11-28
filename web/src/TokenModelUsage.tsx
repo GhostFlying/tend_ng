@@ -1,9 +1,15 @@
 import { useState } from "react";
-import type { TokenBreakdown, TokenEstimate, TokenModelRow } from "./api";
+import type {
+  TokenBreakdown,
+  TokenEstimate,
+  TokenModelRow,
+  TokenPriceComponent,
+} from "./api";
 import { fieldNote, format, tokens } from "./TokenUsageSummary";
 import "./token-model-usage.css";
 
 const feeComponents = [
+  [0, "普通输入"],
   [1, "缓存读取"],
   [2, "缓存写入"],
   [3, "输出"],
@@ -49,9 +55,6 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
   const explicit = row.request_level_selected_model_requests ?? 0;
   const turn = (row.selected_model_requests ?? 0) - explicit;
   const actual = row.response_model_requests;
-  const missingFresh = price?.tiers.some(
-    (tier) => tier.components[0].reported_requests < tier.requests,
-  );
   return (
     <div className="model-detail">
       {row.model !== null && (
@@ -102,59 +105,141 @@ function ModelDetails({ row }: { row: TokenModelRow }) {
                 : "快照包含未支持的覆盖条件，无法确认适用费率。"}
             </p>
           )}
-          {missingFresh && (
-            <p className="detail-muted">
-              缺少完整输入或缓存读写计量的请求，无法确定其非缓存输入费用。
-            </p>
-          )}
-          {price.tiers.map((tier) => (
-            <div className="model-rate-tier" key={tier.tier}>
-              <p>
-                {tier.tier === "long"
-                  ? "长上下文"
-                  : tier.tier === "unknown"
-                    ? "输入缺失 · 无法确认费率档"
-                    : tier.tier === "unsupported"
-                      ? "条件费率未估算"
-                      : "标准费率"}{" "}
-                <span className="detail-muted">
-                  · {format.format(tier.requests)} 条请求
-                </span>
-              </p>
-              <dl className="model-fee-items">
-                {feeComponents.map(([index, label]) => {
-                  const component = tier.components[index];
-                  return (
-                    <div key={label}>
-                      <dt>{label}</dt>
-                      <dd className="detail-muted">
-                        {component.usd_per_million === null
-                          ? "无适用单价"
-                          : `$${component.usd_per_million} / 百万 Token`}
-                      </dd>
-                      <dd>
-                        <bdi>{tokens(component)}</bdi> Token
-                      </dd>
-                      {fieldNote(component, {
-                        reported_requests: tier.requests,
-                      }) && (
-                        <dd className="detail-muted">
-                          {fieldNote(component, {
-                            reported_requests: tier.requests,
-                          })}
-                        </dd>
-                      )}
-                      <dd>
-                        <EstimateValue estimate={component.estimate} />
-                      </dd>
-                    </div>
-                  );
-                })}
-              </dl>
-            </div>
-          ))}
+          <p className="detail-muted">
+            {price.input_billing === "hit_miss"
+              ? "DeepSeek 按命中与未命中双价计算，不另计缓存写入。未上报 miss 时，由已知总输入减去 hit。"
+              : price.input_billing === "included_write"
+                ? "缓存写入已含在普通输入中，不单独收费。"
+                : "已知另计的缓存写入从普通输入中扣除，单独按写价估算。"}{" "}
+            推理是输出子集，不重复计费。
+          </p>
+          {!price.unsupported &&
+            price.tiers.map((tier) => {
+              const notes = tier.notes ?? {};
+              const writeRate = tier.components[2].usd_per_million;
+              const inputRate = tier.components[0].usd_per_million;
+              const writeAdjustment =
+                writeRate === null || inputRate === null
+                  ? "写入调整额未知"
+                  : Number(writeRate) > Number(inputRate)
+                    ? "可能有未计入的写入溢价"
+                    : Number(writeRate) < Number(inputRate)
+                      ? "基准可能高于按写价拆分后的金额"
+                      : "该档写价与普通输入价相同";
+              return (
+                <div className="model-rate-tier" key={tier.tier}>
+                  <p>
+                    {tier.tier === "long"
+                      ? "长上下文"
+                      : tier.tier === "unknown"
+                        ? "输入缺失 · 无法确认费率档"
+                        : "标准费率"}{" "}
+                    <span className="detail-muted">
+                      · {format.format(tier.requests)} 条请求
+                    </span>
+                  </p>
+                  {tier.baseline_input && (
+                    <p className="detail-muted">
+                      已知计价项扣除后，未细分的输入余额按普通输入价作基准。
+                      {notes.read_discount_unobserved !== undefined &&
+                        ` ${format.format(notes.read_discount_unobserved)} 条的缓存读折扣未观测。`}
+                      {notes.write_adjustment_unobserved !== undefined &&
+                        ` ${format.format(notes.write_adjustment_unobserved)} 条缺写入明细，${writeAdjustment}。`}
+                    </p>
+                  )}
+                  {notes.conflicting_input !== undefined && (
+                    <p className="detail-muted">
+                      {format.format(notes.conflicting_input)}{" "}
+                      条的输入分项与总量冲突。
+                      {price.input_billing === "hit_miss"
+                        ? "有明示 miss 时采用明示分项，不使用冲突的总量推导。"
+                        : "未估算这些请求的输入项。"}
+                    </p>
+                  )}
+                  {notes.unexpected_write !== undefined && (
+                    <p className="detail-muted">
+                      {format.format(notes.unexpected_write)}{" "}
+                      条带写入明细，原计量保留，不加收写入费。
+                    </p>
+                  )}
+                  <dl className="model-fee-items">
+                    {feeComponents.map(([index, label]) =>
+                      index === 2 &&
+                      (price.input_billing === "hit_miss" ||
+                        price.input_billing === "included_write") ? null : (
+                        <FeeItem
+                          key={label}
+                          label={
+                            price.input_billing === "hit_miss" && index === 0
+                              ? "未命中输入（miss）"
+                              : price.input_billing === "hit_miss" &&
+                                  index === 1
+                                ? "缓存读取（hit）"
+                                : label
+                          }
+                          component={tier.components[index]}
+                          requests={tier.requests}
+                        />
+                      ),
+                    )}
+                    {tier.baseline_input && (
+                      <FeeItem
+                        label="未细分输入（基准）"
+                        component={tier.baseline_input}
+                        requests={tier.requests}
+                      />
+                    )}
+                  </dl>
+                </div>
+              );
+            })}
         </>
       )}
+    </div>
+  );
+}
+
+function FeeItem({
+  label,
+  component,
+  requests,
+}: {
+  label: string;
+  component: TokenPriceComponent;
+  requests: number;
+}) {
+  const priced = component.priced_requests;
+  return (
+    <div>
+      <dt>{label}</dt>
+      <dd className="detail-muted">
+        {component.usd_per_million === null
+          ? "无适用单价"
+          : `$${component.usd_per_million} / 百万 Token`}
+      </dd>
+      <dd>
+        <bdi>{tokens(component)}</bdi> Token
+      </dd>
+      <dd className="detail-muted">
+        {priced !== undefined
+          ? `已计 ${format.format(priced)} / ${format.format(requests)} 条`
+          : (fieldNote(component, { reported_requests: requests }) ?? "")}
+      </dd>
+      {priced === 0 && (
+        <dd className="detail-muted">
+          {component.reported_requests === 0
+            ? "数量缺失或不可推导"
+            : "已知数量无适用费率"}
+        </dd>
+      )}
+      {priced !== undefined &&
+        priced > 0 &&
+        component.usd_per_million === null && (
+          <dd className="detail-muted">只计已知为零的数量，单价仍未知</dd>
+        )}
+      <dd>
+        <EstimateValue estimate={component.estimate} />
+      </dd>
     </div>
   );
 }
@@ -242,7 +327,8 @@ export function TokenModelUsage({
           </a>{" "}
           对已上报请求的 Token
           估算，不是实际账单。按执行时所选模型，能确认具体请求的实际型号时用该型号。
-          部分估算只计可确定的用量和费率，不含未采集的用量、工具费、平台费用及折扣。
+          费用计入有适用单价的分项，缓存明细不足时可能包含普通输入价基准。
+          展开查看各项覆盖和未计原因。不含未采集用量、工具费和平台费用。
         </p>
       )}
       {(usage.models?.length ?? 0) === 0 ? (

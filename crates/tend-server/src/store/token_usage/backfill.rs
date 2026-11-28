@@ -59,16 +59,20 @@ struct Evidence {
 }
 
 fn compatible(server: TokenCounts, native: TokenCounts) -> bool {
-    server
-        .fields()
-        .into_iter()
-        .zip(native.fields())
-        .enumerate()
-        .all(|(i, (server, native))| {
-            server.is_none()
-                || server == native
-                || (matches!(i, 2 | 3 | 5) && server == Some(0) && native.is_none())
-        })
+    let compatible_miss = server.cache_miss_input_tokens.is_none()
+        || native.cache_miss_input_tokens.is_none()
+        || server.cache_miss_input_tokens == native.cache_miss_input_tokens;
+    compatible_miss
+        && server
+            .fields()
+            .into_iter()
+            .zip(native.fields())
+            .enumerate()
+            .all(|(i, (server, native))| {
+                server.is_none()
+                    || server == native
+                    || (matches!(i, 2 | 3 | 5) && server == Some(0) && native.is_none())
+            })
 }
 
 fn same_usage(a: &NativeTokenRecord, b: &NativeTokenRecord) -> bool {
@@ -82,7 +86,16 @@ fn same_usage(a: &NativeTokenRecord, b: &NativeTokenRecord) -> bool {
             .filter(|variant| Some(*variant) != counts);
         (counts, record.invalid, variant)
     };
-    normalized(a) == normalized(b)
+    let same_counts = |left: Option<TokenCounts>, right: Option<TokenCounts>| match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            left.fields() == right.fields() && left.merge_known(right).is_some()
+        }
+        _ => false,
+    };
+    let (counts_a, invalid_a, variant_a) = normalized(a);
+    let (counts_b, invalid_b, variant_b) = normalized(b);
+    invalid_a == invalid_b && same_counts(counts_a, counts_b) && same_counts(variant_a, variant_b)
 }
 
 impl Evidence {
@@ -108,7 +121,15 @@ impl Evidence {
                     && self.server_provider_counts
                     && server.merge_known(native).is_some() =>
             {
-                ("compatible", Some(server))
+                (
+                    "compatible",
+                    Some(TokenCounts {
+                        cache_miss_input_tokens: server
+                            .cache_miss_input_tokens
+                            .or(native.cache_miss_input_tokens),
+                        ..server
+                    }),
+                )
             }
             (Some(native), _, Some(server), _)
                 if self.prior_native.is_none() && compatible(server, native) =>
@@ -119,7 +140,12 @@ impl Evidence {
                     } else {
                         "enriched"
                     },
-                    Some(native),
+                    Some(TokenCounts {
+                        cache_miss_input_tokens: native
+                            .cache_miss_input_tokens
+                            .or(server.cache_miss_input_tokens),
+                        ..native
+                    }),
                 )
             }
             (Some(native), _, _, PreferNative) => ("chose_native", Some(native)),
@@ -143,7 +169,9 @@ impl Evidence {
             model,
             provider_counts: decision != "chose_native"
                 && self.server_provider_counts
-                && self.server == Some(counts),
+                && self
+                    .server
+                    .is_some_and(|server| server.fields() == counts.fields()),
         }
     }
 
@@ -404,10 +432,11 @@ fn historical(
         return Ok("wrong_run");
     }
     let old = binding.as_ref().map(|(_, _, old)| old);
+    let same = old.is_some_and(|old| same_usage(&old.native, native));
     let mut evidence = match old {
         Some(old) => Evidence {
             native: native.clone(),
-            prior_native: if same_usage(&old.native, native) {
+            prior_native: if same {
                 old.prior_native.clone()
             } else {
                 Some(old.native.clone())
@@ -416,9 +445,7 @@ fn historical(
             server_conflict: old.server_conflict,
             server_model: old.server_model.clone(),
             server_provider_counts: old.server_provider_counts,
-            policy: if job.policy == TokenConflictPolicy::Quarantine
-                && same_usage(&old.native, native)
-            {
+            policy: if job.policy == TokenConflictPolicy::Quarantine && same {
                 old.policy
             } else {
                 job.policy
@@ -439,9 +466,21 @@ fn historical(
         },
     };
     if let Some(old) = old
-        && same_usage(&old.native, native)
+        && same
     {
         evidence.native.model = TokenModel::merge(old.native.model.clone(), native.model.clone());
+        // A compatible older reader omits explicit miss. It cannot erase
+        // direct miss evidence from a newer reader of the same request.
+        let keep_miss = |current: Option<TokenCounts>, previous: Option<TokenCounts>| {
+            current.map(|counts| TokenCounts {
+                cache_miss_input_tokens: counts
+                    .cache_miss_input_tokens
+                    .or(previous.and_then(|value| value.cache_miss_input_tokens)),
+                ..counts
+            })
+        };
+        evidence.native.counts = keep_miss(native.counts, old.native.counts);
+        evidence.native.variant = keep_miss(native.variant, old.native.variant);
     }
     let (decision, chosen) = evidence.decision();
     if decision != "compatible" && decision != "native_only"

@@ -2,6 +2,7 @@ import json
 import os
 import sqlite3
 import sys
+from provider_pricing import CASES as PRICING_CASES
 import time
 import uuid
 from pathlib import Path
@@ -33,6 +34,7 @@ PARK_ISSUE = "Park fixture Issue "
 PARK_FOREIGN_ISSUE = "Reject parking foreign fixture Issue "
 REGISTERED_REVIEW = "review Lynx MR !75573"
 DIRECT_CASES = {
+    **{prompt: (title, "implementation") for prompt, title in PRICING_CASES.items()},
     "Merge the example change and stop at remote main.": ("merge", "implementation"),
     "Merge the example change and wait for green CI on remote main.": ("ci", "implementation-economy"),
     "Coordinate two independent deliverables in example.": ("multi", "issue-router"),

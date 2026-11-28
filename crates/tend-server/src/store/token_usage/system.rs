@@ -7,7 +7,7 @@ use codex_app::usage::{Response, valid_native_id};
 use protocol::{RequestMeter, TokenCounts, TokenModel};
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
-use std::path::Path;
+use std::{collections::BTreeMap, path::Path};
 
 mod history;
 pub(crate) use history::spawn_history;
@@ -135,14 +135,16 @@ fn write(db: &Connection, source: &str, stats: &Stats) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn migrate_selections(
+pub(super) fn replace_model_projections(
     db: &Connection,
-    source: &str,
-    extra: &super::models::ModelProjection,
+    mut sources: BTreeMap<String, super::models::ModelProjection>,
 ) -> Result<()> {
-    let mut stats = read(db, source)?;
-    stats.summary.tally.model_usage.merge(extra, 1);
-    write(db, source, &stats)
+    for source in Source::ALL.map(Source::key) {
+        let mut stats = read(db, source)?;
+        stats.summary.tally.model_usage = sources.remove(source).unwrap_or_default();
+        write(db, source, &stats)?;
+    }
+    Ok(())
 }
 
 impl Store {
@@ -375,6 +377,25 @@ pub(super) fn agent_meter(
         .map_err(Into::into)
 }
 
+// Launch selection is a display fallback, not a second native observation.
+// Keep it out of request merges and out of corroboration of Issue evidence.
+pub(super) fn with_launch_model(
+    meter: &RequestMeter,
+    selected_model: Option<&str>,
+) -> Option<RequestMeter> {
+    if matches!(
+        meter.model.as_ref().map(TokenModel::basis),
+        None | Some(TokenModel::Unresolved)
+    ) && let Some(selected) = selected_model
+    {
+        return Some(RequestMeter {
+            model: Some(TokenModel::TurnContext(selected.to_owned())),
+            ..meter.clone()
+        });
+    }
+    None
+}
+
 fn count(
     stats: &mut Stats,
     meter: &RequestMeter,
@@ -393,23 +414,11 @@ fn count(
         model: Some(TokenModel::Unresolved),
         provider_counts: false,
     };
-    // Launch selection is a display fallback, not a second native observation.
-    // Keep it out of request merges and out of corroboration of Issue evidence.
-    let projected;
+    let projected = with_launch_model(meter, selected_model);
     let meter = if conflict {
         &unknown
-    } else if matches!(
-        meter.model.as_ref().map(TokenModel::basis),
-        None | Some(TokenModel::Unresolved)
-    ) && let Some(selected) = selected_model
-    {
-        projected = RequestMeter {
-            model: Some(TokenModel::TurnContext(selected.to_owned())),
-            ..meter.clone()
-        };
-        &projected
     } else {
-        meter
+        projected.as_ref().unwrap_or(meter)
     };
     stats.responses_without_usage += if meter.counts.missing() { sign } else { 0 };
     stats.summary.tally.count(meter, sign);
@@ -447,6 +456,7 @@ fn persist(
         return Ok(false);
     };
     let selected_model = selected_model.as_deref();
+    let meter = meter.normalized();
     let previous: Option<(String, Option<String>, bool)> = db.prepare_cached(
         "SELECT meter, conflict, shadowed FROM token_agent_requests WHERE thread=?1 AND turn=?2 AND response=?3"
     )?.query_row(params![thread, turn, response], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
@@ -457,7 +467,7 @@ fn persist(
     let meter = if let Some((old_raw, old_conflict, old_shadowed)) = previous {
         use protocol::TokenConflictPolicy::{PreferNative, PreferServer};
         let old: RequestMeter = serde_json::from_str(&old_raw)?;
-        let merged = old.merge(&meter);
+        let merged = old.clone().normalized().merge(&meter);
         let (next, disagreement) = match (merged, old_conflict, native_policy) {
             (_, Some(_), Some(PreferNative)) => (meter, None),
             (_, Some(_), Some(PreferServer)) => (old.clone(), None),
@@ -851,6 +861,77 @@ mod tests {
     }
 
     #[test]
+    fn pricing_migration_preserves_feishu_launch_fallback_and_replays_legacy_zeros() -> Result<()> {
+        let file = Fixture::new()?;
+        let path = file.file();
+        let store = Store::initialize(&path)?;
+        let home = path.with_file_name("feishu");
+        store.start_feishu_metering(
+            "assessment",
+            "thread",
+            &codex_app::ProcessIdentity {
+                pid: 1,
+                started_at: "fixture".into(),
+            },
+            &home,
+            "gpt-6.2-sol",
+        )?;
+        store.bind_feishu_metering("assessment", "turn")?;
+        let ingest = |s: &Store, hit: i64| {
+            s.record_agent_response(
+                "assessment",
+                "thread",
+                "turn",
+                Response {
+                    id: "response".into(),
+                    meter: RequestMeter {
+                        counts: TokenCounts::from_fields([1050, 1000, hit, 0, 50, 0].map(Some)),
+                        model: Some(TokenModel::Unresolved),
+                        provider_counts: true,
+                    },
+                },
+            );
+        };
+        ingest(&store, 0);
+        store.db.execute_batch(
+            "UPDATE token_agent_requests SET meter=json_remove(meter,'$.provider_counts');
+             PRAGMA user_version=51;",
+        )?;
+        let raw = |s: &Store| -> Result<String> {
+            Ok(s.db.query_row("SELECT meter FROM token_agent_requests", [], |r| r.get(0))?)
+        };
+        let original = raw(&store)?;
+        drop(store);
+        let store = Store::initialize(&path)?;
+        assert_eq!(raw(&store)?, original);
+        let page = root_page(&store)?;
+        let usage = &row(&page, "feishu")["usage"];
+        assert_eq!(usage["estimate"], json!({"usd":"0.0025","partial":true}));
+        assert_eq!(usage["models"][0]["model"], "gpt-6.2-sol");
+        assert_eq!(
+            usage["models"][0]["price"]["tiers"][0]["baseline_input"]["tokens"],
+            "1000"
+        );
+        assert_eq!(page["total"]["estimate"], usage["estimate"]);
+
+        // A true read count is compatible with the old placeholder zero.
+        // Subtract the old billing projection and add the exact new one.
+        ingest(&store, 500);
+        let page = root_page(&store)?;
+        let feishu = row(&page, "feishu");
+        let usage = &feishu["usage"];
+        assert_eq!(feishu["conflicts"], 0);
+        assert_eq!(usage["reported_requests"], 1);
+        assert_eq!(usage["estimate"], json!({"usd":"0.00155","partial":false}));
+        assert_eq!(
+            usage["models"][0]["price"]["tiers"][0]["components"][1]["priced_requests"],
+            1
+        );
+        assert_eq!(page["total"]["estimate"], usage["estimate"]);
+        Ok(())
+    }
+
+    #[test]
     fn feishu_native_turn_model_supersedes_launch_selection_in_both_arrival_orders() -> Result<()> {
         for live_first in [true, false] {
             let file = Fixture::new()?;
@@ -961,7 +1042,7 @@ mod tests {
         assert_eq!(router["shared_issue_responses"], 1);
         assert_eq!(router["conflicts"], 1);
         assert_eq!(router["usage"]["models"][0]["selected_model_requests"], 1);
-        assert_eq!(router["usage"]["estimate"]["usd"], "0.00002");
+        assert_eq!(router["usage"]["estimate"]["usd"], "0.000038");
         store.db.execute_batch(
             "UPDATE token_agent_rollups SET stats=json_remove(stats,'$.summary.tally.model_usage.selected')
              WHERE source='router';
@@ -1010,7 +1091,7 @@ mod tests {
                 std::slice::from_ref(&selected),
             )?;
             if !agent_first {
-                assert_eq!(root_page(&store)?["total"]["estimate"]["usd"], "0.000338");
+                assert_eq!(root_page(&store)?["total"]["estimate"]["usd"], "0.00164");
                 store
                     .db
                     .execute("UPDATE token_rebuild_state SET collecting=1", [])?;
@@ -1029,7 +1110,7 @@ mod tests {
             assert_eq!(row(&page, "router")["usage"]["reported_requests"], 0);
             assert_eq!(page["total"]["reported_requests"], 1);
             assert_eq!(page["total"]["models"][0]["model"], "gpt-6.2-astra");
-            assert_eq!(page["total"]["estimate"]["usd"], "0.001352");
+            assert_eq!(page["total"]["estimate"]["usd"], "0.00656");
             assert_eq!(page["issues"][0]["subtree"], page["total"]);
             assert_eq!(
                 store.db.query_row(
@@ -1059,7 +1140,7 @@ mod tests {
             store.record_agent_response("a", thread, turn, observed(900));
             let after = root_page(&store)?;
             assert_eq!(after["total"]["models"][0]["model"], "gpt-6.2-sol");
-            assert_eq!(after["total"]["estimate"]["usd"], "0.000338");
+            assert_eq!(after["total"]["estimate"]["usd"], "0.00164");
             assert_eq!(after["total"]["reported_requests"], 1);
             store.rebuild_token_usage(&protocol::TokenUsageScope::Issue("root".into()))?;
             assert_eq!(root_page(&store)?, after);
@@ -1095,7 +1176,7 @@ mod tests {
         let corrected = TokenModel::TurnContext("gpt-6.2-sol".into())
             .rechecked(protocol::ModelRepair::native(true, false));
         let page = rescan(corrected)?;
-        assert_eq!(page["total"]["estimate"]["usd"], "0.000338");
+        assert_eq!(page["total"]["estimate"]["usd"], "0.00164");
         assert_eq!(rescan(TokenModel::Ambiguous)?, page);
         assert!(rescan(TokenModel::TurnConflict)?["total"]["estimate"]["usd"].is_null());
         Ok(())

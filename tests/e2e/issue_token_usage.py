@@ -197,7 +197,7 @@ def test_tree(args):
             assert models["deepseek-v4.1-flash"]["uncached_input_tokens"]["tokens"] == "60000"
             assert models["gpt-6.2-astra"]["uncached_input_tokens"]["tokens"] == "9904"
             assert models["deepseek-v4.1-flash"]["total_tokens"]["tokens"] == "86000"
-            assert subtree["estimate"] == {"usd": "0.1353496", "partial": True}, models
+            assert subtree["estimate"] == {"usd": "0.1669656", "partial": True}, models
             assert {r["model"] for r in after_loss["direct"]["models"]} == {"gpt-6.2-sol", "gpt-6.2-astra"}
             nodes = {node["issue_id"]: node for node in after_loss["nodes"]}
             assert set(nodes) == {parent, metered, missing}

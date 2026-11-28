@@ -37,31 +37,12 @@ impl Response {
         ];
         let read = |value: &Value| value.as_i64().filter(|count| *count >= 0);
         let original = &params["usageMetadata"]["metadata"];
-        let provider_counts = original.is_object()
-            && ["total_tokens", "input_tokens", "output_tokens"]
-                .iter()
-                .any(|key| original.get(key).is_some());
-        let values = if provider_counts {
-            let input = &original["input_tokens_details"];
-            let output = &original["output_tokens_details"];
-            [
-                &original["total_tokens"],
-                &original["input_tokens"],
-                &input["cached_tokens"],
-                &input["cache_write_tokens"],
-                &original["output_tokens"],
-                &output["reasoning_tokens"],
-            ]
-            .map(read)
-        } else {
-            fields.map(|field| read(&params["usage"][field]))
-        };
-        let counts = TokenCounts::from_fields(values);
-        let counts = if provider_counts {
-            counts
-        } else {
-            counts.without_unproven_optional_zeros()
-        };
+        let original = provider_usage(original);
+        let provider_counts = original.is_some();
+        let counts = original.unwrap_or_else(|| {
+            TokenCounts::from_fields(fields.map(|field| read(&params["usage"][field])))
+                .without_unproven_optional_zeros()
+        });
         let model = request_model(&params["responseModel"], &params["requestedModel"]);
         Some(Self {
             id: id.to_owned(),
@@ -72,6 +53,49 @@ impl Response {
             },
         })
     }
+}
+
+fn provider_usage(usage: &Value) -> Option<TokenCounts> {
+    let responses = &usage["input_tokens_details"];
+    let chat = &usage["prompt_tokens_details"];
+    let read = |value: &Value| value.as_i64().filter(|&count| count >= 0);
+    let miss = read(&usage["prompt_cache_miss_tokens"]);
+    let hit = read(&usage["prompt_cache_hit_tokens"]);
+    // Stay within the inclusive Responses contract unless the metadata
+    // actually carries DeepSeek's Chat Completions usage fields.
+    let hit_miss = usage.get("prompt_cache_hit_tokens").is_some()
+        || usage.get("prompt_cache_miss_tokens").is_some();
+    if !hit_miss
+        && !["total_tokens", "input_tokens", "output_tokens"]
+            .iter()
+            .any(|key| usage.get(key).is_some())
+    {
+        return None;
+    }
+    Some(TokenCounts {
+        total_tokens: read(&usage["total_tokens"]),
+        input_tokens: read(&usage["input_tokens"])
+            .or_else(|| hit_miss.then(|| read(&usage["prompt_tokens"])).flatten()),
+        // Preserve the standard detail (including a real zero) when a
+        // provider or gateway emits both forms for the same response.
+        cached_input_tokens: read(&responses["cached_tokens"])
+            .or_else(|| read(&chat["cached_tokens"]))
+            .or(hit),
+        cache_write_input_tokens: read(&responses["cache_write_tokens"]),
+        output_tokens: read(&usage["output_tokens"]).or_else(|| {
+            hit_miss
+                .then(|| read(&usage["completion_tokens"]))
+                .flatten()
+        }),
+        reasoning_output_tokens: read(&usage["output_tokens_details"]["reasoning_tokens"]).or_else(
+            || {
+                hit_miss
+                    .then(|| read(&usage["completion_tokens_details"]["reasoning_tokens"]))
+                    .flatten()
+            },
+        ),
+        cache_miss_input_tokens: miss,
+    })
 }
 
 pub use protocol::valid_native_id;
@@ -564,8 +588,11 @@ fn snapshot(
             .ok_or(SourceCorrupt)?;
         let counts = serde_json::from_value::<TokenCounts>(payload["usage"].clone())
             .ok()
-            .map(|counts| {
+            .map(|mut counts| {
                 if legacy {
+                    // The old root-only reader's frozen snapshot format
+                    // predates this optional field.
+                    counts.cache_miss_input_tokens = None;
                     counts
                 } else {
                     counts.without_unproven_optional_zeros()
@@ -612,10 +639,17 @@ fn snapshot(
         if let Some(counts) = counts
             && record.counts != Some(counts)
         {
-            if record.counts.is_some() {
-                record.variant.get_or_insert(counts);
-            } else {
-                record.counts = Some(counts);
+            match record.counts {
+                Some(previous)
+                    if previous.fields() == counts.fields()
+                        && previous.merge_known(counts).is_some() =>
+                {
+                    record.counts = previous.merge_known(counts);
+                }
+                Some(_) => {
+                    record.variant.get_or_insert(counts);
+                }
+                None => record.counts = Some(counts),
             }
         }
     }
@@ -942,6 +976,87 @@ mod tests {
             Err(TokenSourceGap::SourceCorrupt)
         ));
         Ok(())
+    }
+
+    #[test]
+    fn deepseek_provider_metadata_keeps_miss_zero_and_missing_write_distinct() -> anyhow::Result<()>
+    {
+        let event = |metadata| {
+            json!({
+                "responseId": "response",
+                "responseModel": "deepseek-v4.1-flash",
+                "usage": {"cacheWriteInputTokens": 0},
+                "usageMetadata": {"metadata": metadata}
+            })
+        };
+        let response = Response::from_event(&event(json!({
+            "prompt_tokens":100, "prompt_cache_hit_tokens":100, "prompt_cache_miss_tokens":0,
+            "completion_tokens":12, "completion_tokens_details":{"reasoning_tokens":5}
+        })))
+        .unwrap();
+        let exact = response.meter;
+        assert!(exact.provider_counts);
+        assert_eq!(
+            exact.counts.fields(),
+            [None, Some(100), Some(100), None, Some(12), Some(5)]
+        );
+        assert_eq!(exact.counts.cache_miss_input_tokens, Some(0));
+        let mut no_miss = exact.clone();
+        no_miss.counts.cache_miss_input_tokens = None;
+        assert_eq!(exact.merge(&no_miss), Some(exact.clone()));
+        assert_eq!(no_miss.merge(&exact), Some(exact.clone()));
+
+        let mut native = record("thread", "turn", "response", 10, 10);
+        let legacy = format!("{native}\n");
+        native["payload"]["usage"]["prompt_cache_miss_tokens"] = json!(0);
+        let fixture = Fixture::new()?;
+        let path = fixture.0.join("native.jsonl");
+        fs::write(&path, format!("{legacy}{native}\n"))?;
+        let current = native_snapshot(File::open(&path)?, "thread", "turn", false).unwrap();
+        assert_eq!(current[0].counts.unwrap().cache_miss_input_tokens, Some(0));
+        assert!(current[0].variant.is_none());
+        let old = native_snapshot_legacy(File::open(&path)?, "thread", "turn", false).unwrap();
+        fs::write(&path, legacy)?;
+        assert_eq!(
+            old,
+            native_snapshot_legacy(File::open(&path)?, "thread", "turn", false).unwrap()
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn standard_cache_detail_wins_on_deepseek_replay_including_zero() {
+        let meter = |details| {
+            Response::from_event(&json!({
+                "responseId": "same-request",
+                "responseModel": "deepseek-v4.1-flash",
+                "usageMetadata": {"metadata": details}
+            }))
+            .unwrap()
+            .meter
+        };
+        let old = meter(json!({"input_tokens":100,"input_tokens_details":{"cached_tokens":70}}));
+        let new = meter(json!({
+            "input_tokens":100,"input_tokens_details":{"cached_tokens":70},
+            "prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":30
+        }));
+        assert_eq!(old.merge(&new), Some(new.clone()));
+        assert_eq!(new.merge(&old), Some(new.clone()));
+        assert_eq!(new.counts.cache_miss_input_tokens, Some(30));
+
+        for key in ["input_tokens_details", "prompt_tokens_details"] {
+            let mut details = json!({"input_tokens":100,"prompt_cache_hit_tokens":70});
+            details[key] = json!({"cached_tokens":0});
+            let conflicting = meter(details);
+            assert_eq!(conflicting.counts.cached_input_tokens, Some(0));
+            assert!(old.merge(&conflicting).is_none());
+        }
+        assert_eq!(
+            meter(json!({"prompt_tokens":100,"prompt_cache_hit_tokens":0}))
+                .counts
+                .cached_input_tokens,
+            Some(0)
+        );
     }
 
     #[test]

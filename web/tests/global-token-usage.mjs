@@ -169,7 +169,7 @@ try {
     );
     assert((await meteredRow.textContent()).includes("已观测全部 Run"));
     const overview = page.locator(".usage-overview .model-usage");
-    await overview.getByText("$0.1353496", { exact: true }).waitFor();
+    await overview.getByText("$0.1669656", { exact: true }).waitFor();
     const astra = overview
       .locator(".model-row > summary")
       .filter({ hasText: "gpt-6.2-astra" });

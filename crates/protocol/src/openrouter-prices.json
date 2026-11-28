@@ -4,6 +4,7 @@
     {
       "id": "deepseek/deepseek-v4.1-flash",
       "canonical_slug": "deepseek/deepseek-v4.1-flash-20260910",
+      "input_billing": "hit_miss",
       "standard": [
         140000,
         4200,
@@ -15,6 +16,7 @@
     {
       "id": "deepseek/deepseek-v4.1-flash-1017",
       "canonical_slug": "deepseek/deepseek-v4.1-flash-20261017",
+      "input_billing": "hit_miss",
       "standard": [
         null,
         null,
@@ -27,6 +29,7 @@
     {
       "id": "openai/gpt-5.3-codex",
       "canonical_slug": "openai/gpt-5.3-codex-20260224",
+      "input_billing": "included_write",
       "standard": [
         1750000,
         175000,
@@ -38,6 +41,7 @@
     {
       "id": "openai/gpt-5.4",
       "canonical_slug": "openai/gpt-5.4-20260305",
+      "input_billing": "included_write",
       "standard": [
         2500000,
         250000,
@@ -54,6 +58,7 @@
     {
       "id": "openai/gpt-5.4-mini",
       "canonical_slug": "openai/gpt-5.4-mini-20260317",
+      "input_billing": "included_write",
       "standard": [
         750000,
         75000,
@@ -65,6 +70,7 @@
     {
       "id": "openai/gpt-5.6-luna",
       "canonical_slug": "openai/gpt-5.6-luna-20260709",
+      "input_billing": "separate_write",
       "standard": [
         200000,
         20000,
@@ -81,6 +87,7 @@
     {
       "id": "openai/gpt-5.6-sol",
       "canonical_slug": "openai/gpt-5.6-sol-20260709",
+      "input_billing": "separate_write",
       "standard": [
         4000000,
         400000,
@@ -97,6 +104,7 @@
     {
       "id": "openai/gpt-5.6-terra",
       "canonical_slug": "openai/gpt-5.6-terra-20260709",
+      "input_billing": "separate_write",
       "standard": [
         2000000,
         200000,
@@ -113,6 +121,7 @@
     {
       "id": "openai/gpt-6-astra",
       "canonical_slug": "openai/gpt-6-astra-20260903",
+      "input_billing": "separate_write",
       "standard": [
         10000000,
         1000000,
@@ -129,6 +138,7 @@
     {
       "id": "openai/gpt-6-luna",
       "canonical_slug": "openai/gpt-6-luna-20260922",
+      "input_billing": "separate_write",
       "standard": [
         100000,
         10000,
@@ -145,6 +155,7 @@
     {
       "id": "openai/gpt-6-sol",
       "canonical_slug": "openai/gpt-6-sol-20260922",
+      "input_billing": "separate_write",
       "standard": [
         2000000,
         200000,
@@ -161,6 +172,7 @@
     {
       "id": "openai/gpt-6.1-sol",
       "canonical_slug": "openai/gpt-6.1-sol-20260929",
+      "input_billing": "separate_write",
       "standard": [
         2000000,
         100000,
@@ -177,6 +189,7 @@
     {
       "id": "openai/gpt-6.1-terra",
       "canonical_slug": "openai/gpt-6.1-terra-20261026",
+      "input_billing": "separate_write",
       "standard": [
         1000000,
         50000,
@@ -193,6 +206,7 @@
     {
       "id": "openai/gpt-6.2-astra",
       "canonical_slug": "openai/gpt-6.2-astra-20261117",
+      "input_billing": "separate_write",
       "standard": [
         8000000,
         400000,
@@ -209,6 +223,7 @@
     {
       "id": "openai/gpt-6.2-sol",
       "canonical_slug": "openai/gpt-6.2-sol-20261117",
+      "input_billing": "separate_write",
       "standard": [
         2000000,
         100000,

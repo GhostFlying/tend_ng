@@ -109,10 +109,10 @@ def run(args, root):
             assert set(models) == {"gpt-6.2-sol", "gpt-6.2-astra"}, router
             assert models["gpt-6.2-sol"]["selected_model_requests"] == 1
             assert models["gpt-6.2-astra"]["response_model_requests"] == 1
-            # Only the reported cache read and output can be priced here.
-            assert models["gpt-6.2-sol"]["estimate"] == {"usd": "0.000338", "partial": True}
-            assert models["gpt-6.2-astra"]["estimate"] == {"usd": "0.001352", "partial": True}
-            assert router["estimate"] == {"usd": "0.00169", "partial": True}
+            # The unclassified input remainder uses the ordinary input rate.
+            assert models["gpt-6.2-sol"]["estimate"] == {"usd": "0.001642", "partial": True}
+            assert models["gpt-6.2-astra"]["estimate"] == {"usd": "0.00656", "partial": True}
+            assert router["estimate"] == {"usd": "0.008202", "partial": True}
             if args.screenshots:
                 subprocess.run(
                     ["node", "tests/system-agent-token-usage.mjs", "2"],

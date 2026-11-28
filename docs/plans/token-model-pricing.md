@@ -12,7 +12,7 @@
 
 ## 价格口径
 
-取可精确匹配的 OpenRouter 模型公示标准价快照，并公开日期、对应模型标识、上下文档位及价格链接。按请求分非缓存输入、缓存读、缓存写和输出后，再归并档位小计。全局和 Issue 两页在模型行展示缓存读取、缓存写入和输出；非缓存输入仍参与估算，但不在模型行展示。推理输出已包含于输出。数据不足时只汇总确定的收费项，其余显式未知。只估算 Token，不计工具、平台费用或折扣，不代表历史或实际账单。
+取可精确匹配的 OpenRouter 模型公示标准价快照，并公开日期、对应模型标识、上下文档位及价格链接。按请求分非缓存输入、缓存读、缓存写和输出后，再归并档位小计。全局和 Issue 两页在模型行展示缓存读取、缓存写入和输出；非缓存输入仍参与估算，但不在模型行展示。推理输出已包含于输出。数据不足时按已知分项计价，部分 inclusive 输入另列普通输入价基准，其余显式未知。详见[供应商用量语义](provider-token-estimates.md)。只估算 Token，不计工具、平台费用或折扣，不代表历史或实际账单。
 
 ## 验证
 
@@ -22,12 +22,12 @@
 
 - Server schema 45 首次保存模型证据，schema 49 为已保存的请求模型重建缺失的模型小计，不改原始请求、Run 或覆盖分母。旧 Runner 保留对既有同回合证据的兼容。尚无证据的请求可用有原件权限的新版 Runner 运行 `tend token-usage backfill --all` 或定向选择器，不需先重建。旧的只读根回合扫描保持原有快照标识。若新版扫描对已有现代 Job 的原生证据得出不同前缀，按原 Job 语义报告源变化，用新 Job 重扫。
 - 各范围返回 `models` 和 `estimate`。逐响应确认和执行时所选的同一型号合为一行。OpenRouter 确切公开 ID、唯一短名和确切快照别名可以合并。模型行分别记录 `response_model_requests`、`selected_model_requests` 及后者中有具体请求证据的 `request_level_selected_model_requests`。出处在模型详情中显示；来源没有请求时显示无数据。未知模型不报价。
-- `estimate.usd` 是十进制美元字符串，`null` 表示没有可用估算。金额非空且 `partial` 为真时只合计能估算的部分。价格覆盖只针对已报告请求，不意味着整个 Run 用量完整。价格明细按档列适用的 Token 数、字段覆盖、美元/百万 Token 费率及对应参考金额。
-- 价格版本保存在 `openrouter-prices.json`。取自 2026-11-27 的 [OpenRouter Models API](https://openrouter.ai/api/v1/models) 标准公开费率，按精确公开 ID、唯一短名或确切快照型号匹配。无模糊、前缀、批量或相近模型降级。使用当前快照为历史请求做同口径对照，不回放当日价格。标准输入、缓存读取、缓存写入和输出四费率依次为每 Token 的皮美元（10⁻¹² 美元）。缺价保留空，不代表免费。对已报告且可证明为零的数量，费用为零。
+- `estimate.usd` 是十进制美元字符串，`null` 表示没有可用估算。金额非空且 `partial` 为真时包含可估算分项和已注明的普通输入价基准，或存在覆盖缺口。价格覆盖只针对已报告请求，不意味着整个 Run 用量完整。价格明细按档列适用的 Token 数、字段覆盖、美元/百万 Token 费率及对应参考金额。
+- 价格版本保存在 `openrouter-prices.json`。取自 2026-11-27 的 [OpenRouter Models API](https://openrouter.ai/api/v1/models) 标准公开费率，按精确公开 ID、唯一短名或确切快照型号匹配。无模糊、前缀、批量或相近模型降级。使用当前快照为历史请求做同口径对照，不回放当日价格。标准输入、缓存读取、缓存写入和输出四费率依次为每 Token 的皮美元（10⁻¹² 美元）。缺价保留空，不代表免费。快照的 `input_billing` 独立标明写入是另计、已含在普通输入，还是已按命中/未命中双价计费。对已报告且可证明为零的数量，费用为零。
 - 对有 `min_prompt_tokens: 272000` 覆盖条目的模型，总输入严格大于阈值时才按长上下文档，不能按 Issue 汇总输入判断。标准、长上下文和输入未知的可计费数量预聚合。缺少总输入时，合法缓存计数之和若已严格高于阈值，足以证明长档。无法确定档位时，明确上报的零和跨档相同的确定价格仍可纳入，其余标记未知。调整同档费率只需更新快照。若公示引入新分档或计算口径，应更新投影并明确重建，不能将不适用的费率视为标准费率。对有 UTC 时间表或未支持条件的快照项不套用顶层默认费率，明确展示不适用原因。本版本不支持 UTC 价档，特别不会拿回填入库时间冒充原请求时间。
 
 ## 缓存字段契约
 
 老 Tend 的 `CompactTokens` 与 `EstimateUsagePrice` 区分缓存读取、写入和输出，并在请求层扣除缓存项。本次模型行显示缓存读取、缓存写入和输出；非缓存输入（扣除读写）保留在用量数据与费用估算中，但不展示。未上报写入的行不显示写入格，明确上报 0 则显示 0。其他缺失项显示未知，有些请求提供则显示已知部分。
 
-只使用 Codex 归一后的 Responses 用量，不直接解释任意供应商原始字段。老 Tend 以供应商区分 Codex 的 `cache_write_input_tokens` 与 TraeX 的 `cache_creation_input_tokens`，本次只使用 Codex 方言，不跨方言推算。OpenAI 的缓存读和写是总输入中分开的收费项。[OpenAI Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) DeepSeek 的总输入等于 cache hit 加 miss，没有独立写入字段，不能把缺失或非零写入推测为免费。[DeepSeek API](https://api-docs.deepseek.com/api/create-chat-completion/) 对读写和超过总输入等不相容输入，不报价该请求的输入分项。输出独立计价，推理输出不再加价。
+使用 Codex 的 inclusive Responses 用量，并从请求绑定的供应商元数据接收 DeepSeek 明示 hit/miss。没有明示 miss 时，从总输入减去已知 hit。DeepSeek 不另计缓存写入。[DeepSeek API](https://api-docs.deepseek.com/api/create-chat-completion/) OpenAI 有另计写价的模型先扣除已知另计写入和缓存读取，剩余不细分时按普通输入率作为基准，有可能缺少读折扣或写溢价。已知写包含在普通输入的模型不扣写量。[OpenAI Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching) 对输入分项与总输入矛盾的请求，不使用残差计价。输出独立计价，推理输出不再加价。schema 52 从 Server 已持久请求重建派生计价缓存，不修改原始计量、身份或覆盖分母。
